@@ -4,22 +4,72 @@
 
 ### System audio loopback (native WASAPI)
 - Replaced failing browser-based loopback (`getDisplayMedia`, `chromeMediaSource: 'desktop'`, Stereo-Mix enumeration) with a native WASAPI capture path via `audify` / RtAudio
-- Audify runs in an isolated `utilityProcess.fork` child (`src/main/audify-worker.js`) so a native crash in the binding can't take down the main process
-- Worker computes per-frame RMS and pushes `{rms, deviceName}` over IPC to the renderer
-- Worker also sends the full output-device list on startup so the renderer can build a picker
+- audify runs in an isolated `utilityProcess.fork` child (`src/main/audify-worker.js`) so a native crash in the binding can't take down the main process
+- Worker computes per-frame RMS and pushes `{rms, deviceName}` over IPC to the renderer; also sends the full output-device list on startup
 - Heuristic skips known virtual cables (VB-Audio, Voicemeeter, NVIDIA Broadcast) when picking a default; OS default still wins if it's a real device
-- Click the device-name label in the bottom-left audio panel to open a dropdown picker; choice persists in `config.json` (`audioDeviceId`)
-- Env-var escape hatches: `DASH3D_DISABLE_AUDIFY=1` skips the worker entirely; `DASH3D_AUDIO_DEVICE_ID=<n>` overrides the picker
+- **Clickable device picker** on the system-audio panel label — dropdown lists every output device; selection persists in `config.json` (`audioDeviceId`)
+- Env-var escape hatches: `DASH3D_DISABLE_AUDIFY=1` skips the worker; `DASH3D_AUDIO_DEVICE_ID=<n>` overrides the picker
 
 ### Fix: silent launch crash after audify integration
 - Root cause: `npm install audify` running under Node ≥21 selected the `napi-v10` prebuilt binary, which crashed inside Electron 30 (Node 20 / N-API 9 max), taking down the main process before any error could surface
 - Fix: pinned audify to the `napi-v9` prebuild via a new `scripts/fix-audify-abi.js` `postinstall` hook (idempotent, leaves a `.napi-v9-installed` stamp)
 - Defensive: audify is now loaded in a child process so any future ABI mismatch only kills the worker, not the app
 
-### Build / launcher
-- `Dashboard.bat` now also copies `src/main/audify-worker.js` into the packaged folder
+### Audio visualizers (added before the loopback rework)
+- Two dedicated panels: `audioInViz` (mic, amber, bottom-right) and `audioOutViz` (system, accent/cyan, bottom-left)
+- Bar-grid visualization, drag-to-move, 4-corner resize, mute toggle
+- Position / size / mute state persisted to `config.json` per panel
+- Mute button raised above resize handle (z-index fix) so SW corner doesn't eat the click
+- Native loopback path (`NATIVE_LOOPBACK_BOUND`) bypasses all browser capture when IPC is available
 
-## [Unreleased] — May 2026
+### Chat — Ollama + Azure OpenAI
+- Local model chat via Ollama HTTP API (drop-down model selector)
+- Azure OpenAI online chat with **AUTO** config button — discovers endpoint/deployment via the user's Azure CLI session
+- Single visible model-selection control; endpoint / deployment / key fields hidden behind the AUTO flow
+- Each send injects a fresh system prompt with current date / time / timezone / both chrono cities so models stop saying "I don't have access to real-time information"
+- Ask + send controls slimmed 50% to free vertical room
+
+### Themes (15 total) + invert
+- 11 palettes: `default`, `azure`, `rose`, `ocean`, `pastel`, `meadow`, `citrus`, `neon`, `vaporwave`, `matrix`, `volt`
+- 4 cyberpunk palettes added in a follow-up pass
+- Top-bar theme-toggle button cycles through the list; invert button flips fg/bg luminance
+- Global gamma/black-level retuned twice (originally too dark, then too lifted, settled in the middle)
+
+### UI polish + animation
+- Per-element strobing replaces per-panel strobe — labels, bars, badges, and chrome each animate on different beats so the HUD feels alive without being seizure-inducing
+- Hover glow replaces the previous "wiggle on hover" interaction
+- Background simplified: orbital rings dropped, animated speckles dropped, faint pulsing grid + tick marks remain (matching the user's reference image)
+- Random per-section grid darkening so larger background grids breathe independently
+- Corner-bracket panel chrome (the three-slash decorations) removed for cleaner look
+- Brightness pulse softened by ~35% so dark phases stay legible
+
+### Collapse + layout
+- Notes panel and Chat panel are collapsible — when collapsed the body hides AND the empty grid cell goes away (no ghost outline)
+- Refresh (F5) no longer leaves blank space on the right; panels re-fill the grid
+- Resize from any side, not just SE corner
+- Move + scale supported on all 4 corners
+
+### System info breakdown
+- SYSTEM panel split into separate **CPU**, **GPU**, **RAM** sections instead of one stacked block
+- Memory & scratch-disk get their own logical-core-style bar grid
+- THERMAL panel relocated under STORAGE
+- CPU package temp fallback chain extended (still flaky on some boards — known issue)
+
+### Always-on-bottom hardening
+- Z-order demoted on `show` / `blur` / `focus` AND every 1s via a persistent PowerShell process so drag-drop / restore / app-switch can't shuffle the window above the taskbar
+- Persistent PowerShell shell drops per-call cost from ~300 ms to ~10 ms
+
+### Networking / iPad mode
+- Built-in HTTP server on **port 7373** in the main process — exposes `/api/system-info`, `/storage-info`, `/temps-info`, `/net-info`, `/disk-info`, `/screen-sources`, config GET/POST, etc.; serves `dist/` statically
+- Renderer detects browser-mode (`!window.dash`) and installs a fetch-based shim so the same `app.js` works in Safari on iPad
+- Auto-grants `media` / `audioCapture` / `videoCapture` / `display-capture` / `mediaKeySystem` via both request + check handlers
+
+### Build / launcher
+- `Dashboard.bat` rebuilt: kills any running `Dashboard3D.exe`, runs `npm run build`, xcopies `dist/` + `src/main/main.js` + `preload.js` + `audify-worker.js`, launches the exe
+- Pre-launch `taskkill /IM Dashboard3D.exe /F /T` so file handles release before xcopy (icudtl.dat lock fix)
+- F12 → toggle DevTools (`win.webContents.toggleDevTools()`) for diagnosing renderer errors in the borderless window
+
+## [0.1.0] — 2026-05-08 (initial commit)
 
 ### Project setup
 - Electron 30 + Vite 5 + Three.js r164 desktop app scaffolded at `E:\VSCODE\Dashboard3D`
