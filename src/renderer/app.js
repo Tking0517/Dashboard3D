@@ -1,81 +1,93 @@
-import * as THREE from 'three';
 import './styles.css';
 
-// ── Scene ────────────────────────────────────────────────────────────────────
-const canvas = document.querySelector('#scene');
-const renderer = new THREE.WebGLRenderer({
-  canvas,
-  antialias: true,
-  powerPreference: 'low-power',
+// ── Browser-mode shim ───────────────────────────────────────────────────────
+// When loaded outside Electron (iPad, phone, another laptop on the LAN), the
+// preload bridge isn't injected, so we install a fetch-backed equivalent that
+// hits the HTTP API the main process exposes. Window-only operations
+// (fullscreen, always-on-bottom IPC) become no-ops in this mode.
+const IS_ELECTRON = !!window.dash;
+if (!IS_ELECTRON) {
+  async function getJson(p) {
+    const r = await fetch(p);
+    if (!r.ok) throw new Error(`${p} ${r.status}`);
+    return r.json();
+  }
+  async function postJson(p, body) {
+    const r = await fetch(p, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${p} ${r.status}`);
+    return r.json();
+  }
+  window.dash = {
+    platform:         'browser',
+    systemInfo:       () => getJson('/api/system-info'),
+    storageInfo:      () => getJson('/api/storage-info'),
+    tempsInfo:        () => getJson('/api/temps-info'),
+    netInfo:          () => getJson('/api/net-info'),
+    diskInfo:         () => getJson('/api/disk-info'),
+    getConfig:        () => getJson('/api/config'),
+    setConfig:        (partial) => postJson('/api/config', partial),
+    configPath:       () => Promise.resolve('(server-side)'),
+    azureAutoConfig:  () => getJson('/api/azure-auto-config'),
+    getScreenSources: () => getJson('/api/screen-sources'),
+    toggleFullscreen: async () => {
+      // Use the browser's own fullscreen API as a best-effort.
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen?.();
+      return !!document.fullscreenElement;
+    },
+  };
+}
+
+// Background is now a pure CSS flat grid with a slow pulse animation —
+// no WebGL scene needed.
+
+// ── Background random-darkening overlay ─────────────────────────────────────
+// One <div> per major (200px) grid cell. Each cell schedules its own
+// independent timer to fade between 0 and a random dark opacity, giving the
+// background a roving "blinds-and-spotlights" feel.
+const BG_CELL = 200;
+const BG_OVERLAY = document.querySelector('#bg-grid-overlay');
+
+function buildBgCells() {
+  if (!BG_OVERLAY) return;
+  BG_OVERLAY.innerHTML = '';
+  const cols = Math.ceil(window.innerWidth  / BG_CELL) + 1;
+  const rows = Math.ceil(window.innerHeight / BG_CELL) + 1;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'bg-grid-cell';
+      cell.style.left = `${c * BG_CELL}px`;
+      cell.style.top  = `${r * BG_CELL}px`;
+      BG_OVERLAY.appendChild(cell);
+      scheduleBgCell(cell, true);
+    }
+  }
+}
+
+function scheduleBgCell(cell, immediate) {
+  const apply = () => {
+    if (!cell.isConnected) return;
+    const dark = Math.random() < 0.32;
+    cell.style.opacity = dark ? (0.2 + Math.random() * 0.5).toFixed(2) : '0';
+    scheduleBgCell(cell, false);
+  };
+  if (immediate) apply();
+  else setTimeout(apply, 1500 + Math.random() * 5000);
+}
+
+buildBgCells();
+
+// Rebuild on resize — only when the cell count would actually change.
+let _bgResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_bgResizeTimer);
+  _bgResizeTimer = setTimeout(buildBgCells, 200);
 });
-// Cap DPR — at 4K with DPR=2 the canvas is ~8M pixels per frame; 1.25 looks
-// nearly identical for an ambient background and roughly halves fragment work.
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
-renderer.setSize(window.innerWidth, window.innerHeight, false);
-
-const ACCENT_HEX = 0x5ccfff;
-
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000000);
-
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
-camera.position.set(0, 0, 7);
-
-// Starfield
-const starGeo = new THREE.BufferGeometry();
-const STAR_COUNT = 600;
-const starPositions = new Float32Array(STAR_COUNT * 3);
-for (let i = 0; i < STAR_COUNT; i++) {
-  const r = 40 + Math.random() * 60;
-  const theta = Math.random() * Math.PI * 2;
-  const phi = Math.acos(2 * Math.random() - 1);
-  starPositions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
-  starPositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-  starPositions[i * 3 + 2] = r * Math.cos(phi);
-}
-starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
-const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
-  color: 0x6e8aa3, size: 0.12, sizeAttenuation: true, transparent: true, opacity: 0.7,
-}));
-scene.add(stars);
-
-// Ground grid for depth
-const grid = new THREE.GridHelper(40, 20, ACCENT_HEX, 0x0e2230);
-grid.material.transparent = true;
-grid.material.opacity = 0.18;
-grid.position.y = -3.2;
-scene.add(grid);
-
-function onResize() {
-  const w = window.innerWidth, h = window.innerHeight;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}
-window.addEventListener('resize', onResize);
-
-// Pause WebGL work when the window is hidden (tab switch / minimize).
-let sceneHidden = false;
-document.addEventListener('visibilitychange', () => {
-  sceneHidden = document.visibilityState === 'hidden';
-});
-
-// Cap framerate at 3fps — ambient scene only, prioritize CPU/GPU for everything else.
-const TARGET_FRAME_MS = 1000 / 3;
-let lastFrameTs = 0;
-const clock = new THREE.Clock();
-
-function animate(now = 0) {
-  requestAnimationFrame(animate);
-  if (sceneHidden) { clock.getDelta(); return; }
-  if (now - lastFrameTs < TARGET_FRAME_MS) return;
-  lastFrameTs = now;
-
-  const dt = clock.getDelta();
-  stars.rotation.y += dt * 0.004;
-  renderer.render(scene, camera);
-}
-animate();
 
 // ── HUD: Clock ───────────────────────────────────────────────────────────────
 const clockTimeEl   = document.querySelector('#clock-time');
@@ -654,7 +666,12 @@ async function refreshTemps() {
     const t = await window.dash.tempsInfo();
     paintGpuPanel(t.gpus);
     paintTemp(tempCpuEl, tempCpuBarEl, t.cpu);
-    tempCpuNameEl.textContent = (t.cpu == null) ? 'NO SENSOR' : 'ACPI/SMBUS';
+    tempCpuNameEl.textContent = (t.cpu == null) ? 'NEEDS LHM/OHM' : 'ACPI/SMBUS';
+    if (tempCpuNameEl) {
+      tempCpuNameEl.title = (t.cpu == null)
+        ? 'CPU package temperature is not exposed by Windows. Install LibreHardwareMonitor or OpenHardwareMonitor and run it (admin) — this app reads its WMI namespace automatically.'
+        : '';
+    }
 
     const g0 = t.gpus?.[0];
     paintTemp(tempGpu0El, tempGpu0BarEl, g0?.temp);
@@ -961,6 +978,454 @@ weatherCityEl.addEventListener('keydown', (e) => {
   if (v) selectCity(v);
 });
 
+// ── Audio bar-grids (mic input + system output loopback) ────────────────────
+const AUDIO_BAR_COUNT = 24;
+const AUDIO_MIN_W = 100;
+const AUDIO_MIN_H = 40;
+
+function shortDeviceName(label, fallback) {
+  if (!label) return fallback || 'DEFAULT';
+  return label.replace(/\s*\([^)]*\)\s*$/, '').trim().toUpperCase().slice(0, 38);
+}
+
+// Factory: builds + manages a single audio visualizer (bars + drag/resize +
+// mute + persistence). Returns { sample(), setMuted(b), setLabel(s) }.
+function createAudioVisualizer({
+  gridEl, barsRowEl, muteBtnEl, deviceNameEl, posKey, sizeKey, mutedKey, fallbackLabel,
+}) {
+  const levels = new Array(AUDIO_BAR_COUNT).fill(0);
+  const bars = [];
+  let analyser = null;
+  let track = null;
+  let muted = false;
+
+  // Build bars
+  if (barsRowEl) {
+    barsRowEl.innerHTML = '';
+    for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'audio-bar';
+      const fill = document.createElement('div');
+      fill.className = 'audio-bar-fill';
+      bar.appendChild(fill);
+      barsRowEl.appendChild(bar);
+      bars.push(fill);
+    }
+  }
+
+  function setMuted(m) {
+    muted = !!m;
+    if (track) track.enabled = !muted;
+    gridEl?.classList.toggle('is-muted', muted);
+    if (muteBtnEl) muteBtnEl.textContent = muted ? 'X' : 'M';
+  }
+
+  function setAnalyserAndTrack(an, tr) {
+    analyser = an;
+    track = tr;
+    if (deviceNameEl) deviceNameEl.textContent = shortDeviceName(track?.label, fallbackLabel);
+    if (muted && track) track.enabled = false;
+  }
+
+  function setLabelOnly(text) {
+    if (deviceNameEl) deviceNameEl.textContent = text;
+  }
+  function getLabel() {
+    return deviceNameEl?.textContent || '';
+  }
+
+  function sample() {
+    if (!analyser || !bars.length) return;
+    const buf = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(buf);
+    let sumSq = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const v = (buf[i] - 128) / 128;
+      sumSq += v * v;
+    }
+    const rms = Math.sqrt(sumSq / buf.length);
+    pushLevel(Math.min(100, rms * 200));
+  }
+
+  // Direct level push — used when audio is driven by main-process IPC instead
+  // of a renderer-side AnalyserNode (the WASAPI loopback path).
+  function pushLevel(pct) {
+    if (!bars.length) return;
+    levels.push(pct);
+    levels.shift();
+    for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
+      bars[i].style.height = `${levels[i].toFixed(0)}%`;
+    }
+  }
+
+  // Drag-to-move
+  gridEl?.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.classList?.contains('audio-resize-handle')) return;
+    e.preventDefault();
+    const rect = gridEl.getBoundingClientRect();
+    const startX = e.clientX, startY = e.clientY;
+    const startLeft = rect.left, startTop = rect.top;
+    gridEl.classList.add('is-dragging');
+    gridEl.style.left = `${startLeft}px`;
+    gridEl.style.top  = `${startTop}px`;
+    gridEl.style.right  = 'auto';
+    gridEl.style.bottom = 'auto';
+    const onMove = (ev) => {
+      gridEl.style.left = `${startLeft + (ev.clientX - startX)}px`;
+      gridEl.style.top  = `${startTop  + (ev.clientY - startY)}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      gridEl.classList.remove('is-dragging');
+      saveGeom();
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // 4-corner resize
+  for (const corner of ['nw', 'ne', 'sw', 'se']) {
+    const h = document.createElement('div');
+    h.className = `audio-resize-handle audio-resize-${corner}`;
+    gridEl?.appendChild(h);
+    const grows = {
+      n: corner[0] === 'n', s: corner[0] === 's',
+      w: corner[1] === 'w', e: corner[1] === 'e',
+    };
+    h.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = gridEl.getBoundingClientRect();
+      const startX = e.clientX, startY = e.clientY;
+      const startW = rect.width, startH = rect.height;
+      const startLeft = rect.left, startTop = rect.top;
+      gridEl.classList.add('is-resizing');
+      gridEl.style.left = `${startLeft}px`;
+      gridEl.style.top  = `${startTop}px`;
+      gridEl.style.right  = 'auto';
+      gridEl.style.bottom = 'auto';
+      const onMove = (ev) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        let newW = startW, newH = startH, newLeft = startLeft, newTop = startTop;
+        if (grows.e) newW = startW + dx;
+        if (grows.w) { newW = startW - dx; newLeft = startLeft + dx; }
+        if (grows.s) newH = startH + dy;
+        if (grows.n) { newH = startH - dy; newTop = startTop + dy; }
+        if (newW < AUDIO_MIN_W) {
+          if (grows.w) newLeft = startLeft + (startW - AUDIO_MIN_W);
+          newW = AUDIO_MIN_W;
+        }
+        if (newH < AUDIO_MIN_H) {
+          if (grows.n) newTop = startTop + (startH - AUDIO_MIN_H);
+          newH = AUDIO_MIN_H;
+        }
+        gridEl.style.width  = `${Math.round(newW)}px`;
+        gridEl.style.height = `${Math.round(newH)}px`;
+        gridEl.style.left   = `${Math.round(newLeft)}px`;
+        gridEl.style.top    = `${Math.round(newTop)}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        gridEl.classList.remove('is-resizing');
+        saveGeom();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  // Mute click
+  muteBtnEl?.addEventListener('mousedown', (e) => e.stopPropagation());
+  muteBtnEl?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    setMuted(!muted);
+    if (window.dash?.setConfig) await window.dash.setConfig({ [mutedKey]: muted });
+  });
+
+  async function saveGeom() {
+    if (!window.dash?.setConfig || !gridEl) return;
+    const x = parseInt(gridEl.style.left, 10);
+    const y = parseInt(gridEl.style.top,  10);
+    const w = parseInt(gridEl.style.width,  10);
+    const h = parseInt(gridEl.style.height, 10);
+    const partial = {};
+    if (Number.isFinite(x) && Number.isFinite(y)) partial[posKey]  = { x, y };
+    if (Number.isFinite(w) && Number.isFinite(h)) partial[sizeKey] = { width: w, height: h };
+    if (Object.keys(partial).length) await window.dash.setConfig(partial);
+  }
+
+  function applySavedGeom(savedPos, savedSize, savedMuted) {
+    if (!gridEl) return;
+    if (savedPos) {
+      gridEl.style.left = `${savedPos.x}px`;
+      gridEl.style.top  = `${savedPos.y}px`;
+      gridEl.style.right  = 'auto';
+      gridEl.style.bottom = 'auto';
+    }
+    if (savedSize) {
+      gridEl.style.width  = `${savedSize.width}px`;
+      gridEl.style.height = `${savedSize.height}px`;
+    }
+    if (savedMuted) setMuted(true);
+  }
+
+  return { sample, pushLevel, setMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom };
+}
+
+const audioInViz = createAudioVisualizer({
+  gridEl:        document.querySelector('#audio-in-grid'),
+  barsRowEl:     document.querySelector('#audio-in-bars-row'),
+  muteBtnEl:     document.querySelector('#audio-in-mute-btn'),
+  deviceNameEl:  document.querySelector('#audio-in-device-name'),
+  posKey:        'audioInPos',
+  sizeKey:       'audioInSize',
+  mutedKey:      'audioInMuted',
+  fallbackLabel: 'DEFAULT MIC',
+});
+
+const audioOutViz = createAudioVisualizer({
+  gridEl:        document.querySelector('#audio-out-grid'),
+  barsRowEl:     document.querySelector('#audio-out-bars-row'),
+  muteBtnEl:     document.querySelector('#audio-out-mute-btn'),
+  deviceNameEl:  document.querySelector('#audio-out-device-name'),
+  posKey:        'audioOutPos',
+  sizeKey:       'audioOutSize',
+  mutedKey:      'audioOutMuted',
+  fallbackLabel: 'SYSTEM AUDIO',
+});
+
+// Native WASAPI loopback path: main process pushes RMS levels to us via IPC.
+// When this is wired up, we don't need any browser-side capture at all — the
+// main-process audify binding talks directly to WASAPI.
+const NATIVE_LOOPBACK_BOUND = !!(IS_ELECTRON && window.dash?.onAudioOutLevel);
+let _nativeReceivedFirst = false;
+let _audioDeviceList = [];
+if (NATIVE_LOOPBACK_BOUND) {
+  audioOutViz.setLabelOnly('NATIVE LOOPBACK · STARTING…');
+  window.dash.onAudioOutLevel((data) => {
+    if (data?.error) {
+      audioOutViz.setLabelOnly(`NATIVE FAIL · ${data.error}`.toUpperCase().slice(0, 60));
+      return;
+    }
+    if (Array.isArray(data?.devices)) {
+      _audioDeviceList = data.devices;
+      return;
+    }
+    if (data?.status === 'started' && data.deviceName) {
+      audioOutViz.setLabelOnly(shortDeviceName(data.deviceName, 'SYSTEM AUDIO'));
+      _nativeReceivedFirst = true;
+      return;
+    }
+    if (!_nativeReceivedFirst && data?.deviceName) {
+      audioOutViz.setLabelOnly(shortDeviceName(data.deviceName, 'SYSTEM AUDIO'));
+      _nativeReceivedFirst = true;
+    }
+    if (Number.isFinite(data?.rms)) {
+      audioOutViz.pushLevel(Math.min(100, data.rms * 200));
+    }
+  });
+
+  // Click the device-name label to pick which output to monitor. Useful when
+  // the OS default is a virtual cable (VB-Audio) but real audio is going to
+  // a headset / speakers.
+  const labelEl = document.querySelector('#audio-out-device-name');
+  if (labelEl) {
+    labelEl.style.cursor = 'pointer';
+    labelEl.title = 'Click to choose audio output to monitor';
+    labelEl.addEventListener('mousedown', (e) => e.stopPropagation());
+    labelEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!_audioDeviceList.length) return;
+      openAudioDevicePicker(labelEl, _audioDeviceList);
+    });
+  }
+}
+
+function openAudioDevicePicker(anchor, devices) {
+  document.querySelector('.audio-device-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.className = 'audio-device-menu';
+  for (const d of devices) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'audio-device-menu-item';
+    item.textContent = d.name + (d.isDefault ? '  ·  OS default' : '');
+    item.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      menu.remove();
+      audioOutViz.setLabelOnly(`SWITCHING · ${shortDeviceName(d.name, '')}`);
+      _nativeReceivedFirst = false;
+      try { await window.dash.setAudioDevice(d.id); } catch (err) {
+        audioOutViz.setLabelOnly(`SWITCH FAIL · ${err.message}`.toUpperCase().slice(0, 60));
+      }
+    });
+    menu.appendChild(item);
+  }
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = `${r.left}px`;
+  menu.style.bottom = `${window.innerHeight - r.top + 4}px`;
+  document.body.appendChild(menu);
+  const close = (ev) => {
+    if (!menu.contains(ev.target)) {
+      menu.remove();
+      document.removeEventListener('mousedown', close, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+}
+
+// Attempt to wire up the system-output analyser using the three-stage capture
+// chain. Returns true on success, false if all paths failed. Pulled out of
+// startAudioWaves so we can re-invoke it from a click after a permission /
+// user-activation failure.
+async function tryStartOutputCapture() {
+  // Main process is feeding us native WASAPI loopback over IPC — skip the
+  // browser-side capture entirely (which has been failing in this
+  // environment anyway).
+  if (NATIVE_LOOPBACK_BOUND) return true;
+
+  if (!IS_ELECTRON) {
+    audioOutViz.setLabelOnly('BROWSER · NO HOST LOOPBACK');
+    return false;
+  }
+  let stream, track, sourceLabel;
+  const captureErrors = [];
+
+  if (!track && window.dash?.getScreenSources) {
+    try {
+      const sources = await window.dash.getScreenSources();
+      if (!sources || !sources.length) throw new Error('no screen sources');
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { mandatory: { chromeMediaSource: 'desktop' } },
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sources[0].id,
+            maxWidth: 1, maxHeight: 1, maxFrameRate: 1,
+          },
+        },
+      });
+      stream.getVideoTracks().forEach(t => t.stop());
+      track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('stream had no audio track');
+      sourceLabel = `DESKTOP · ${sources[0].name || 'SCREEN'}`;
+    } catch (err) { captureErrors.push(`[1 desktop] ${err.message}`); }
+  }
+
+  if (!track) {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const inputs = devices.filter(d => d.kind === 'audioinput');
+      const patterns = [
+        /stereo\s*mix/i, /what\s*u\s*hear/i, /^\s*wave\s*out/i, /loopback/i,
+        /cable\s*output/i, /voicemeeter.*(out|output|vaio|b\d)/i, /vb-audio/i,
+      ];
+      let dev = null;
+      for (const p of patterns) {
+        dev = inputs.find(d => p.test(d.label || ''));
+        if (dev) break;
+      }
+      if (!dev) {
+        throw new Error(`no loopback device (have: ${inputs.map(d => d.label).filter(Boolean).slice(0, 3).join(', ') || 'unlabeled'})`);
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: dev.deviceId } },
+        video: false,
+      });
+      track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('stream had no audio track');
+      sourceLabel = dev.label;
+    } catch (err) { captureErrors.push(`[2 loopback-dev] ${err.message}`); }
+  }
+
+  if (!track) {
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        audio: true,
+        video: { width: 320, height: 180, frameRate: 1 },
+      });
+      stream.getVideoTracks().forEach(t => t.stop());
+      track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('stream had no audio track');
+      sourceLabel = track.label || 'SYSTEM AUDIO';
+    } catch (err) { captureErrors.push(`[3 getDisplayMedia] ${err.message}`); }
+  }
+
+  if (track) {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    const an  = ctx.createAnalyser();
+    an.fftSize = 1024;
+    an.smoothingTimeConstant = 0.3;
+    src.connect(an);
+    audioOutViz.setAnalyserAndTrack(an, track);
+    if (sourceLabel) audioOutViz.setLabelOnly(shortDeviceName(sourceLabel, 'SYSTEM AUDIO'));
+    return true;
+  }
+  console.error('All audio output capture paths failed:\n  ' + captureErrors.join('\n  '));
+  const last = captureErrors[captureErrors.length - 1] || 'unknown';
+  audioOutViz.setLabelOnly(last.toUpperCase().slice(0, 60));
+  return false;
+}
+
+// One-shot retry triggered by a user click, which gives Chromium the user
+// gesture some capture paths require even with permissions granted.
+function armOutputCaptureRetryOnClick() {
+  const retry = async () => {
+    document.removeEventListener('click', retry, true);
+    audioOutViz.setLabelOnly('RETRYING…');
+    const ok = await tryStartOutputCapture();
+    if (!ok) {
+      // Re-arm on next click so the user can try again after fixing whatever
+      // (eg. plugging in a device, enabling Stereo Mix, etc.).
+      audioOutViz.setLabelOnly('CLICK TO RETRY · ' + (audioOutViz.getLabel?.() || 'NO OUTPUT'));
+      document.addEventListener('click', retry, true);
+    }
+  };
+  document.addEventListener('click', retry, true);
+}
+
+async function startAudioWaves() {
+  // Mic — default input.
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    const an  = ctx.createAnalyser();
+    an.fftSize = 1024;
+    an.smoothingTimeConstant = 0.3;
+    src.connect(an);
+    audioInViz.setAnalyserAndTrack(an, stream.getAudioTracks()[0]);
+  } catch (err) {
+    audioInViz.setLabelOnly('NO MIC ACCESS');
+  }
+
+  // System OUTPUT capture — three-stage chain in tryStartOutputCapture(). If
+  // the auto attempt fails (often because Chromium wants a user gesture for
+  // getDisplayMedia even with permissions granted), arm a one-shot click
+  // retry so the user can tap to enable.
+  const ok = await tryStartOutputCapture();
+  if (!ok) armOutputCaptureRetryOnClick();
+
+  drawAudioFrame();
+}
+
+// Sample both visualizers every 4 frames so 24 bars cover ~1.5–1.6s of history.
+let _audioFrameCounter = 0;
+function drawAudioFrame() {
+  if ((_audioFrameCounter++ & 3) === 0) {
+    audioInViz.sample();
+    audioOutViz.sample();
+  }
+  requestAnimationFrame(drawAudioFrame);
+}
+startAudioWaves();
+
 // ── Notes (tabbed scratchpad) ───────────────────────────────────────────────
 const noteTabsEl      = document.querySelector('#note-tabs');
 const noteTextareaEl  = document.querySelector('#note-textarea');
@@ -1135,6 +1600,356 @@ function initNotes(cfg) {
   renderActiveNote();
   setNotesStatus('SAVED', 'ok');
 }
+
+// ── Chat — Ollama (local) + Azure OpenAI (cloud) ────────────────────────────
+const OLLAMA_URL = 'http://localhost:11434';
+const AZURE_DEFAULT_API_VERSION = '2024-10-21';
+
+const chatProviderEl  = document.querySelector('#chat-provider');
+const chatModelEl     = document.querySelector('#chat-model');
+const chatMessagesEl  = document.querySelector('#chat-messages');
+const chatInputEl     = document.querySelector('#chat-input');
+const chatSendBtn     = document.querySelector('#chat-send');
+const chatClearBtn    = document.querySelector('#chat-clear');
+const chatAutoBtn     = document.querySelector('#chat-auto');
+const chatTagEl       = document.querySelector('#chat-tag');
+const chatFooterEl    = document.querySelector('#chat-footer');
+const azureConfigEl   = document.querySelector('#chat-azure-config');
+const azureEndpointEl   = document.querySelector('#azure-endpoint');
+const azureDeploymentEl = document.querySelector('#azure-deployment');
+const azureVersionEl    = document.querySelector('#azure-version');
+const azureKeyEl        = document.querySelector('#azure-key');
+
+let chatHistory = [];          // [{ role: 'user'|'assistant', content }]
+let chatBusy = false;
+let chatAbort = null;
+let chatProvider = 'ollama';
+let azureConfigVisible = false;
+
+function setChatStatus(text, kind) {
+  if (!chatFooterEl) return;
+  const cls = kind || '';
+  chatFooterEl.innerHTML = `<em>STATE</em> <strong class="${cls}">${text}</strong>`;
+  chatFooterEl.className = 'footer-readout';
+}
+
+function renderMessages() {
+  if (!chatMessagesEl) return;
+  if (!chatHistory.length) {
+    chatMessagesEl.innerHTML = '<div class="chat-empty">CHAT IS EMPTY · TYPE BELOW TO START</div>';
+    return;
+  }
+  chatMessagesEl.innerHTML = '';
+  for (const msg of chatHistory) {
+    const div = document.createElement('div');
+    div.className = `chat-msg ${msg.role}`;
+    const role = document.createElement('span');
+    role.className = 'chat-msg-role';
+    role.textContent = msg.role === 'user' ? '▶ YOU' : '◆ ASSISTANT';
+    const content = document.createElement('div');
+    content.className = 'chat-msg-content';
+    content.textContent = msg.content || '…';
+    div.appendChild(role);
+    div.appendChild(content);
+    chatMessagesEl.appendChild(div);
+  }
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
+
+async function loadOllamaModels() {
+  if (!chatModelEl) return;
+  setChatStatus('CONNECTING…', 'amber');
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/tags`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const models = Array.isArray(data.models) ? data.models : [];
+    if (!models.length) {
+      chatModelEl.innerHTML = '<option value="">— NO MODELS —</option>';
+      chatTagEl.textContent = '00';
+      setChatStatus('NO MODELS · OLLAMA EMPTY', 'amber');
+      return;
+    }
+    chatModelEl.innerHTML = models
+      .map(m => `<option value="${escapeText(m.name)}">${escapeText(m.name).toUpperCase()}</option>`)
+      .join('');
+    chatTagEl.textContent = String(models.length).padStart(2, '0');
+    // Restore saved model selection if any
+    const cfg = (await window.dash?.getConfig?.()) || {};
+    if (cfg.chatModel && models.some(m => m.name === cfg.chatModel)) {
+      chatModelEl.value = cfg.chatModel;
+    }
+    setChatStatus('READY', 'ok');
+  } catch (err) {
+    chatModelEl.innerHTML = '<option value="">— OLLAMA OFFLINE —</option>';
+    chatTagEl.textContent = '!!';
+    setChatStatus(`OFFLINE · ${err.message}`.toUpperCase(), 'red');
+  }
+}
+
+function buildChatSystemPrompt() {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const lines = [
+    'You are a helpful assistant embedded in a desktop dashboard.',
+    `Today's local date and time is ${now.toLocaleString(undefined, {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+    })} (${tz}).`,
+    `ISO timestamp: ${now.toISOString()}.`,
+  ];
+  if (typeof activeLocation === 'object' && activeLocation?.name) {
+    const region = [activeLocation.admin1, activeLocation.country].filter(Boolean).join(', ');
+    lines.push(`Primary weather location: ${activeLocation.name}${region ? ', ' + region : ''}.`);
+  }
+  if (typeof altLocation === 'object' && altLocation?.name) {
+    lines.push(`Alt zone 1: ${altLocation.name} (${altLocation.timezone}).`);
+  }
+  if (typeof altLocation2 === 'object' && altLocation2?.name) {
+    lines.push(`Alt zone 2: ${altLocation2.name} (${altLocation2.timezone}).`);
+  }
+  lines.push('When the user asks about the current time, date, or weather location, use the values above directly — they are accurate.');
+  return lines.join('\n');
+}
+
+async function sendChat() {
+  if (chatBusy) return;
+  const prompt = chatInputEl.value.trim();
+  if (!prompt) return;
+
+  chatHistory.push({ role: 'user', content: prompt });
+  chatHistory.push({ role: 'assistant', content: '' });
+  chatInputEl.value = '';
+  chatBusy = true;
+  chatSendBtn.disabled = true;
+  setChatStatus('THINKING…', 'amber');
+  renderMessages();
+
+  chatAbort = new AbortController();
+  try {
+    const messages = [
+      { role: 'system', content: buildChatSystemPrompt() },
+      ...chatHistory.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+    ];
+    if (chatProvider === 'azure') {
+      await streamAzure(messages, chatAbort.signal);
+    } else {
+      await streamOllama(messages, chatAbort.signal);
+    }
+    setChatStatus('READY', 'ok');
+  } catch (err) {
+    chatHistory[chatHistory.length - 1].content += `\n[error: ${err.message}]`;
+    renderMessages();
+    setChatStatus(`ERROR · ${err.message}`.toUpperCase(), 'red');
+  } finally {
+    chatBusy = false;
+    chatSendBtn.disabled = false;
+    chatAbort = null;
+  }
+}
+
+// Ollama: NDJSON stream — one JSON object per line in res.body.
+async function streamOllama(messages, signal) {
+  const model = chatModelEl.value;
+  if (!model) throw new Error('SELECT A MODEL');
+  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages, stream: true }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.body) throw new Error('no stream');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.message?.content) {
+          chatHistory[chatHistory.length - 1].content += obj.message.content;
+          renderMessages();
+        }
+      } catch {}
+    }
+  }
+  if (window.dash?.setConfig) window.dash.setConfig({ chatModel: model });
+}
+
+// Azure OpenAI: SSE stream — `data: {json}\n\n` events; ends with `data: [DONE]`.
+async function streamAzure(messages, signal) {
+  const cfg = readAzureConfig();
+  if (!cfg.endpoint || !cfg.deployment || !cfg.key) {
+    throw new Error('AZURE NEEDS ENDPOINT, DEPLOYMENT, KEY');
+  }
+  const url = `${cfg.endpoint.replace(/\/$/, '')}/openai/deployments/${encodeURIComponent(cfg.deployment)}/chat/completions?api-version=${encodeURIComponent(cfg.apiVersion || AZURE_DEFAULT_API_VERSION)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': cfg.key,
+    },
+    body: JSON.stringify({ messages, stream: true }),
+    signal,
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} ${errText.slice(0, 80)}`);
+  }
+  if (!res.body) throw new Error('no stream');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const events = buf.split('\n\n');
+    buf = events.pop() || '';
+    for (const event of events) {
+      // each event line set may have multiple `data: ...` lines or comments
+      for (const line of event.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const obj = JSON.parse(data);
+          const delta = obj.choices?.[0]?.delta?.content;
+          if (delta) {
+            chatHistory[chatHistory.length - 1].content += delta;
+            renderMessages();
+          }
+        } catch {}
+      }
+    }
+  }
+}
+
+function readAzureConfig() {
+  return {
+    endpoint:   (azureEndpointEl?.value   || '').trim(),
+    deployment: (azureDeploymentEl?.value || '').trim(),
+    key:        (azureKeyEl?.value        || '').trim(),
+    apiVersion: (azureVersionEl?.value    || '').trim(),
+  };
+}
+
+async function saveAzureConfig() {
+  if (!window.dash?.setConfig) return;
+  await window.dash.setConfig({ azure: readAzureConfig() });
+}
+
+function applyProvider(p) {
+  chatProvider = p === 'azure' ? 'azure' : 'ollama';
+  if (chatProviderEl) chatProviderEl.value = chatProvider;
+  // Model dropdown only meaningful for Ollama; hide for Azure.
+  if (chatModelEl) chatModelEl.style.display = chatProvider === 'azure' ? 'none' : '';
+  // Azure config block is hidden by default; gear ⚙ toggles it.
+  if (azureConfigEl) {
+    azureConfigEl.hidden = !azureConfigVisible;
+  }
+}
+
+chatSendBtn?.addEventListener('click', sendChat);
+chatInputEl?.addEventListener('keydown', (e) => {
+  // Enter to send, Shift+Enter for newline
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+chatClearBtn?.addEventListener('click', () => {
+  if (chatAbort) chatAbort.abort();
+  chatHistory = [];
+  renderMessages();
+  setChatStatus('CLEARED', 'ok');
+});
+
+chatProviderEl?.addEventListener('change', async () => {
+  applyProvider(chatProviderEl.value);
+  if (window.dash?.setConfig) await window.dash.setConfig({ chatProvider });
+  if (chatProvider === 'ollama') {
+    await loadOllamaModels();
+  } else {
+    setChatStatus(readyAzure() ? 'READY' : 'CONFIGURE AZURE', readyAzure() ? 'ok' : 'amber');
+  }
+});
+
+chatAutoBtn?.addEventListener('click', async () => {
+  if (!window.dash?.azureAutoConfig) {
+    setChatStatus('AUTO REQUIRES APP RESTART · CLOSE EXE & RUN Dashboard.bat', 'red');
+    return;
+  }
+  setChatStatus('AUTO-CONFIG · QUERYING az CLI…', 'amber');
+  chatAutoBtn.disabled = true;
+  try {
+    const cfg = await window.dash.azureAutoConfig();
+    if (!cfg || cfg.error) {
+      setChatStatus(`AUTO FAILED · ${(cfg?.error || 'NO RESPONSE')}`.toUpperCase(), 'red');
+      return;
+    }
+    if (azureEndpointEl)   azureEndpointEl.value   = cfg.endpoint   || '';
+    if (azureDeploymentEl) azureDeploymentEl.value = cfg.deployment || '';
+    if (azureVersionEl)    azureVersionEl.value    = cfg.apiVersion || '';
+    if (azureKeyEl)        azureKeyEl.value        = cfg.key        || '';
+    await saveAzureConfig();
+
+    // Switch to Azure since we just configured it.
+    chatProviderEl.value = 'azure';
+    applyProvider('azure');
+    if (window.dash?.setConfig) await window.dash.setConfig({ chatProvider: 'azure' });
+
+    if (cfg.warning) {
+      setChatStatus(`PARTIAL · ${cfg.warning}`.toUpperCase(), 'amber');
+    } else {
+      setChatStatus(
+        `READY · ${cfg.resourceName || 'AZURE'} · ${cfg.deploymentCount} DEPLOY`.toUpperCase(),
+        'ok'
+      );
+    }
+  } catch (err) {
+    setChatStatus(`AUTO FAILED · ${err.message}`.toUpperCase(), 'red');
+  } finally {
+    chatAutoBtn.disabled = false;
+  }
+});
+
+// Save Azure fields on blur so they persist even if user doesn't switch providers.
+[azureEndpointEl, azureDeploymentEl, azureVersionEl, azureKeyEl].forEach(el => {
+  el?.addEventListener('change', () => saveAzureConfig());
+  el?.addEventListener('blur',   () => saveAzureConfig());
+});
+
+function readyAzure() {
+  const c = readAzureConfig();
+  return !!(c.endpoint && c.deployment && c.key);
+}
+
+function initChat(cfg) {
+  // Restore Azure config fields (so user doesn't have to retype every launch).
+  if (cfg?.azure) {
+    if (azureEndpointEl)   azureEndpointEl.value   = cfg.azure.endpoint   || '';
+    if (azureDeploymentEl) azureDeploymentEl.value = cfg.azure.deployment || '';
+    if (azureVersionEl)    azureVersionEl.value    = cfg.azure.apiVersion || '';
+    if (azureKeyEl)        azureKeyEl.value        = cfg.azure.key        || '';
+  }
+  applyProvider(cfg?.chatProvider || 'ollama');
+  if (chatProvider === 'ollama') {
+    loadOllamaModels();
+  } else {
+    setChatStatus(readyAzure() ? 'READY' : 'CONFIGURE AZURE', readyAzure() ? 'ok' : 'amber');
+    chatTagEl.textContent = readyAzure() ? 'AZ' : '!!';
+  }
+}
+
+renderMessages();
 
 // ── Panel resize (4 corner handles — both axes, anchor follows cursor) ─────
 const PANEL_MIN_W = 280;
@@ -1318,10 +2133,79 @@ function attachResize(panel) {
   makeResizeHandle(panel, key, 'se');
 }
 
-document.querySelectorAll('.panel').forEach(panel => {
+// Stagger the panel-pulse animation so panels don't all peak at the same time.
+const _allPanels = document.querySelectorAll('.panel');
+_allPanels.forEach((panel, i) => {
   attachResize(panel);
   attachDrag(panel);
+  // Negative delay shifts each panel's phase forward in the 8s cycle.
+  const phase = -(i * 8 / Math.max(1, _allPanels.length));
+  panel.style.animationDelay = `${phase.toFixed(2)}s`;
 });
+
+// Collapse chevrons for notes + chat panels.
+function attachCollapseButton(panel) {
+  const key = panelKey(panel);
+  const header = panel.querySelector('.panel-header');
+  if (!key || !header) return;
+  const btn = document.createElement('button');
+  btn.className = 'panel-collapse-btn';
+  btn.type = 'button';
+  btn.title = 'Collapse / expand';
+  btn.textContent = '▾';
+  // Stop drag from kicking in when clicking the chevron in the (draggable) header.
+  btn.addEventListener('mousedown', (e) => e.stopPropagation());
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    panel.classList.toggle('is-collapsed');
+    if (window.dash?.getConfig && window.dash?.setConfig) {
+      const cfg = await window.dash.getConfig();
+      const collapsed = { ...(cfg.collapsed || {}) };
+      collapsed[key] = panel.classList.contains('is-collapsed');
+      await window.dash.setConfig({ collapsed });
+    }
+  });
+  header.appendChild(btn);
+}
+
+document.querySelectorAll('.panel-notes, .panel-chat').forEach(attachCollapseButton);
+
+// Per-element strobe staggering — each meter/row/cell gets a random phase.
+const STROBE_SELECTOR =
+  '.meter, .time-row, .temp-row, .storage-row, .net-row, .gpu-mem-row, ' +
+  '.note-tab, .chat-msg, .weather-left, .weather-right';
+
+function randomStrobeDelay() {
+  return `-${(Math.random() * 7).toFixed(2)}s`;
+}
+
+function staggerStrobeAll(root = document) {
+  root.querySelectorAll(STROBE_SELECTOR).forEach(el => {
+    if (!el.dataset.strobed) {
+      el.style.animationDelay = randomStrobeDelay();
+      el.dataset.strobed = '1';
+    }
+  });
+}
+
+// Watch for dynamically-added strobe targets (storage rows, gpu mem rows,
+// chat messages, note tabs) and assign each a random phase.
+const _strobeObserver = new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    for (const node of m.addedNodes) {
+      if (node.nodeType !== 1) continue; // element only
+      if (node.matches?.(STROBE_SELECTOR)) {
+        node.style.animationDelay = randomStrobeDelay();
+        node.dataset.strobed = '1';
+      }
+      staggerStrobeAll(node);
+    }
+  }
+});
+_strobeObserver.observe(document.body, { childList: true, subtree: true });
+
+// Initial pass for everything already in the DOM.
+staggerStrobeAll();
 
 // ── Init from persistent config ──────────────────────────────────────────────
 (async function initFromConfig() {
@@ -1339,7 +2223,19 @@ document.querySelectorAll('.panel').forEach(panel => {
     }
   }
 
+  if (cfg?.theme) applyTheme(cfg.theme);
+  if (cfg?.invert) applyInvert(true);
+  audioInViz?.applySavedGeom(cfg?.audioInPos,  cfg?.audioInSize,  cfg?.audioInMuted);
+  audioOutViz?.applySavedGeom(cfg?.audioOutPos, cfg?.audioOutSize, cfg?.audioOutMuted);
+  if (cfg?.collapsed) {
+    for (const [k, v] of Object.entries(cfg.collapsed)) {
+      const panel = document.querySelector(`.panel-${k}`);
+      if (panel && v) panel.classList.add('is-collapsed');
+    }
+  }
+
   initNotes(cfg);
+  initChat(cfg);
 
   if (cfg?.altCity)  applyAltLocation(cfg.altCity);
   if (cfg?.altCity2) applyAltLocation2(cfg.altCity2);
@@ -1356,6 +2252,34 @@ document.querySelectorAll('.panel').forEach(panel => {
 // Refresh button — reloads the renderer (re-runs app.js, re-reads config).
 document.querySelector('#refresh-btn')?.addEventListener('click', () => {
   window.location.reload();
+});
+
+// Theme cycle (persists through config). null = default cyan/amber/red.
+const THEMES = [null, 'azure', 'rose', 'ocean', 'pastel', 'meadow', 'citrus', 'neon', 'vaporwave', 'matrix', 'volt'];
+
+function applyTheme(name) {
+  if (!name) document.documentElement.removeAttribute('data-theme');
+  else       document.documentElement.setAttribute('data-theme', name);
+}
+
+function applyInvert(on) {
+  document.body.classList.toggle('theme-invert', !!on);
+}
+
+document.querySelector('#theme-btn')?.addEventListener('click', async () => {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  const cur = cfg.theme ?? null;
+  const idx = THEMES.indexOf(cur);
+  const next = THEMES[(idx + 1) % THEMES.length];
+  applyTheme(next);
+  if (window.dash?.setConfig) await window.dash.setConfig({ theme: next });
+});
+
+document.querySelector('#invert-btn')?.addEventListener('click', async () => {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  const next = !cfg.invert;
+  applyInvert(next);
+  if (window.dash?.setConfig) await window.dash.setConfig({ invert: next });
 });
 
 // Keyboard shortcuts:

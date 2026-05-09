@@ -10,16 +10,49 @@
   </head>
   <body>
     <div id="app">
-      <canvas id="scene"></canvas>
+      <div class="bg-grid"></div>
+      <div class="bg-grid-overlay" id="bg-grid-overlay"></div>
 
-      <button id="refresh-btn" class="refresh-btn" type="button" title="Reload (F5)" aria-label="Reload">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 12a9 9 0 0 1 15.5-6.4"/>
-          <path d="M21 5v4h-4"/>
-          <path d="M21 12a9 9 0 0 1-15.5 6.4"/>
-          <path d="M3 19v-4h4"/>
-        </svg>
-      </button>
+      <div id="audio-out-grid" class="audio-grid audio-grid-out" title="Default output (system audio) — drag to move">
+        <div class="audio-bars-row" id="audio-out-bars-row"></div>
+        <div class="audio-meta-row">
+          <button id="audio-out-mute-btn" class="audio-mute-btn" type="button" title="Mute / unmute">M</button>
+          <span id="audio-out-device-name" class="audio-device-name">—</span>
+        </div>
+      </div>
+      <div id="audio-in-grid" class="audio-grid audio-grid-in" title="Default input (microphone) — drag to move">
+        <div class="audio-bars-row" id="audio-in-bars-row"></div>
+        <div class="audio-meta-row">
+          <button id="audio-in-mute-btn" class="audio-mute-btn" type="button" title="Mute / unmute">M</button>
+          <span id="audio-in-device-name" class="audio-device-name">—</span>
+        </div>
+      </div>
+
+      <div class="topbar-controls">
+        <button id="theme-btn" class="topbar-btn" type="button" title="Cycle theme" aria-label="Cycle theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6"  cy="12" r="3"/>
+            <circle cx="12" cy="12" r="3"/>
+            <circle cx="18" cy="12" r="3"/>
+          </svg>
+        </button>
+
+        <button id="refresh-btn" class="topbar-btn" type="button" title="Reload (F5)" aria-label="Reload">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 0 1 15.5-6.4"/>
+            <path d="M21 5v4h-4"/>
+            <path d="M21 12a9 9 0 0 1-15.5 6.4"/>
+            <path d="M3 19v-4h4"/>
+          </svg>
+        </button>
+
+        <button id="invert-btn" class="topbar-btn" type="button" title="Invert colors" aria-label="Invert colors">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 3 A 9 9 0 0 1 12 21 Z" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+      </div>
 
       <div class="hud">
 
@@ -190,81 +223,194 @@
         <!-- ── Middle row ──────────────────────────────────────── -->
         <div class="hud-row hud-row-mid">
 
-          <!-- System panel -->
-          <section class="panel panel-system">
+          <!-- CPU + GPU + RAM stacked -->
+          <div class="panel-stack panel-stack-system">
+
+            <!-- CPU panel -->
+            <section class="panel panel-cpu">
+              <header class="panel-header">
+                <span class="panel-title">CPU <em>C3</em></span>
+                <span class="panel-code">LOGICAL</span>
+                <span class="panel-id" id="sys-cores">—</span>
+              </header>
+              <div class="panel-body">
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">PROCESSORS</span>
+                    <span class="meter-value" id="sys-cores-value">—</span>
+                  </div>
+                  <div class="core-grid" id="core-grid"></div>
+                </div>
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">CPU LOAD</span>
+                    <span class="meter-value" id="sys-cpu-value">—%</span>
+                  </div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-cpu" id="sys-cpu-bar"></div></div>
+                </div>
+              </div>
+              <footer class="panel-footer">
+                <span class="footer-label">CORE STATUS</span>
+                <span class="footer-readout">
+                  <em>NUMBER IDENT</em>
+                  <strong id="sys-cores-ident">—</strong>
+                  <em class="amber">CODE</em>
+                  <strong class="amber">C3</strong>
+                  <em class="ok">ACT STATUS</em>
+                  <strong class="ok">OK</strong>
+                </span>
+              </footer>
+            </section>
+
+            <!-- GPU panel -->
+            <section class="panel panel-gpu">
+              <header class="panel-header">
+                <span class="panel-title">GPU <em>G2</em></span>
+                <span class="panel-code">GRAPHICS</span>
+                <span class="panel-id" id="sys-gpu-count-header">—</span>
+              </header>
+              <div class="panel-body">
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">GPU UTIL</span>
+                    <span class="meter-value" id="sys-gpu-count-value">—</span>
+                  </div>
+                  <div class="gpu-grid" id="gpu-grid"></div>
+                </div>
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">GPU MEMORY</span>
+                    <span class="meter-value" id="sys-gpu-mem-value">—</span>
+                  </div>
+                  <div class="gpu-mem-list" id="gpu-mem-list"></div>
+                </div>
+              </div>
+              <footer class="panel-footer">
+                <span class="footer-label">GPU STATUS</span>
+                <span class="footer-readout">
+                  <em>CODE</em>
+                  <strong class="amber">G2</strong>
+                  <em class="ok">ACT STATUS</em>
+                  <strong class="ok">OK</strong>
+                </span>
+              </footer>
+            </section>
+
+            <!-- RAM panel -->
+            <section class="panel panel-ram">
+              <header class="panel-header">
+                <span class="panel-title">RAM <em>R1</em></span>
+                <span class="panel-code">MEMORY</span>
+                <span class="panel-id" id="sys-mem-pct-header">—</span>
+              </header>
+              <div class="panel-body">
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">MEMORY</span>
+                    <span class="meter-value" id="sys-mem-value">—</span>
+                  </div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-mem" id="sys-mem-bar"></div></div>
+                </div>
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">MEM HISTORY · 60S</span>
+                    <span class="meter-value" id="sys-mem-hist-value">—</span>
+                  </div>
+                  <div class="core-grid" id="mem-hist-grid"></div>
+                </div>
+                <div class="meter">
+                  <div class="meter-head">
+                    <span class="meter-label">SCRATCH DISK</span>
+                    <span class="meter-value" id="sys-scratch-value">—</span>
+                  </div>
+                  <div class="scratch-grid" id="scratch-grid"></div>
+                </div>
+              </div>
+              <footer class="panel-footer">
+                <span class="footer-label">MEM STATUS</span>
+                <span class="footer-readout">
+                  <em>CODE</em>
+                  <strong class="amber">R1</strong>
+                  <em class="ok">ACT STATUS</em>
+                  <strong class="ok">OK</strong>
+                </span>
+              </footer>
+            </section>
+          </div>
+
+          <!-- Chat panel (Ollama) — middle of row 2 -->
+          <section class="panel panel-chat">
             <header class="panel-header">
-              <span class="panel-title">SYSTEM <em>C3</em></span>
-              <span class="panel-code">LOGICAL CPU</span>
-              <span class="panel-id" id="sys-cores">—</span>
+              <span class="panel-title">CHAT <em>X1</em></span>
+              <span class="panel-code">OLLAMA</span>
+              <span class="panel-id" id="chat-tag">—</span>
             </header>
-            <div class="panel-body system-body">
-
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">PROCESSORS</span>
-                  <span class="meter-value" id="sys-cores-value">—</span>
-                </div>
-                <div class="core-grid" id="core-grid"></div>
+            <div class="panel-body chat-body">
+              <div class="chat-toolbar">
+                <select id="chat-provider" class="chat-select chat-select-narrow">
+                  <option value="ollama">OLLAMA</option>
+                  <option value="azure">AZURE</option>
+                </select>
+                <select id="chat-model" class="chat-select">
+                  <option value="">— LOADING —</option>
+                </select>
+                <button id="chat-auto" class="chat-clear chat-auto" type="button" title="Auto-config Azure via az CLI">AUTO</button>
+                <button id="chat-clear" class="chat-clear" type="button" title="Clear chat">×</button>
               </div>
 
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">GPU UTIL</span>
-                  <span class="meter-value" id="sys-gpu-count-value">—</span>
+              <div class="chat-azure-config" id="chat-azure-config" hidden>
+                <input
+                  id="azure-endpoint"
+                  class="chat-input-line"
+                  type="text"
+                  placeholder="ENDPOINT · https://YOUR-RESOURCE.openai.azure.com"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <div class="chat-azure-row">
+                  <input
+                    id="azure-deployment"
+                    class="chat-input-line"
+                    type="text"
+                    placeholder="DEPLOYMENT NAME"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <input
+                    id="azure-version"
+                    class="chat-input-line chat-input-narrow"
+                    type="text"
+                    placeholder="API VERSION"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
                 </div>
-                <div class="gpu-grid" id="gpu-grid"></div>
+                <input
+                  id="azure-key"
+                  class="chat-input-line"
+                  type="password"
+                  placeholder="API KEY"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
               </div>
-
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">GPU MEMORY</span>
-                  <span class="meter-value" id="sys-gpu-mem-value">—</span>
-                </div>
-                <div class="gpu-mem-list" id="gpu-mem-list"></div>
+              <div class="chat-messages" id="chat-messages">
+                <div class="chat-empty">CHAT IS EMPTY · TYPE BELOW TO START</div>
               </div>
-
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">CPU LOAD</span>
-                  <span class="meter-value" id="sys-cpu-value">—%</span>
-                </div>
-                <div class="seg-bar"><div class="seg-bar-fill seg-cpu" id="sys-cpu-bar"></div></div>
-              </div>
-
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">MEMORY</span>
-                  <span class="meter-value" id="sys-mem-value">—</span>
-                </div>
-                <div class="seg-bar"><div class="seg-bar-fill seg-mem" id="sys-mem-bar"></div></div>
-              </div>
-
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">MEM HISTORY · 60S</span>
-                  <span class="meter-value" id="sys-mem-hist-value">—</span>
-                </div>
-                <div class="core-grid" id="mem-hist-grid"></div>
-              </div>
-
-              <div class="meter">
-                <div class="meter-head">
-                  <span class="meter-label">SCRATCH DISK</span>
-                  <span class="meter-value" id="sys-scratch-value">—</span>
-                </div>
-                <div class="scratch-grid" id="scratch-grid"></div>
+              <div class="chat-input-row">
+                <textarea
+                  id="chat-input"
+                  class="chat-input"
+                  placeholder="ASK ANYTHING…"
+                  spellcheck="false"
+                  rows="1"
+                ></textarea>
+                <button id="chat-send" class="chat-send" type="button">SEND</button>
               </div>
             </div>
             <footer class="panel-footer">
-              <span class="footer-label">CORE STATUS</span>
-              <span class="footer-readout">
-                <em>NUMBER IDENT</em>
-                <strong id="sys-cores-ident">—</strong>
-                <em class="amber">CODE</em>
-                <strong class="amber">C3</strong>
-                <em class="ok">ACT STATUS</em>
-                <strong class="ok">OK</strong>
-              </span>
+              <span class="footer-label">CHAT STATUS</span>
+              <span class="footer-readout" id="chat-footer">CONNECTING…</span>
             </footer>
           </section>
 

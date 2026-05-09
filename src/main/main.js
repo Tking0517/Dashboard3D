@@ -1,20 +1,39 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer, utilityProcess } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execFile } = require('child_process');
+const http = require('http');
+const { execFile, spawn, exec } = require('child_process');
 const si = require('systeminformation');
+
+// audify (native WASAPI loopback) is loaded in a utilityProcess child so a
+// native crash in the binding can't take down the main process. Set
+// DASH3D_DISABLE_AUDIFY=1 to skip starting the worker entirely.
+
+const HTTP_PORT = 7373;
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 
+function getWorkArea() {
+  // Primary display's work area = screen bounds minus taskbar reserve.
+  return screen.getPrimaryDisplay().workArea;
+}
+
 function createWindow() {
+  const wa = getWorkArea();
+
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    x: wa.x,
+    y: wa.y,
+    width: wa.width,
+    height: wa.height,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#000000',
-    fullscreen: true,
+    frame: false,
+    resizable: false,
+    movable: false,
+    skipTaskbar: false, // keep in taskbar so the user can click to bring it forward
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -24,53 +43,202 @@ function createWindow() {
 
   win.removeMenu();
 
+  // F12 → toggle DevTools (handy for diagnosing renderer errors when the
+  // window is borderless and can't be right-clicked).
+  win.webContents.on('before-input-event', (_event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') {
+      win.webContents.toggleDevTools();
+    }
+  });
+
   if (isDev) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     win.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'));
   }
 
-  // Always-on-bottom: demote to back of z-order when shown and whenever
-  // the window loses focus. User interaction (focus) brings it forward
-  // briefly so notes/inputs remain editable.
+  // Re-snap to work area whenever the OS reconfigures (e.g. taskbar autohide
+  // toggle, display change). Cheap and idempotent.
+  const reSnap = () => {
+    if (win.isDestroyed() || win.isFullScreen()) return;
+    const a = getWorkArea();
+    win.setBounds(a);
+  };
+  screen.on('display-metrics-changed', reSnap);
+  screen.on('display-added', reSnap);
+  screen.on('display-removed', reSnap);
+
+  // Always-on-bottom: demote on every focus AND blur AND on a periodic
+  // interval. Some Windows interactions (drag-drop, restore-from-minimize,
+  // app-switching) shuffle z-order without firing blur, so a 1s safety-net
+  // interval catches anything the events miss.
   win.once('ready-to-show', () => sendToBottom(win));
   win.on('show',  () => sendToBottom(win));
   win.on('blur',  () => sendToBottom(win));
+  win.on('focus', () => sendToBottom(win));
+
+  const _bottomInterval = setInterval(() => {
+    if (win.isDestroyed()) { clearInterval(_bottomInterval); return; }
+    sendToBottom(win);
+  }, 1000);
+
+  // Native WASAPI loopback for the default output device. Pushes per-frame
+  // RMS levels to the renderer over IPC ('audio-out-level').
+  win.webContents.once('did-finish-load', () => startWasapiLoopback(win));
+  win.on('closed', stopWasapiLoopback);
 }
 
-let _sendToBottomTimer = null;
+let _audioProc = null;
+let _audioWin = null;
+function startWasapiLoopback(win, deviceId = null) {
+  if (process.platform !== 'win32') return;
+  if (process.env.DASH3D_DISABLE_AUDIFY) return;
+  if (_audioProc) return;
+  _audioWin = win;
+
+  const workerPath = path.join(__dirname, 'audify-worker.js');
+  if (!fs.existsSync(workerPath)) {
+    console.warn('audify worker missing at', workerPath);
+    return;
+  }
+
+  // Persisted config takes precedence over the env-var override only if the
+  // env var isn't set, so DASH3D_AUDIO_DEVICE_ID is still an escape hatch.
+  let chosenId = deviceId;
+  if (chosenId == null && !process.env.DASH3D_AUDIO_DEVICE_ID) {
+    try { chosenId = readConfig()?.audioDeviceId ?? null; } catch {}
+  }
+
+  const env = { ...process.env };
+  if (chosenId != null) env.DASH3D_AUDIO_DEVICE_ID = String(chosenId);
+
+  try {
+    _audioProc = utilityProcess.fork(workerPath, [], {
+      stdio: 'pipe',
+      serviceName: 'dash3d-audify',
+      env,
+    });
+  } catch (err) {
+    console.error('utilityProcess.fork failed:', err.message);
+    _audioProc = null;
+    return;
+  }
+
+  _audioProc.stdout?.on('data', (b) => process.stdout.write(`[audify] ${b}`));
+  _audioProc.stderr?.on('data', (b) => process.stderr.write(`[audify] ${b}`));
+
+  _audioProc.on('message', (data) => {
+    if (data?.status === 'started') {
+      console.log(`WASAPI loopback started on "${data.deviceName}" (${data.sampleRate}Hz, ${data.channels}ch)`);
+    }
+    if (_audioWin && !_audioWin.isDestroyed()) {
+      _audioWin.webContents.send('audio-out-level', data);
+    }
+  });
+
+  _audioProc.on('exit', (code) => {
+    console.log('audify worker exited code', code);
+    if (_audioWin && !_audioWin.isDestroyed()) {
+      _audioWin.webContents.send('audio-out-level', { error: `worker exit ${code}` });
+    }
+    _audioProc = null;
+  });
+}
+
+function stopWasapiLoopback() {
+  if (!_audioProc) return;
+  try { _audioProc.postMessage('stop'); } catch {}
+  const p = _audioProc;
+  setTimeout(() => { try { p.kill(); } catch {} }, 200);
+  _audioProc = null;
+}
+
+function restartWasapiLoopback(win, deviceId) {
+  stopWasapiLoopback();
+  // Small gap so WASAPI fully releases the prior endpoint.
+  setTimeout(() => startWasapiLoopback(win, deviceId), 350);
+}
+
+// Persistent PowerShell process so every SetWindowPos call is ~10ms instead
+// of ~300ms (no cold-start per call). Spawned lazily on first use.
+let _psBg = null;
+function getBgShell() {
+  if (_psBg && !_psBg.killed && _psBg.exitCode == null) return _psBg;
+  _psBg = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', '-'],
+    { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }
+  );
+  _psBg.on('error', () => { _psBg = null; });
+  _psBg.on('exit',  () => { _psBg = null; });
+  // Define the SetWindowPos P/Invoke once for the life of this process.
+  _psBg.stdin.write(
+    `Add-Type -ErrorAction SilentlyContinue -MemberDefinition '` +
+      `[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);` +
+    `' -Name N -Namespace W;\r\n`
+  );
+  return _psBg;
+}
+
 function sendToBottom(win) {
   if (process.platform !== 'win32') return;
   if (!win || win.isDestroyed()) return;
-  // Debounce: rapid focus/blur churn could spawn multiple PowerShell processes.
-  clearTimeout(_sendToBottomTimer);
-  _sendToBottomTimer = setTimeout(() => {
-    if (win.isDestroyed()) return;
-    let hwnd;
-    try {
-      // HWND fits in 32 bits on Windows (even on x64).
-      hwnd = win.getNativeWindowHandle().readUInt32LE(0);
-    } catch {
-      return;
-    }
-    // SetWindowPos(hWnd, HWND_BOTTOM=1, 0, 0, 0, 0,
-    //              SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE = 0x0013)
-    const ps =
-      `Add-Type -ErrorAction SilentlyContinue -MemberDefinition '` +
-        `[DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);` +
-      `' -Name N -Namespace W; ` +
-      `[W.N]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]1, 0, 0, 0, 0, 0x13) | Out-Null`;
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', ps],
-      { windowsHide: true, timeout: 3000 },
-      () => {}
+  let hwnd;
+  try {
+    // HWND fits in 32 bits on Windows (even on x64).
+    hwnd = win.getNativeWindowHandle().readUInt32LE(0);
+  } catch {
+    return;
+  }
+  // SetWindowPos(hwnd, HWND_BOTTOM=1, 0, 0, 0, 0,
+  //              SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE = 0x0013)
+  const sh = getBgShell();
+  if (!sh || !sh.stdin || sh.stdin.destroyed) return;
+  try {
+    sh.stdin.write(
+      `[W.N]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]1, 0, 0, 0, 0, 0x13) | Out-Null\r\n`
     );
-  }, 80);
+  } catch {}
 }
 
+app.on('before-quit', () => {
+  stopWasapiLoopback();
+  if (_psBg && !_psBg.killed) {
+    try { _psBg.stdin.end(); } catch {}
+    try { _psBg.kill(); } catch {}
+    _psBg = null;
+  }
+});
+
 app.whenReady().then(() => {
+  // Auto-grant all media-related permissions so the renderer can call
+  // getUserMedia, getDisplayMedia, and the desktop-capture path without
+  // hitting permission prompts. Both the request handler (async) and the
+  // check handler (sync) need to allow these.
+  const ALLOWED_PERMS = new Set([
+    'media', 'audioCapture', 'videoCapture',
+    'display-capture', 'mediaKeySystem',
+  ]);
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(ALLOWED_PERMS.has(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+    return ALLOWED_PERMS.has(permission);
+  });
+
+  // System audio loopback without a screen-picker dialog.
+  // Renderer calls navigator.mediaDevices.getDisplayMedia({ audio: true,
+  // video: false }) and we substitute 'loopback' for the audio track.
+  if (typeof session.defaultSession.setDisplayMediaRequestHandler === 'function') {
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+      desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+        callback({ video: sources[0], audio: 'loopback' });
+      }).catch(() => callback({}));
+    });
+  }
+
   registerIpc();
+  startHttpServer();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -82,24 +250,7 @@ app.on('window-all-closed', () => {
 });
 
 function registerIpc() {
-  ipcMain.handle('system-info', () => {
-    const cpus = os.cpus();
-    const total = os.totalmem();
-    const free = os.freemem();
-    return {
-      hostname: os.hostname(),
-      platform: `${os.platform()} ${os.release()}`,
-      arch: os.arch(),
-      cpuModel: cpus[0]?.model?.trim() || 'unknown',
-      cpuCount: cpus.length,
-      cpuTimes: cpus.map(c => c.times),
-      totalMem: total,
-      freeMem: free,
-      usedMem: total - free,
-      uptime: os.uptime(),
-      loadavg: os.loadavg(),
-    };
-  });
+  ipcMain.handle('system-info',     () => getSystemInfo());
 
   ipcMain.handle('storage-info', async () => {
     return await getStorageInfo();
@@ -121,11 +272,29 @@ function registerIpc() {
   ipcMain.handle('config-set', (_e, partial) => writeConfig(partial));
   ipcMain.handle('config-path', () => configFilePath());
 
+  ipcMain.handle('get-screen-sources', () => getScreenSources());
+
+  ipcMain.handle('azure-auto-config', async () => {
+    return await azureAutoConfig();
+  });
+
+  ipcMain.handle('audio-set-device', async (e, deviceId) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return false;
+    try { writeConfig({ audioDeviceId: deviceId }); } catch {}
+    restartWasapiLoopback(win, deviceId);
+    return true;
+  });
+
   ipcMain.handle('toggle-fullscreen', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win) return false;
     const next = !win.isFullScreen();
     win.setFullScreen(next);
+    // When leaving fullscreen, snap back to the work area so the taskbar
+    // stays visible (the original "below everything but not over the taskbar"
+    // intent).
+    if (!next) win.setBounds(getWorkArea());
     return next;
   });
 }
@@ -160,6 +329,195 @@ function getDiskIo() {
       }
     );
   });
+}
+
+// Auto-discover Azure OpenAI config from the user's `az` CLI login.
+// Falls back gracefully with a clear error if `az` isn't installed or the
+// user isn't logged in.
+async function azureAutoConfig() {
+  function azCmd(args) {
+    return new Promise((resolve, reject) => {
+      exec(`az ${args}`, { windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (err) {
+            const msg = (stderr || err.message || '').toString();
+            if (err.code === 'ENOENT' || /not recognized|not found/i.test(msg)) {
+              return reject(new Error('Azure CLI not installed. Install from https://aka.ms/install-az-cli'));
+            }
+            if (/please run.*az login|run.*az login/i.test(msg)) {
+              return reject(new Error('Run: az login'));
+            }
+            return reject(new Error(msg.split('\n')[0].slice(0, 200) || 'az failed'));
+          }
+          resolve(stdout);
+        });
+    });
+  }
+
+  try {
+    const listJson = await azCmd(`cognitiveservices account list --query "[?kind=='OpenAI']" -o json`);
+    const resources = JSON.parse(listJson);
+    if (!Array.isArray(resources) || resources.length === 0) {
+      return { error: 'No Azure OpenAI resources in this subscription.' };
+    }
+    const r = resources[0];
+    const name = r.name;
+    const rg   = r.resourceGroup;
+    const endpoint = (r.properties?.endpoint || `https://${name}.openai.azure.com/`).replace(/\/+$/, '');
+
+    const keysJson = await azCmd(`cognitiveservices account keys list --name "${name}" --resource-group "${rg}" -o json`);
+    const keys = JSON.parse(keysJson);
+    const key = keys.key1 || keys.key2 || '';
+    if (!key) return { error: 'Could not retrieve API key.' };
+
+    const depJson = await azCmd(`cognitiveservices account deployment list --name "${name}" --resource-group "${rg}" -o json`);
+    const deployments = JSON.parse(depJson);
+    if (!Array.isArray(deployments) || deployments.length === 0) {
+      return {
+        endpoint, key, deployment: '', apiVersion: '2024-10-21',
+        resourceCount: resources.length, deploymentCount: 0,
+        warning: `Resource '${name}' has no deployments. Create one in the Azure portal.`,
+      };
+    }
+    // Prefer chat-capable deployments if any (heuristic: model name contains 'gpt')
+    const chatDep = deployments.find(d => /gpt/i.test(d.properties?.model?.name || d.name)) || deployments[0];
+    return {
+      endpoint,
+      deployment: chatDep.name,
+      key,
+      apiVersion: '2024-10-21',
+      resourceCount: resources.length,
+      deploymentCount: deployments.length,
+      resourceName: name,
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// ── LAN HTTP server ─────────────────────────────────────────────────────────
+// Exposes the same operations as the IPC handlers as JSON HTTP endpoints, and
+// serves the built dist/ as static files. Lets you load the dashboard on
+// another device (iPad, phone, laptop) at http://<LAN-IP>:7373.
+function startHttpServer() {
+  const distDir = path.join(__dirname, '..', '..', 'dist');
+  const STATIC_TYPES = {
+    '.html': 'text/html; charset=utf-8',
+    '.css':  'text/css; charset=utf-8',
+    '.js':   'application/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.png':  'image/png',
+    '.svg':  'image/svg+xml',
+    '.ico':  'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2':'font/woff2',
+    '.map':  'application/json',
+  };
+
+  function readBody(req) {
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
+    });
+  }
+
+  async function handleApi(route, req) {
+    if (route === '/api/system-info'      && req.method === 'GET') return getSystemInfo();
+    if (route === '/api/storage-info'     && req.method === 'GET') return await getStorageInfo();
+    if (route === '/api/temps-info'       && req.method === 'GET') return await getTempsInfo();
+    if (route === '/api/net-info'         && req.method === 'GET') return await getNetInfo();
+    if (route === '/api/disk-info'        && req.method === 'GET') return await getDiskIo();
+    if (route === '/api/screen-sources'   && req.method === 'GET') return await getScreenSources();
+    if (route === '/api/azure-auto-config'&& req.method === 'GET') return await azureAutoConfig();
+    if (route === '/api/config') {
+      if (req.method === 'GET')  return await readConfig();
+      if (req.method === 'POST') return await writeConfig(JSON.parse(await readBody(req) || '{}'));
+    }
+    const err = new Error(`unknown route ${req.method} ${route}`);
+    err.status = 404;
+    throw err;
+  }
+
+  function safeJoin(root, p) {
+    const out = path.join(root, p);
+    return out.startsWith(root) ? out : null;
+  }
+
+  async function serveStatic(req, res, route) {
+    let rel = decodeURIComponent(route);
+    if (rel === '/' || rel === '') rel = '/index.html';
+    const filePath = safeJoin(distDir, rel);
+    if (!filePath) { res.writeHead(403).end(); return; }
+    try {
+      const data = await fs.promises.readFile(filePath);
+      const type = STATIC_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
+      res.end(data);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not found');
+    }
+  }
+
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin',  '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') { res.writeHead(204).end(); return; }
+
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const route = url.pathname;
+
+    try {
+      if (route.startsWith('/api/')) {
+        const data = await handleApi(route, req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(data));
+        return;
+      }
+      await serveStatic(req, res, route);
+    } catch (err) {
+      const status = err.status || 500;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+  });
+
+  server.listen(HTTP_PORT, '0.0.0.0', () => {
+    console.log(`Dashboard HTTP server listening on 0.0.0.0:${HTTP_PORT}`);
+  });
+  server.on('error', (err) => {
+    console.warn(`HTTP server failed to bind ${HTTP_PORT}:`, err.message);
+  });
+}
+
+function getSystemInfo() {
+  const cpus = os.cpus();
+  const total = os.totalmem();
+  const free = os.freemem();
+  return {
+    hostname: os.hostname(),
+    platform: `${os.platform()} ${os.release()}`,
+    arch: os.arch(),
+    cpuModel: cpus[0]?.model?.trim() || 'unknown',
+    cpuCount: cpus.length,
+    cpuTimes: cpus.map(c => c.times),
+    totalMem: total,
+    freeMem: free,
+    usedMem: total - free,
+    uptime: os.uptime(),
+    loadavg: os.loadavg(),
+  };
+}
+
+async function getScreenSources() {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: 1, height: 1 },
+  });
+  return sources.map(s => ({ id: s.id, name: s.name, displayId: s.display_id }));
 }
 
 function configFilePath() {

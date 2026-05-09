@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0] — 2026-05-09
+
+### System audio loopback (native WASAPI)
+- Replaced failing browser-based loopback (`getDisplayMedia`, `chromeMediaSource: 'desktop'`, Stereo-Mix enumeration) with a native WASAPI capture path via `audify` / RtAudio
+- Audify runs in an isolated `utilityProcess.fork` child (`src/main/audify-worker.js`) so a native crash in the binding can't take down the main process
+- Worker computes per-frame RMS and pushes `{rms, deviceName}` over IPC to the renderer
+- Worker also sends the full output-device list on startup so the renderer can build a picker
+- Heuristic skips known virtual cables (VB-Audio, Voicemeeter, NVIDIA Broadcast) when picking a default; OS default still wins if it's a real device
+- Click the device-name label in the bottom-left audio panel to open a dropdown picker; choice persists in `config.json` (`audioDeviceId`)
+- Env-var escape hatches: `DASH3D_DISABLE_AUDIFY=1` skips the worker entirely; `DASH3D_AUDIO_DEVICE_ID=<n>` overrides the picker
+
+### Fix: silent launch crash after audify integration
+- Root cause: `npm install audify` running under Node ≥21 selected the `napi-v10` prebuilt binary, which crashed inside Electron 30 (Node 20 / N-API 9 max), taking down the main process before any error could surface
+- Fix: pinned audify to the `napi-v9` prebuild via a new `scripts/fix-audify-abi.js` `postinstall` hook (idempotent, leaves a `.napi-v9-installed` stamp)
+- Defensive: audify is now loaded in a child process so any future ABI mismatch only kills the worker, not the app
+
+### Build / launcher
+- `Dashboard.bat` now also copies `src/main/audify-worker.js` into the packaged folder
+
 ## [Unreleased] — May 2026
 
 ### Project setup
