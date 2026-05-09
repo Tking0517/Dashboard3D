@@ -1,0 +1,26 @@
+{
+  "name": "dashboard3d",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A 3D desktop dashboard with system info, storage, date/time, and weather (Open-Meteo).",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "start": "electron .",
+    "build": "vite build",
+    "package": "npm run build && electron-packager . \"Dashboard3D\" --platform=win32 --arch=x64 --out=. --overwrite --prune=true --asar=false",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "systeminformation": "^5.31.6",
+    "three": "^0.164.1"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^30.0.6",
+    "electron-packager": "^17.1.0",
+    "vite": "^5.2.11",
+    "wait-on": "^7.2.0"
+  }
+}

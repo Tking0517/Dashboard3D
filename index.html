@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard3D</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene"></canvas>
+
+      <button id="refresh-btn" class="refresh-btn" type="button" title="Reload (F5)" aria-label="Reload">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 0 1 15.5-6.4"/>
+          <path d="M21 5v4h-4"/>
+          <path d="M21 12a9 9 0 0 1-15.5 6.4"/>
+          <path d="M3 19v-4h4"/>
+        </svg>
+      </button>
+
+      <div class="hud">
+
+        <!-- ── Top row ─────────────────────────────────────────── -->
+        <div class="hud-row hud-row-top">
+
+          <!-- Clock panel -->
+          <section class="panel panel-clock">
+            <header class="panel-header">
+              <span class="panel-title">CHRONO <em>A1</em></span>
+              <span class="panel-code">DUAL ZONE</span>
+              <span class="panel-id" id="clock-doy-header">—</span>
+            </header>
+            <div class="panel-body clock-body">
+
+              <div class="time-row">
+                <div class="time-meta">
+                  <span class="micro-label">LOCAL</span>
+                  <span class="micro-val accent" id="clock-tz">—</span>
+                </div>
+                <div class="bigvalue bigvalue-primary">
+                  <span class="caret">&#9656;</span>
+                  <span class="bigvalue-num" id="clock-time">--:--:--</span>
+                  <span class="bigvalue-unit" id="clock-ampm">--</span>
+                </div>
+              </div>
+
+              <div class="time-row">
+                <div class="time-meta">
+                  <span class="micro-label">ALT ZONE 1</span>
+                  <span class="micro-val accent" id="alt-name">—</span>
+                  <span class="micro-label" id="alt-tz">—</span>
+                </div>
+                <div class="bigvalue bigvalue-secondary">
+                  <span class="caret">&#9656;</span>
+                  <span class="bigvalue-num" id="alt-time">--:--:--</span>
+                  <span class="bigvalue-unit" id="alt-ampm">--</span>
+                </div>
+              </div>
+
+              <div class="alt-city-row">
+                <label class="micro-label">ALT 1 CITY</label>
+                <input
+                  id="alt-city-input"
+                  class="weather-city"
+                  type="text"
+                  placeholder="ENTER CITY · ENTER"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </div>
+
+              <div class="time-row">
+                <div class="time-meta">
+                  <span class="micro-label">ALT ZONE 2</span>
+                  <span class="micro-val accent" id="alt2-name">—</span>
+                  <span class="micro-label" id="alt2-tz">—</span>
+                </div>
+                <div class="bigvalue bigvalue-secondary">
+                  <span class="caret">&#9656;</span>
+                  <span class="bigvalue-num" id="alt2-time">--:--:--</span>
+                  <span class="bigvalue-unit" id="alt2-ampm">--</span>
+                </div>
+              </div>
+
+              <div class="alt-city-row">
+                <label class="micro-label">ALT 2 CITY</label>
+                <input
+                  id="alt2-city-input"
+                  class="weather-city"
+                  type="text"
+                  placeholder="ENTER CITY · ENTER"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </div>
+
+              <div class="micro-grid">
+                <div class="micro-cell">
+                  <span class="micro-label">DATE</span>
+                  <span class="micro-val" id="clock-date">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">DAY CODE</span>
+                  <span class="micro-val amber" id="clock-doy">—</span>
+                </div>
+              </div>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">CHRONO STATUS</span>
+              <span class="footer-readout">
+                <em>NUMBER IDENT</em>
+                <strong id="clock-ident">—</strong>
+                <em class="amber">CODE</em>
+                <strong class="amber">A1</strong>
+                <em class="ok">ACT STATUS</em>
+                <strong class="ok">OK</strong>
+              </span>
+            </footer>
+          </section>
+
+          <!-- Notes panel (tabbed scratchpad) -->
+          <section class="panel panel-notes">
+            <header class="panel-header">
+              <span class="panel-title">NOTES <em>N1</em></span>
+              <span class="panel-code">SCRATCHPAD</span>
+              <span class="panel-id" id="notes-tab-count">—</span>
+            </header>
+            <div class="panel-body notes-body">
+              <div class="note-tabs" id="note-tabs"></div>
+              <textarea
+                id="note-textarea"
+                class="note-textarea"
+                spellcheck="false"
+                placeholder="START TYPING…"
+              ></textarea>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">NOTES STATUS</span>
+              <span class="footer-readout" id="notes-status">—</span>
+            </footer>
+          </section>
+
+          <!-- Weather panel -->
+          <section class="panel panel-weather">
+            <header class="panel-header">
+              <span class="panel-title">METEO <em>B2</em></span>
+              <span class="panel-code">OPEN-METEO</span>
+              <span class="panel-id" id="weather-pid">—</span>
+            </header>
+            <div class="panel-body weather-body">
+              <div class="weather-left">
+                <div class="bigvalue">
+                  <span class="caret">&#9656;</span>
+                  <span class="bigvalue-num" id="weather-temp">—</span>
+                  <span class="bigvalue-unit">&deg;F</span>
+                </div>
+                <div class="weather-cond" id="weather-cond">—</div>
+              </div>
+              <div class="weather-right">
+                <label class="micro-label">CITY</label>
+                <input
+                  id="weather-city"
+                  class="weather-city"
+                  type="text"
+                  placeholder="ENTER CITY…"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <div class="micro-cell">
+                  <span class="micro-label">LOCATION</span>
+                  <span class="micro-val accent" id="weather-loc">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">DETAIL</span>
+                  <span class="micro-val" id="weather-detail">—</span>
+                </div>
+              </div>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">METEO STATUS</span>
+              <span class="footer-readout" id="weather-status">STANDBY</span>
+            </footer>
+          </section>
+
+        </div>
+
+        <!-- ── Middle row ──────────────────────────────────────── -->
+        <div class="hud-row hud-row-mid">
+
+          <!-- System panel -->
+          <section class="panel panel-system">
+            <header class="panel-header">
+              <span class="panel-title">SYSTEM <em>C3</em></span>
+              <span class="panel-code">LOGICAL CPU</span>
+              <span class="panel-id" id="sys-cores">—</span>
+            </header>
+            <div class="panel-body system-body">
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">PROCESSORS</span>
+                  <span class="meter-value" id="sys-cores-value">—</span>
+                </div>
+                <div class="core-grid" id="core-grid"></div>
+              </div>
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">GPU UTIL</span>
+                  <span class="meter-value" id="sys-gpu-count-value">—</span>
+                </div>
+                <div class="gpu-grid" id="gpu-grid"></div>
+              </div>
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">GPU MEMORY</span>
+                  <span class="meter-value" id="sys-gpu-mem-value">—</span>
+                </div>
+                <div class="gpu-mem-list" id="gpu-mem-list"></div>
+              </div>
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">CPU LOAD</span>
+                  <span class="meter-value" id="sys-cpu-value">—%</span>
+                </div>
+                <div class="seg-bar"><div class="seg-bar-fill seg-cpu" id="sys-cpu-bar"></div></div>
+              </div>
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">MEMORY</span>
+                  <span class="meter-value" id="sys-mem-value">—</span>
+                </div>
+                <div class="seg-bar"><div class="seg-bar-fill seg-mem" id="sys-mem-bar"></div></div>
+              </div>
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">MEM HISTORY · 60S</span>
+                  <span class="meter-value" id="sys-mem-hist-value">—</span>
+                </div>
+                <div class="core-grid" id="mem-hist-grid"></div>
+              </div>
+
+              <div class="meter">
+                <div class="meter-head">
+                  <span class="meter-label">SCRATCH DISK</span>
+                  <span class="meter-value" id="sys-scratch-value">—</span>
+                </div>
+                <div class="scratch-grid" id="scratch-grid"></div>
+              </div>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">CORE STATUS</span>
+              <span class="footer-readout">
+                <em>NUMBER IDENT</em>
+                <strong id="sys-cores-ident">—</strong>
+                <em class="amber">CODE</em>
+                <strong class="amber">C3</strong>
+                <em class="ok">ACT STATUS</em>
+                <strong class="ok">OK</strong>
+              </span>
+            </footer>
+          </section>
+
+          <!-- Storage stacked above Thermal -->
+          <div class="panel-stack">
+            <section class="panel panel-storage">
+              <header class="panel-header">
+                <span class="panel-title">STORAGE <em>D4</em></span>
+                <span class="panel-code">DRIVES</span>
+                <span class="panel-id" id="storage-count">—</span>
+              </header>
+              <div class="panel-body storage-body">
+                <div class="storage-list" id="storage-list">
+                  <div class="storage-empty">SCANNING DRIVES…</div>
+                </div>
+              </div>
+              <footer class="panel-footer">
+                <span class="footer-label">DRIVE STATUS</span>
+                <span class="footer-readout" id="storage-status">—</span>
+              </footer>
+            </section>
+
+            <section class="panel panel-thermal">
+              <header class="panel-header">
+                <span class="panel-title">THERMAL <em>E5</em></span>
+                <span class="panel-code">SENSOR ARRAY</span>
+                <span class="panel-id" id="temps-tag">—</span>
+              </header>
+              <div class="panel-body thermal-body">
+                <div class="temp-row">
+                  <div class="temp-head">
+                    <span class="micro-label">CPU PACKAGE</span>
+                    <span class="temp-name" id="temp-cpu-name">—</span>
+                  </div>
+                  <div class="temp-readout">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="temp-cpu">—</span>
+                    <span class="bigvalue-unit">&deg;C</span>
+                  </div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-cpu-bar"></div></div>
+                </div>
+
+                <div class="temp-row">
+                  <div class="temp-head">
+                    <span class="micro-label">GPU 0</span>
+                    <span class="temp-name" id="temp-gpu0-name">—</span>
+                  </div>
+                  <div class="temp-readout">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="temp-gpu0">—</span>
+                    <span class="bigvalue-unit">&deg;C</span>
+                  </div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu0-bar"></div></div>
+                </div>
+
+                <div class="temp-row">
+                  <div class="temp-head">
+                    <span class="micro-label">GPU 1</span>
+                    <span class="temp-name" id="temp-gpu1-name">—</span>
+                  </div>
+                  <div class="temp-readout">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="temp-gpu1">—</span>
+                    <span class="bigvalue-unit">&deg;C</span>
+                  </div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu1-bar"></div></div>
+                </div>
+              </div>
+              <footer class="panel-footer">
+                <span class="footer-label">THERMAL STATUS</span>
+                <span class="footer-readout" id="thermal-status">SCANNING…</span>
+              </footer>
+            </section>
+          </div>
+
+        </div>
+
+        <!-- ── Bottom row ──────────────────────────────────────── -->
+        <div class="hud-row hud-row-bottom">
+
+          <!-- Drive I/O panel -->
+          <section class="panel panel-driveio">
+            <header class="panel-header">
+              <span class="panel-title">DRIVE I/O <em>G7</em></span>
+              <span class="panel-code">PHYSICAL DISK</span>
+              <span class="panel-id" id="disk-queue-tag">—</span>
+            </header>
+            <div class="panel-body net-body">
+
+              <div class="net-row">
+                <div class="net-col">
+                  <span class="micro-label">READ</span>
+                  <div class="bigvalue bigvalue-net">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="disk-read">0</span>
+                    <span class="bigvalue-unit" id="disk-read-unit">B/S</span>
+                  </div>
+                </div>
+                <svg class="sparkline" id="disk-read-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+              </div>
+
+              <div class="net-row">
+                <div class="net-col">
+                  <span class="micro-label amber">WRITE</span>
+                  <div class="bigvalue bigvalue-net">
+                    <span class="caret amber">&#9656;</span>
+                    <span class="bigvalue-num" id="disk-write">0</span>
+                    <span class="bigvalue-unit" id="disk-write-unit">B/S</span>
+                  </div>
+                </div>
+                <svg class="sparkline sparkline-tx" id="disk-write-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+              </div>
+
+              <div class="micro-grid micro-grid-3">
+                <div class="micro-cell">
+                  <span class="micro-label">XFER/S</span>
+                  <span class="micro-val" id="disk-xfer">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">QUEUE</span>
+                  <span class="micro-val" id="disk-queue">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">TARGET</span>
+                  <span class="micro-val accent">_TOTAL</span>
+                </div>
+              </div>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">DISK STATUS</span>
+              <span class="footer-readout" id="disk-status">STANDBY</span>
+            </footer>
+          </section>
+
+          <!-- Network panel -->
+          <section class="panel panel-network">
+            <header class="panel-header">
+              <span class="panel-title">NETWORK <em>F6</em></span>
+              <span class="panel-code">LIVE TRAFFIC</span>
+              <span class="panel-id" id="net-iface-tag">—</span>
+            </header>
+            <div class="panel-body net-body">
+
+              <div class="net-row">
+                <div class="net-col">
+                  <span class="micro-label">DOWNLINK</span>
+                  <div class="bigvalue bigvalue-net">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="net-rx">0</span>
+                    <span class="bigvalue-unit" id="net-rx-unit">B/S</span>
+                  </div>
+                </div>
+                <svg class="sparkline" id="net-rx-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+              </div>
+
+              <div class="net-row">
+                <div class="net-col">
+                  <span class="micro-label amber">UPLINK</span>
+                  <div class="bigvalue bigvalue-net">
+                    <span class="caret amber">&#9656;</span>
+                    <span class="bigvalue-num" id="net-tx">0</span>
+                    <span class="bigvalue-unit" id="net-tx-unit">B/S</span>
+                  </div>
+                </div>
+                <svg class="sparkline sparkline-tx" id="net-tx-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+              </div>
+
+              <div class="micro-grid micro-grid-3">
+                <div class="micro-cell">
+                  <span class="micro-label">RX TOTAL</span>
+                  <span class="micro-val" id="net-rx-total">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">TX TOTAL</span>
+                  <span class="micro-val" id="net-tx-total">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">IFACE</span>
+                  <span class="micro-val accent" id="net-iface">—</span>
+                </div>
+              </div>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">NET STATUS</span>
+              <span class="footer-readout" id="net-status">STANDBY</span>
+            </footer>
+          </section>
+
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/renderer/app.js"></script>
+  </body>
+</html>
