@@ -29,11 +29,19 @@
       </div>
 
       <div class="topbar-controls">
+        <span id="theme-name" class="theme-name">DEFAULT</span>
         <button id="theme-btn" class="topbar-btn" type="button" title="Cycle theme" aria-label="Cycle theme">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="6"  cy="12" r="3"/>
             <circle cx="12" cy="12" r="3"/>
             <circle cx="18" cy="12" r="3"/>
+          </svg>
+        </button>
+
+        <button id="theme-auto-btn" class="topbar-btn" type="button" title="Auto-cycle themes (every 25s)" aria-label="Auto-cycle themes">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8"/>
+            <path d="M12 8 V12 L15 14"/>
           </svg>
         </button>
 
@@ -449,6 +457,10 @@
                     <span class="caret">&#9656;</span>
                     <span class="bigvalue-num" id="temp-cpu">—</span>
                     <span class="bigvalue-unit">&deg;C</span>
+                    <span class="temp-power">
+                      <span class="bigvalue-num" id="power-cpu">—</span>
+                      <span class="bigvalue-unit">W</span>
+                    </span>
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-cpu-bar"></div></div>
                 </div>
@@ -462,6 +474,10 @@
                     <span class="caret">&#9656;</span>
                     <span class="bigvalue-num" id="temp-gpu0">—</span>
                     <span class="bigvalue-unit">&deg;C</span>
+                    <span class="temp-power">
+                      <span class="bigvalue-num" id="power-gpu0">—</span>
+                      <span class="bigvalue-unit">W</span>
+                    </span>
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu0-bar"></div></div>
                 </div>
@@ -475,6 +491,10 @@
                     <span class="caret">&#9656;</span>
                     <span class="bigvalue-num" id="temp-gpu1">—</span>
                     <span class="bigvalue-unit">&deg;C</span>
+                    <span class="temp-power">
+                      <span class="bigvalue-num" id="power-gpu1">—</span>
+                      <span class="bigvalue-unit">W</span>
+                    </span>
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu1-bar"></div></div>
                 </div>
@@ -509,7 +529,7 @@
                     <span class="bigvalue-unit" id="disk-read-unit">B/S</span>
                   </div>
                 </div>
-                <svg class="sparkline" id="disk-read-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                <div class="spark-bars" id="disk-read-spark"></div>
               </div>
 
               <div class="net-row">
@@ -521,7 +541,7 @@
                     <span class="bigvalue-unit" id="disk-write-unit">B/S</span>
                   </div>
                 </div>
-                <svg class="sparkline sparkline-tx" id="disk-write-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                <div class="spark-bars spark-bars-tx" id="disk-write-spark"></div>
               </div>
 
               <div class="micro-grid micro-grid-3">
@@ -563,7 +583,7 @@
                     <span class="bigvalue-unit" id="net-rx-unit">B/S</span>
                   </div>
                 </div>
-                <svg class="sparkline" id="net-rx-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                <div class="spark-bars" id="net-rx-spark"></div>
               </div>
 
               <div class="net-row">
@@ -575,7 +595,7 @@
                     <span class="bigvalue-unit" id="net-tx-unit">B/S</span>
                   </div>
                 </div>
-                <svg class="sparkline sparkline-tx" id="net-tx-spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                <div class="spark-bars spark-bars-tx" id="net-tx-spark"></div>
               </div>
 
               <div class="micro-grid micro-grid-3">

@@ -545,7 +545,7 @@ async function writeConfig(partial) {
 }
 
 async function getTempsInfo() {
-  const result = { cpu: null, gpus: [], sources: [] };
+  const result = { cpu: null, cpuPower: null, gpus: [], sources: [] };
 
   // Primary: systeminformation
   try {
@@ -566,6 +566,7 @@ async function getTempsInfo() {
       // si returns memory in MB; normalize to bytes for the renderer.
       memUsed:  Number.isFinite(c.memoryUsed)  && c.memoryUsed  > 0 ? c.memoryUsed  * 1024 * 1024 : null,
       memTotal: Number.isFinite(c.memoryTotal) && c.memoryTotal > 0 ? c.memoryTotal * 1024 * 1024 : null,
+      power:    Number.isFinite(c.powerDraw) && c.powerDraw > 0 ? c.powerDraw : null,
     }));
     if (result.gpus.some(g => g.temp != null)) result.sources.push('si:gpu');
   } catch {}
@@ -580,12 +581,14 @@ async function getTempsInfo() {
             index: i, name: nv[i].name,
             temp: nv[i].temp, load: nv[i].util,
             memUsed: nv[i].memUsed, memTotal: nv[i].memTotal,
+            power: nv[i].power,
           };
         } else {
           if (result.gpus[i].temp     == null) result.gpus[i].temp     = nv[i].temp;
           if (result.gpus[i].load     == null) result.gpus[i].load     = nv[i].util;
           if (result.gpus[i].memUsed  == null) result.gpus[i].memUsed  = nv[i].memUsed;
           if (result.gpus[i].memTotal == null) result.gpus[i].memTotal = nv[i].memTotal;
+          if (result.gpus[i].power    == null) result.gpus[i].power    = nv[i].power;
           if (!result.gpus[i].name || /unknown/i.test(result.gpus[i].name)) result.gpus[i].name = nv[i].name;
         }
       }
@@ -594,19 +597,23 @@ async function getTempsInfo() {
   }
 
   // Fallback 2: LibreHardwareMonitor / OpenHardwareMonitor WMI namespace
-  if (result.cpu == null || result.gpus.some(g => g.temp == null)) {
+  // Also fills in power data which si and nvidia-smi may have missed.
+  if (result.cpu == null || result.cpuPower == null || result.gpus.some(g => g.temp == null || g.power == null)) {
     const lhm = await tryLhmWmi();
     if (lhm) {
       if (result.cpu == null && lhm.cpu != null) {
         result.cpu = lhm.cpu;
         result.sources.push('lhm:cpu');
       }
+      if (result.cpuPower == null && lhm.cpuPower != null) {
+        result.cpuPower = lhm.cpuPower;
+      }
       if (lhm.gpus?.length) {
         let gotGpu = false;
         for (let i = 0; i < lhm.gpus.length; i++) {
-          if (result.gpus[i] && result.gpus[i].temp == null && lhm.gpus[i] != null) {
-            result.gpus[i].temp = lhm.gpus[i];
-            gotGpu = true;
+          if (result.gpus[i]) {
+            if (result.gpus[i].temp  == null && lhm.gpus[i]      != null) { result.gpus[i].temp  = lhm.gpus[i]; gotGpu = true; }
+            if (result.gpus[i].power == null && lhm.gpusPower?.[i] != null) result.gpus[i].power = lhm.gpusPower[i];
           }
         }
         if (gotGpu) result.sources.push('lhm:gpu');
@@ -622,7 +629,7 @@ function tryNvidiaSmi() {
     execFile(
       'nvidia-smi',
       [
-        '--query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total',
+        '--query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw',
         '--format=csv,noheader,nounits',
       ],
       { timeout: 3000, windowsHide: true },
@@ -633,6 +640,7 @@ function tryNvidiaSmi() {
           // memory.used / memory.total are in MiB; normalize to bytes.
           const memUsedMiB  = parseInt(parts[4], 10);
           const memTotalMiB = parseInt(parts[5], 10);
+          const powerW = parseFloat(parts[6]);
           return {
             index: parseInt(parts[0], 10) || 0,
             name:  parts[1] || 'NVIDIA',
@@ -640,6 +648,7 @@ function tryNvidiaSmi() {
             util:  parseInt(parts[3], 10),
             memUsed:  Number.isFinite(memUsedMiB)  ? memUsedMiB  * 1024 * 1024 : null,
             memTotal: Number.isFinite(memTotalMiB) ? memTotalMiB * 1024 * 1024 : null,
+            power:    Number.isFinite(powerW)      ? powerW      : null,
           };
         }).filter(g => Number.isFinite(g.temp));
         resolve(out);
@@ -659,20 +668,39 @@ if (-not $sensors) {
 }
 if (-not $sensors) { ConvertTo-Json -Compress @{ available = $false }; exit 0 }
 $temps = $sensors | Where-Object { $_.SensorType -eq 'Temperature' }
+$powers = $sensors | Where-Object { $_.SensorType -eq 'Power' }
 $cpuPkg = $temps | Where-Object { $_.Identifier -match '/cpu/.*/temperature/0$' -or $_.Name -match 'CPU Package|CPU Total' } | Select-Object -First 1
-$gpuMap = @{}
+$cpuPower = $powers | Where-Object { $_.Name -match 'CPU Package|Package Power' -and $_.Identifier -match '/cpu/' } | Select-Object -First 1
+$gpuTempMap = @{}
 foreach ($g in $temps) {
   if ($g.Identifier -match '/gpu-[a-z]+/(\\d+)/temperature/0') {
     $idx = [int]$Matches[1]
-    if (-not $gpuMap.ContainsKey($idx)) { $gpuMap[$idx] = [double]$g.Value }
+    if (-not $gpuTempMap.ContainsKey($idx)) { $gpuTempMap[$idx] = [double]$g.Value }
+  }
+}
+$gpuPowerMap = @{}
+foreach ($p in $powers) {
+  if ($p.Identifier -match '/gpu-[a-z]+/(\\d+)/power/0') {
+    $idx = [int]$Matches[1]
+    if (-not $gpuPowerMap.ContainsKey($idx)) { $gpuPowerMap[$idx] = [double]$p.Value }
   }
 }
 $gpuArr = @()
-if ($gpuMap.Keys.Count -gt 0) {
-  $maxIdx = ($gpuMap.Keys | Measure-Object -Maximum).Maximum
-  for ($i = 0; $i -le $maxIdx; $i++) { $gpuArr += $gpuMap[$i] }
+$gpuPwr = @()
+if ($gpuTempMap.Keys.Count -gt 0) {
+  $maxIdx = ($gpuTempMap.Keys | Measure-Object -Maximum).Maximum
+  for ($i = 0; $i -le $maxIdx; $i++) {
+    $gpuArr += $gpuTempMap[$i]
+    $gpuPwr += $gpuPowerMap[$i]
+  }
 }
-ConvertTo-Json -Compress @{ available = $true; cpu = $cpuPkg.Value; gpus = $gpuArr }
+ConvertTo-Json -Compress @{
+  available = $true
+  cpu = $cpuPkg.Value
+  cpuPower = $cpuPower.Value
+  gpus = $gpuArr
+  gpusPower = $gpuPwr
+}
     `.trim();
     execFile(
       'powershell.exe',
@@ -684,8 +712,10 @@ ConvertTo-Json -Compress @{ available = $true; cpu = $cpuPkg.Value; gpus = $gpuA
           const obj = JSON.parse(stdout || '{}');
           if (!obj.available) { resolve(null); return; }
           resolve({
-            cpu:  Number.isFinite(obj.cpu) ? obj.cpu : null,
-            gpus: Array.isArray(obj.gpus) ? obj.gpus.map(v => Number.isFinite(v) ? v : null) : [],
+            cpu:       Number.isFinite(obj.cpu)      ? obj.cpu      : null,
+            cpuPower:  Number.isFinite(obj.cpuPower) ? obj.cpuPower : null,
+            gpus:      Array.isArray(obj.gpus)      ? obj.gpus.map(v => Number.isFinite(v) ? v : null)      : [],
+            gpusPower: Array.isArray(obj.gpusPower) ? obj.gpusPower.map(v => Number.isFinite(v) ? v : null) : [],
           });
         } catch {
           resolve(null);

@@ -278,6 +278,46 @@ function deltaLoad(prev, curr) {
   return Math.max(0, Math.min(1, 1 - idleDelta / totalDelta));
 }
 
+// Generic metric-bar helper: paints a .core-bar-fill or .gpu-bar-fill, then
+// manages a floating peak marker (snap up, hold, slow decay) as a sibling
+// inside the same track. Replaces the old warn/high class swap — the
+// underlying fill background is now a cool→warm→hot vertical gradient
+// anchored to the track's pixel height via --bar-h, so the peak alone
+// communicates urgency.
+const METRIC_PEAK_HOLD_FRAMES = 8;
+const METRIC_PEAK_DECAY = 2;
+
+function setMetricBar(fill, pct) {
+  if (!fill) return;
+  pct = Math.max(0, Math.min(100, +pct || 0));
+  fill.style.height = `${pct.toFixed(0)}%`;
+  const track = fill.parentElement;
+  if (!track) return;
+  const peakClass = fill.classList.contains('gpu-bar-fill') ? 'gpu-bar-peak' : 'core-bar-peak';
+  let peak = track.querySelector(`:scope > .${peakClass}`);
+  if (!peak) {
+    peak = document.createElement('div');
+    peak.className = peakClass;
+    track.appendChild(peak);
+    const updateBarH = () => {
+      const h = track.clientHeight;
+      if (h > 0) track.style.setProperty('--bar-h', `${h}px`);
+    };
+    updateBarH();
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(updateBarH).observe(track);
+    }
+  }
+  let pk   = parseFloat(track.dataset.peak)     || 0;
+  let hold = parseInt(track.dataset.peakHold, 10) || 0;
+  if (pct >= pk) { pk = pct; hold = METRIC_PEAK_HOLD_FRAMES; }
+  else if (hold > 0) hold--;
+  else pk = Math.max(pct, pk - METRIC_PEAK_DECAY);
+  track.dataset.peak = pk.toFixed(2);
+  track.dataset.peakHold = hold;
+  peak.style.bottom = `${pk.toFixed(0)}%`;
+}
+
 function buildCoreGrid(count) {
   coreGridEl.innerHTML = '';
   coreFillEls.length = 0;
@@ -300,10 +340,7 @@ function buildCoreGrid(count) {
 }
 
 function paintCore(fill, load) {
-  const pct = load * 100;
-  fill.style.height = `${pct.toFixed(0)}%`;
-  fill.classList.toggle('warn', pct >= 60 && pct < 85);
-  fill.classList.toggle('high', pct >= 85);
+  setMetricBar(fill, load * 100);
 }
 
 // Memory history — time-series of system memory % usage.
@@ -334,11 +371,7 @@ function pushMemHistory(pct) {
   memHistBuf.push(pct);
   if (memHistBuf.length > MEM_HIST_LEN) memHistBuf.shift();
   for (let i = 0; i < MEM_HIST_LEN; i++) {
-    const v = memHistBuf[i];
-    const fill = memHistFills[i];
-    fill.style.height = `${v.toFixed(0)}%`;
-    fill.classList.toggle('warn', v >= 60 && v < 85);
-    fill.classList.toggle('high', v >= 85);
+    setMetricBar(memHistFills[i], memHistBuf[i]);
   }
   if (memHistValueEl) {
     const cur = memHistBuf[memHistBuf.length - 1] || 0;
@@ -388,9 +421,7 @@ function paintScratchGrid(drives) {
     const pct = sized ? (d.used / d.total) * 100 : 0;
     const fill = scratchFills[i];
     if (!fill) continue;
-    fill.style.height = `${pct.toFixed(0)}%`;
-    fill.classList.toggle('warn', pct >= 60 && pct < 85);
-    fill.classList.toggle('high', pct >= 85);
+    setMetricBar(fill, pct);
     fill.style.opacity = sized ? '' : '0.25';
     if (sized) { totalUsed += d.used; totalCap += d.total; }
   }
@@ -515,6 +546,14 @@ const tempGpu1El      = document.querySelector('#temp-gpu1');
 const tempGpu1BarEl   = document.querySelector('#temp-gpu1-bar');
 const tempGpu1NameEl  = document.querySelector('#temp-gpu1-name');
 const tempsTagEl      = document.querySelector('#temps-tag');
+const powerCpuEl      = document.querySelector('#power-cpu');
+const powerGpu0El     = document.querySelector('#power-gpu0');
+const powerGpu1El     = document.querySelector('#power-gpu1');
+
+function paintPower(el, watts) {
+  if (!el) return;
+  el.textContent = Number.isFinite(watts) && watts > 0 ? watts.toFixed(0) : '—';
+}
 const thermalStatusEl = document.querySelector('#thermal-status');
 
 const TEMP_MAX = 100; // °C — bar fill scales 0..TEMP_MAX
@@ -619,9 +658,7 @@ function paintGpuUtil(fill, pctEl, util) {
     return;
   }
   const pct = Math.max(0, Math.min(100, util));
-  fill.style.height = `${pct.toFixed(0)}%`;
-  fill.classList.toggle('warn', pct >= 60 && pct < 85);
-  fill.classList.toggle('high', pct >= 85);
+  setMetricBar(fill, pct);
   pctEl.textContent = `${pct.toFixed(0)}%`;
 }
 
@@ -666,6 +703,7 @@ async function refreshTemps() {
     const t = await window.dash.tempsInfo();
     paintGpuPanel(t.gpus);
     paintTemp(tempCpuEl, tempCpuBarEl, t.cpu);
+    paintPower(powerCpuEl, t.cpuPower);
     tempCpuNameEl.textContent = (t.cpu == null) ? 'NEEDS LHM/OHM' : 'ACPI/SMBUS';
     if (tempCpuNameEl) {
       tempCpuNameEl.title = (t.cpu == null)
@@ -675,10 +713,12 @@ async function refreshTemps() {
 
     const g0 = t.gpus?.[0];
     paintTemp(tempGpu0El, tempGpu0BarEl, g0?.temp);
+    paintPower(powerGpu0El, g0?.power);
     tempGpu0NameEl.textContent = g0 ? shortGpuName(g0.name) : 'NONE';
 
     const g1 = t.gpus?.[1];
     paintTemp(tempGpu1El, tempGpu1BarEl, g1?.temp);
+    paintPower(powerGpu1El, g1?.power);
     tempGpu1NameEl.textContent = g1 ? shortGpuName(g1.name) : 'NONE';
 
     const sources = [];
@@ -715,7 +755,7 @@ const netStatusEl   = document.querySelector('#net-status');
 const netRxSparkEl  = document.querySelector('#net-rx-spark');
 const netTxSparkEl  = document.querySelector('#net-tx-spark');
 
-const SPARK_SAMPLES = 60;
+const SPARK_SAMPLES = 96;
 const rxBuf = new Array(SPARK_SAMPLES).fill(0);
 const txBuf = new Array(SPARK_SAMPLES).fill(0);
 
@@ -732,20 +772,65 @@ function pushSpark(buf, val) {
   if (buf.length > SPARK_SAMPLES) buf.shift();
 }
 
-function renderSpark(svg, samples) {
-  const w = 100, h = 30;
-  const max = Math.max(1, ...samples);
-  const last = samples.length - 1;
-  if (last <= 0) {
-    svg.innerHTML = '';
-    return;
+// Bar-grid sparkline renderer: builds N skinny bars on first call, then on
+// each call re-heights them from the samples buffer and updates a floating
+// peak marker per bar (snap up, hold, then slow decay).
+const _sparkState = new WeakMap(); // container → { peaks: Float32Array, hold: Int32Array, fills: HTMLElement[], peakEls: HTMLElement[], ro: ResizeObserver }
+const SPARK_PEAK_HOLD_FRAMES = 6;
+const SPARK_PEAK_DECAY = 3;
+
+function renderSpark(container, samples) {
+  if (!container) return;
+  let st = _sparkState.get(container);
+  if (!st || st.fills.length !== samples.length) {
+    container.innerHTML = '';
+    const fills = [];
+    const peakEls = [];
+    for (let i = 0; i < samples.length; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'spark-bar';
+      const fill = document.createElement('div');
+      fill.className = 'spark-bar-fill';
+      const peak = document.createElement('div');
+      peak.className = 'spark-bar-peak';
+      bar.appendChild(fill);
+      bar.appendChild(peak);
+      container.appendChild(bar);
+      fills.push(fill);
+      peakEls.push(peak);
+    }
+    const updateBarH = () => {
+      const h = container.clientHeight;
+      if (h > 0) container.style.setProperty('--bar-h', `${h}px`);
+    };
+    updateBarH();
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(updateBarH);
+      ro.observe(container);
+    }
+    st = {
+      fills, peakEls,
+      peaks: new Float32Array(samples.length),
+      hold:  new Int32Array(samples.length),
+      ro,
+    };
+    _sparkState.set(container, st);
   }
-  const pts = samples.map((v, i) => {
-    const x = (i / last) * w;
-    const y = h - (v / max) * h;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
-  svg.innerHTML = `<polyline points="${pts}"/>`;
+  const max = Math.max(1, ...samples);
+  for (let i = 0; i < samples.length; i++) {
+    const pct = Math.min(100, (samples[i] / max) * 100);
+    st.fills[i].style.height = `${pct.toFixed(0)}%`;
+    if (pct >= st.peaks[i]) {
+      st.peaks[i] = pct;
+      st.hold[i] = SPARK_PEAK_HOLD_FRAMES;
+    } else if (st.hold[i] > 0) {
+      st.hold[i]--;
+    } else {
+      st.peaks[i] = Math.max(pct, st.peaks[i] - SPARK_PEAK_DECAY);
+    }
+    st.peakEls[i].style.bottom = `${st.peaks[i].toFixed(0)}%`;
+  }
 }
 
 async function refreshNet() {
@@ -982,6 +1067,25 @@ weatherCityEl.addEventListener('keydown', (e) => {
 const AUDIO_BAR_COUNT = 24;
 const AUDIO_MIN_W = 100;
 const AUDIO_MIN_H = 40;
+// Mic byte-frequency to percent multiplier. Byte data is already dB-mapped
+// (0 ≈ -100dB, 255 ≈ -30dB on a default AnalyserNode), so this is a linear
+// gain on top of that log scale. ~0.55 saturates roughly at typical speech.
+const AUDIO_MIC_GAIN = 0.55;
+// Mic noise gate (in byte units) — bins below this get squashed so ambient
+// hiss doesn't keep all the bars lit.
+const AUDIO_MIC_FLOOR = 24;
+// FFT band layout matches the audify worker (60 Hz – 16 kHz, log-spaced).
+const AUDIO_BAND_FMIN = 60;
+const AUDIO_BAND_FMAX = 16000;
+// Per-bar fill decay. Snap up on rises; fall by this many percent per push
+// on drops so the bar gracefully tails off instead of flickering.
+const AUDIO_DECAY_PER_FRAME = 4;
+// Peak-hold: independent floating marker that snaps to the highest recent
+// fill, holds for HOLD frames, then falls slowly. Push rate is ~47 Hz from
+// the FFT side of the worker, so HOLD=12 ≈ 250 ms hold; PEAK_DECAY=1.4 ≈
+// 1.5 s to fall from 100 → 0.
+const AUDIO_PEAK_HOLD_FRAMES = 12;
+const AUDIO_PEAK_DECAY_PER_FRAME = 1.4;
 
 function shortDeviceName(label, fallback) {
   if (!label) return fallback || 'DEFAULT';
@@ -993,13 +1097,17 @@ function shortDeviceName(label, fallback) {
 function createAudioVisualizer({
   gridEl, barsRowEl, muteBtnEl, deviceNameEl, posKey, sizeKey, mutedKey, fallbackLabel,
 }) {
-  const levels = new Array(AUDIO_BAR_COUNT).fill(0);
-  const bars = [];
+  const levels    = new Array(AUDIO_BAR_COUNT).fill(0);
+  const displayed = new Array(AUDIO_BAR_COUNT).fill(0); // visible bar height
+  const peaks     = new Array(AUDIO_BAR_COUNT).fill(0); // floating peak marker
+  const peakHold  = new Array(AUDIO_BAR_COUNT).fill(0); // frames before peak starts falling
+  const bars  = [];
+  const peakEls = [];
   let analyser = null;
   let track = null;
   let muted = false;
 
-  // Build bars
+  // Build bars (each bar = fill + floating peak marker)
   if (barsRowEl) {
     barsRowEl.innerHTML = '';
     for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
@@ -1007,9 +1115,25 @@ function createAudioVisualizer({
       bar.className = 'audio-bar';
       const fill = document.createElement('div');
       fill.className = 'audio-bar-fill';
+      const peak = document.createElement('div');
+      peak.className = 'audio-bar-peak';
       bar.appendChild(fill);
+      bar.appendChild(peak);
       barsRowEl.appendChild(bar);
       bars.push(fill);
+      peakEls.push(peak);
+    }
+    // Track the row's pixel height so the 3-zone color gradient on each fill
+    // can be anchored to the full bar height instead of the fill's own height.
+    // Without this the warm/hot zones would scale with the fill and you'd
+    // never see them at low levels.
+    const updateBarHeight = () => {
+      const h = barsRowEl.clientHeight;
+      if (h > 0) barsRowEl.style.setProperty('--bar-h', `${h}px`);
+    };
+    updateBarHeight();
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(updateBarHeight).observe(barsRowEl);
     }
   }
 
@@ -1020,11 +1144,30 @@ function createAudioVisualizer({
     if (muteBtnEl) muteBtnEl.textContent = muted ? 'X' : 'M';
   }
 
+  // Per-band bin ranges, computed when the analyser is attached so we can
+  // average byte-frequency data into the same 24 log-spaced bands the worker
+  // produces for the loopback path.
+  let bandLoBin = null, bandHiBin = null, freqBuf = null;
+
   function setAnalyserAndTrack(an, tr) {
     analyser = an;
     track = tr;
     if (deviceNameEl) deviceNameEl.textContent = shortDeviceName(track?.label, fallbackLabel);
     if (muted && track) track.enabled = false;
+    if (an) {
+      const sr = an.context?.sampleRate || 48000;
+      const N  = an.fftSize;
+      const fMax = Math.min(AUDIO_BAND_FMAX, sr / 2);
+      bandLoBin = new Int32Array(AUDIO_BAR_COUNT);
+      bandHiBin = new Int32Array(AUDIO_BAR_COUNT);
+      for (let b = 0; b < AUDIO_BAR_COUNT; b++) {
+        const fLo = AUDIO_BAND_FMIN * Math.pow(fMax / AUDIO_BAND_FMIN, b       / AUDIO_BAR_COUNT);
+        const fHi = AUDIO_BAND_FMIN * Math.pow(fMax / AUDIO_BAND_FMIN, (b + 1) / AUDIO_BAR_COUNT);
+        bandLoBin[b] = Math.max(1, Math.floor((fLo * N) / sr));
+        bandHiBin[b] = Math.max(bandLoBin[b] + 1, Math.floor((fHi * N) / sr));
+      }
+      freqBuf = new Uint8Array(an.frequencyBinCount);
+    }
   }
 
   function setLabelOnly(text) {
@@ -1035,27 +1178,59 @@ function createAudioVisualizer({
   }
 
   function sample() {
-    if (!analyser || !bars.length) return;
-    const buf = new Uint8Array(analyser.fftSize);
-    analyser.getByteTimeDomainData(buf);
-    let sumSq = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const v = (buf[i] - 128) / 128;
-      sumSq += v * v;
+    if (!analyser || !bars.length || !bandLoBin || !freqBuf) return;
+    analyser.getByteFrequencyData(freqBuf);
+    const out = new Array(AUDIO_BAR_COUNT);
+    for (let b = 0; b < AUDIO_BAR_COUNT; b++) {
+      const lo = bandLoBin[b], hi = bandHiBin[b];
+      let sum = 0;
+      for (let k = lo; k < hi; k++) sum += freqBuf[k];
+      const avg = sum / (hi - lo);
+      const lifted = Math.max(0, avg - AUDIO_MIC_FLOOR);
+      out[b] = Math.min(100, lifted * AUDIO_MIC_GAIN);
     }
-    const rms = Math.sqrt(sumSq / buf.length);
-    pushLevel(Math.min(100, rms * 200));
+    setBands(out);
   }
 
-  // Direct level push — used when audio is driven by main-process IPC instead
-  // of a renderer-side AnalyserNode (the WASAPI loopback path).
+  // Time-scrolling RMS push — used by the mic visualizer (each bar = a moving
+  // time slot). Snap-up on rises, decay on drops, with floating peak markers.
   function pushLevel(pct) {
     if (!bars.length) return;
     levels.push(pct);
     levels.shift();
     for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
-      bars[i].style.height = `${levels[i].toFixed(0)}%`;
+      updateBar(i, levels[i]);
     }
+  }
+
+  // Frequency-band push — used by the loopback visualizer (each bar = a
+  // log-spaced FFT band). Static column positions, peak markers per band.
+  function setBands(bands) {
+    if (!bars.length || !bands) return;
+    for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
+      const target = Number.isFinite(bands[i]) ? bands[i] : 0;
+      updateBar(i, target);
+    }
+  }
+
+  function updateBar(i, target) {
+    // Fill: snap up on a rise, decay on a drop.
+    if (target >= displayed[i]) {
+      displayed[i] = target;
+    } else {
+      displayed[i] = Math.max(target, displayed[i] - AUDIO_DECAY_PER_FRAME);
+    }
+    // Peak: track highest fill; hold briefly; then fall slower than the fill.
+    if (displayed[i] >= peaks[i]) {
+      peaks[i] = displayed[i];
+      peakHold[i] = AUDIO_PEAK_HOLD_FRAMES;
+    } else if (peakHold[i] > 0) {
+      peakHold[i]--;
+    } else {
+      peaks[i] = Math.max(displayed[i], peaks[i] - AUDIO_PEAK_DECAY_PER_FRAME);
+    }
+    bars[i].style.height = `${displayed[i].toFixed(0)}%`;
+    if (peakEls[i]) peakEls[i].style.bottom = `${peaks[i].toFixed(0)}%`;
   }
 
   // Drag-to-move
@@ -1174,7 +1349,7 @@ function createAudioVisualizer({
     if (savedMuted) setMuted(true);
   }
 
-  return { sample, pushLevel, setMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom };
+  return { sample, pushLevel, setBands, setMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom };
 }
 
 const audioInViz = createAudioVisualizer({
@@ -1225,9 +1400,11 @@ if (NATIVE_LOOPBACK_BOUND) {
       audioOutViz.setLabelOnly(shortDeviceName(data.deviceName, 'SYSTEM AUDIO'));
       _nativeReceivedFirst = true;
     }
-    if (Number.isFinite(data?.rms)) {
-      audioOutViz.pushLevel(Math.min(100, data.rms * 200));
+    if (Array.isArray(data?.bands)) {
+      audioOutViz.setBands(data.bands);
     }
+    // RMS-only off-frames are ignored — FFT frames arrive every ~21 ms
+    // which is plenty for the visual decay/peak-hold logic.
   });
 
   // Click the device-name label to pick which output to monitor. Useful when
@@ -1415,10 +1592,12 @@ async function startAudioWaves() {
   drawAudioFrame();
 }
 
-// Sample both visualizers every 4 frames so 24 bars cover ~1.5–1.6s of history.
+// Sample the mic visualizer at ~30 Hz to roughly match the loopback worker's
+// FFT cadence (~47 Hz), so both panels share the same decay/peak-hold feel.
+// Output sample() is a no-op when bands are driven by IPC.
 let _audioFrameCounter = 0;
 function drawAudioFrame() {
-  if ((_audioFrameCounter++ & 3) === 0) {
+  if ((_audioFrameCounter++ & 1) === 0) {
     audioInViz.sample();
     audioOutViz.sample();
   }
@@ -2223,8 +2402,9 @@ staggerStrobeAll();
     }
   }
 
-  if (cfg?.theme) applyTheme(cfg.theme);
+  applyTheme(cfg?.theme || null); // also paints the theme-name chip
   if (cfg?.invert) applyInvert(true);
+  if (cfg?.themeAuto) setThemeAuto(true);
   audioInViz?.applySavedGeom(cfg?.audioInPos,  cfg?.audioInSize,  cfg?.audioInMuted);
   audioOutViz?.applySavedGeom(cfg?.audioOutPos, cfg?.audioOutSize, cfg?.audioOutMuted);
   if (cfg?.collapsed) {
@@ -2255,24 +2435,50 @@ document.querySelector('#refresh-btn')?.addEventListener('click', () => {
 });
 
 // Theme cycle (persists through config). null = default cyan/amber/red.
-const THEMES = [null, 'azure', 'rose', 'ocean', 'pastel', 'meadow', 'citrus', 'neon', 'vaporwave', 'matrix', 'volt'];
+const THEMES = [
+  null, 'azure', 'rose', 'ocean', 'pastel', 'meadow', 'citrus',
+  'neon', 'vaporwave', 'matrix', 'volt', 'crimson',
+  // Low-contrast complementary set
+  'dust', 'slate', 'mint', 'lavender', 'harbor',
+  'moss', 'dusk', 'paper', 'storm', 'sage',
+];
 
+const themeNameEl = document.querySelector('#theme-name');
 function applyTheme(name) {
   if (!name) document.documentElement.removeAttribute('data-theme');
   else       document.documentElement.setAttribute('data-theme', name);
+  if (themeNameEl) themeNameEl.textContent = (name || 'default').toUpperCase();
 }
 
 function applyInvert(on) {
   document.body.classList.toggle('theme-invert', !!on);
 }
 
-document.querySelector('#theme-btn')?.addEventListener('click', async () => {
+async function advanceTheme(step = 1) {
   const cfg = (await window.dash?.getConfig?.()) || {};
   const cur = cfg.theme ?? null;
   const idx = THEMES.indexOf(cur);
-  const next = THEMES[(idx + 1) % THEMES.length];
+  const next = THEMES[((idx + step) % THEMES.length + THEMES.length) % THEMES.length];
   applyTheme(next);
   if (window.dash?.setConfig) await window.dash.setConfig({ theme: next });
+}
+
+document.querySelector('#theme-btn')?.addEventListener('click', () => advanceTheme(1));
+
+// Auto-cycle: every 25s, advance to next theme. Persisted across reloads.
+const THEME_AUTO_MS = 25000;
+let _themeAutoTimer = null;
+const themeAutoBtn = document.querySelector('#theme-auto-btn');
+function setThemeAuto(on) {
+  themeAutoBtn?.classList.toggle('is-active', !!on);
+  if (_themeAutoTimer) { clearInterval(_themeAutoTimer); _themeAutoTimer = null; }
+  if (on) _themeAutoTimer = setInterval(() => advanceTheme(1), THEME_AUTO_MS);
+}
+themeAutoBtn?.addEventListener('click', async () => {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  const next = !cfg.themeAuto;
+  setThemeAuto(next);
+  if (window.dash?.setConfig) await window.dash.setConfig({ themeAuto: next });
 });
 
 document.querySelector('#invert-btn')?.addEventListener('click', async () => {

@@ -110,6 +110,112 @@
   --muted:  #888a98;
   --dim:    #3a3c45;
 }
+[data-theme="crimson"] {
+  --accent: #c90000;
+  --amber:  #980002;
+  --red:    #68030e;
+  --ok:     #d4a4a4;
+  --text:   #f5d0d0;
+  --muted:  #a55050;
+  --dim:    #3a0a10;
+}
+
+/* ── Low-contrast complementary palettes ────────────────────── */
+/* All ten share a desaturated, near-equal-luminance approach so the HUD
+   feels calm. Each pairs two complementary hues plus a soft "ok" tint
+   that's neither — keeping the cool/warm/hot cascade legible without
+   shouting. */
+
+[data-theme="dust"] {           /* sandy beige + dusty rose */
+  --accent: #c9a880;
+  --amber:  #d6b89e;
+  --red:    #b87a6e;
+  --ok:     #b8c8a8;
+  --text:   #ebe2d2;
+  --muted:  #998a72;
+  --dim:    #4a4036;
+}
+[data-theme="slate"] {          /* cool gray + muted teal */
+  --accent: #8aa0a8;
+  --amber:  #b0a89e;
+  --red:    #a87a82;
+  --ok:     #98b0a8;
+  --text:   #d8dde0;
+  --muted:  #707880;
+  --dim:    #353c40;
+}
+[data-theme="mint"] {           /* soft mint + faded peach */
+  --accent: #9dc8b8;
+  --amber:  #d8b8b0;
+  --red:    #c89090;
+  --ok:     #b0d6c0;
+  --text:   #e2eee5;
+  --muted:  #7c948a;
+  --dim:    #3a4a44;
+}
+[data-theme="lavender"] {       /* lavender + buttercream */
+  --accent: #b0a0c8;
+  --amber:  #d6c8a0;
+  --red:    #b08aa8;
+  --ok:     #c0c8d0;
+  --text:   #e8e2ee;
+  --muted:  #807088;
+  --dim:    #3a3344;
+}
+[data-theme="harbor"] {         /* harbor blue + sand */
+  --accent: #7090a8;
+  --amber:  #c8b890;
+  --red:    #b07880;
+  --ok:     #98b8b0;
+  --text:   #e0e8ee;
+  --muted:  #6a7a88;
+  --dim:    #2e3942;
+}
+[data-theme="moss"] {           /* moss green + warm clay */
+  --accent: #9aaa88;
+  --amber:  #c8a880;
+  --red:    #b08070;
+  --ok:     #b8c8a0;
+  --text:   #e2e8d8;
+  --muted:  #768070;
+  --dim:    #383c30;
+}
+[data-theme="dusk"] {           /* muted purple + mustard */
+  --accent: #9888a8;
+  --amber:  #c8b070;
+  --red:    #a87080;
+  --ok:     #a8a8c0;
+  --text:   #e0d8e8;
+  --muted:  #786878;
+  --dim:    #38303e;
+}
+[data-theme="paper"] {          /* off-white sepia / aged paper */
+  --accent: #b8a890;
+  --amber:  #d8c8a8;
+  --red:    #a88880;
+  --ok:     #b0b8a0;
+  --text:   #e8dec8;
+  --muted:  #8a8070;
+  --dim:    #44403a;
+}
+[data-theme="storm"] {          /* storm blue-gray + warm tan */
+  --accent: #7c889e;
+  --amber:  #b8a890;
+  --red:    #a07a8a;
+  --ok:     #98a8b8;
+  --text:   #d8dee8;
+  --muted:  #6a7282;
+  --dim:    #2e3440;
+}
+[data-theme="sage"] {           /* muted sage + dusty pink */
+  --accent: #a0b8a0;
+  --amber:  #d0b8b0;
+  --red:    #b89898;
+  --ok:     #b8c8b0;
+  --text:   #e0e8de;
+  --muted:  #788878;
+  --dim:    #364038;
+}
 
 /* Invert toggle — flips light/dark via CSS filter on the app root.
    hue-rotate(180deg) preserves color identity (blue stays blue-ish). */
@@ -262,13 +368,51 @@ html, body {
   position: absolute;
   left: 0; right: 0; bottom: 0;
   height: 0%;
+  /* Two layered backgrounds:
+     1) horizontal "gap" stripes (creates the segmented LED look)
+     2) vertical 3-zone color gradient anchored to the FULL bar height (not
+        the fill height) via the --bar-h custom property set by JS. As the
+        fill grows, more of the cool→warm→hot gradient is revealed. */
   background:
     repeating-linear-gradient(0deg,
-      var(--audio-color) 0,
-      var(--audio-color) 3px,
+      transparent 0,
       transparent 3px,
-      transparent 5px);
-  transition: height 0.12s ease-out;
+      rgba(0, 0, 0, 0.65) 3px,
+      rgba(0, 0, 0, 0.65) 5px),
+    linear-gradient(0deg,
+      var(--audio-color) 0%,
+      var(--audio-color) 50%,
+      var(--amber) 62%,
+      var(--amber) 78%,
+      var(--red) 90%,
+      var(--red) 100%);
+  background-size: 100% 100%, 100% var(--bar-h, 60px);
+  background-position: 0 0, 0 bottom;
+  background-repeat: repeat, no-repeat;
+  transition: height 30ms linear;
+}
+.audio-grid .audio-bar-peak {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 0%;
+  height: 3px;
+  /* Peak marker color mirrors which zone the peak is in via the same gradient
+     trick — fixed to the bar's full height, sampled at the peak's bottom. */
+  background:
+    linear-gradient(0deg,
+      color-mix(in srgb, var(--audio-color) 30%, white) 0%,
+      color-mix(in srgb, var(--audio-color) 30%, white) 50%,
+      color-mix(in srgb, var(--amber) 30%, white) 62%,
+      color-mix(in srgb, var(--amber) 30%, white) 78%,
+      color-mix(in srgb, var(--red)   30%, white) 90%,
+      color-mix(in srgb, var(--red)   30%, white) 100%);
+  background-size: 100% var(--bar-h, 60px);
+  background-position: 0 bottom;
+  background-repeat: no-repeat;
+  box-shadow: 0 0 6px currentColor;
+  color: color-mix(in srgb, var(--audio-color) 60%, white);
+  pointer-events: none;
+  transition: bottom 30ms linear;
 }
 .audio-grid.is-dragging,
 .audio-grid.is-resizing {
@@ -453,6 +597,38 @@ html, body {
 #refresh-btn:active svg { transform: rotate(360deg); transition-duration: 0.15s; }
 #theme-btn:hover    svg { transform: scale(1.1); }
 #invert-btn:hover   svg { transform: rotate(180deg); }
+
+/* Auto-cycle theme button: spinning clock-hand when armed */
+#theme-auto-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+#theme-auto-btn.is-active svg {
+  animation: theme-auto-spin 25s linear infinite;
+}
+@keyframes theme-auto-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Current-theme name chip beside the theme button */
+.theme-name {
+  pointer-events: none;
+  align-self: center;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--rule-dim);
+  padding: 0 8px;
+  height: 30px;
+  line-height: 30px;
+  text-transform: uppercase;
+  min-width: 78px;
+  text-align: center;
+}
 
 /* ── Resize handles (4 corners, omnidirectional) ─────────────── */
 .resize-handle {
@@ -981,28 +1157,46 @@ html, body {
   height: 0%;
   background:
     repeating-linear-gradient(0deg,
-      var(--accent) 0,
-      var(--accent) 3px,
+      transparent 0,
       transparent 3px,
-      transparent 5px);
-  transition: height 0.35s ease, background 0.35s ease;
+      rgba(0, 0, 0, 0.65) 3px,
+      rgba(0, 0, 0, 0.65) 5px),
+    linear-gradient(0deg,
+      var(--accent) 0%,
+      var(--accent) 50%,
+      var(--amber) 62%,
+      var(--amber) 78%,
+      var(--red) 90%,
+      var(--red) 100%);
+  background-size: 100% 100%, 100% var(--bar-h, 36px);
+  background-position: 0 0, 0 bottom;
+  background-repeat: repeat, no-repeat;
+  transition: height 0.35s ease;
 }
-.core-bar-fill.warn {
+.core-bar-peak {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 0%;
+  height: 2px;
   background:
-    repeating-linear-gradient(0deg,
-      var(--amber) 0,
-      var(--amber) 3px,
-      transparent 3px,
-      transparent 5px);
+    linear-gradient(0deg,
+      color-mix(in srgb, var(--accent) 30%, white) 0%,
+      color-mix(in srgb, var(--accent) 30%, white) 50%,
+      color-mix(in srgb, var(--amber) 30%, white) 62%,
+      color-mix(in srgb, var(--amber) 30%, white) 78%,
+      color-mix(in srgb, var(--red)   30%, white) 90%,
+      color-mix(in srgb, var(--red)   30%, white) 100%);
+  background-size: 100% var(--bar-h, 36px);
+  background-position: 0 bottom;
+  background-repeat: no-repeat;
+  box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, white);
+  pointer-events: none;
+  transition: bottom 0.25s ease;
 }
-.core-bar-fill.high {
-  background:
-    repeating-linear-gradient(0deg,
-      var(--red) 0,
-      var(--red) 3px,
-      transparent 3px,
-      transparent 5px);
-}
+/* warn/high modifiers retained as no-ops for older code paths that still
+   set them. The cascade gradient communicates the same thing visually. */
+.core-bar-fill.warn,
+.core-bar-fill.high { background: inherit; }
 .core-bar-label {
   font-family: var(--font-tech);
   font-size: 8px;
@@ -1062,28 +1256,44 @@ html, body {
   height: 0%;
   background:
     repeating-linear-gradient(0deg,
-      var(--accent) 0,
-      var(--accent) 3px,
+      transparent 0,
       transparent 3px,
-      transparent 5px);
-  transition: height 0.35s ease, background 0.35s ease;
+      rgba(0, 0, 0, 0.65) 3px,
+      rgba(0, 0, 0, 0.65) 5px),
+    linear-gradient(0deg,
+      var(--accent) 0%,
+      var(--accent) 50%,
+      var(--amber) 62%,
+      var(--amber) 78%,
+      var(--red) 90%,
+      var(--red) 100%);
+  background-size: 100% 100%, 100% var(--bar-h, 36px);
+  background-position: 0 0, 0 bottom;
+  background-repeat: repeat, no-repeat;
+  transition: height 0.35s ease;
 }
-.gpu-bar-fill.warn {
+.gpu-bar-peak {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 0%;
+  height: 2px;
   background:
-    repeating-linear-gradient(0deg,
-      var(--amber) 0,
-      var(--amber) 3px,
-      transparent 3px,
-      transparent 5px);
+    linear-gradient(0deg,
+      color-mix(in srgb, var(--accent) 30%, white) 0%,
+      color-mix(in srgb, var(--accent) 30%, white) 50%,
+      color-mix(in srgb, var(--amber) 30%, white) 62%,
+      color-mix(in srgb, var(--amber) 30%, white) 78%,
+      color-mix(in srgb, var(--red)   30%, white) 90%,
+      color-mix(in srgb, var(--red)   30%, white) 100%);
+  background-size: 100% var(--bar-h, 36px);
+  background-position: 0 bottom;
+  background-repeat: no-repeat;
+  box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, white);
+  pointer-events: none;
+  transition: bottom 0.25s ease;
 }
-.gpu-bar-fill.high {
-  background:
-    repeating-linear-gradient(0deg,
-      var(--red) 0,
-      var(--red) 3px,
-      transparent 3px,
-      transparent 5px);
-}
+.gpu-bar-fill.warn,
+.gpu-bar-fill.high { background: inherit; }
 .gpu-bar-label {
   display: flex;
   justify-content: space-between;
@@ -1170,16 +1380,31 @@ html, body {
 .temp-readout .bigvalue-num {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: 28px;
+  font-size: 25px;
   letter-spacing: 0.04em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .temp-readout .bigvalue-unit {
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
 }
+/* Power-draw chip: pushed to the right of the temp readout, slightly
+   smaller numerals so it reads as secondary info next to the temperature. */
+.temp-power {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px dashed var(--rule-dim);
+}
+.temp-power .bigvalue-num {
+  font-size: 20px;
+  color: var(--accent);
+}
+.temp-power .bigvalue-unit { font-size: 10px; }
 
 /* Temp segment bar — color reflects severity */
 .seg-temp {
@@ -1220,6 +1445,63 @@ html, body {
 }
 .bigvalue-net .bigvalue-unit {
   font-size: 13px;
+}
+
+/* Bar-grid sparkline replacement: same visual language as the audio bars
+   (cascade gradient + floating peak markers). Used for net/disk traffic. */
+.spark-bars {
+  width: 100%;
+  height: 44px;
+  display: flex;
+  gap: 1px;
+  align-items: stretch;
+  border-top: 1px solid var(--rule-dim);
+  border-bottom: 1px solid var(--rule-dim);
+  padding: 2px 0;
+  --spark-color: var(--accent);
+}
+.spark-bars.spark-bars-tx { --spark-color: var(--amber); }
+.spark-bar {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  background:
+    repeating-linear-gradient(0deg,
+      color-mix(in srgb, var(--spark-color) 10%, transparent) 0,
+      color-mix(in srgb, var(--spark-color) 10%, transparent) 3px,
+      transparent 3px,
+      transparent 5px);
+  overflow: hidden;
+}
+.spark-bar-fill {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 0%;
+  background:
+    repeating-linear-gradient(0deg,
+      transparent 0,
+      transparent 3px,
+      rgba(0, 0, 0, 0.65) 3px,
+      rgba(0, 0, 0, 0.65) 5px),
+    linear-gradient(0deg,
+      var(--spark-color) 0%,
+      var(--spark-color) 50%,
+      var(--amber) 62%,
+      var(--amber) 78%,
+      var(--red) 90%,
+      var(--red) 100%);
+  background-size: 100% 100%, 100% var(--bar-h, 40px);
+  background-position: 0 0, 0 bottom;
+  background-repeat: repeat, no-repeat;
+}
+.spark-bar-peak {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 0%;
+  height: 2px;
+  background: color-mix(in srgb, var(--spark-color) 30%, white);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--spark-color) 50%, white);
+  pointer-events: none;
 }
 
 .sparkline {

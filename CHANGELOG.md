@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.0] — 2026-05-09
+
+### Audio visualizer — frequency-spectrum + peak-hold cascade
+- Loopback path rewritten as a **24-band FFT spectrum** (1024-pt Hann-windowed Cooley-Tukey FFT, log-spaced 60 Hz – 16 kHz) computed inside the audify utility-process worker, ~47 Hz update rate
+- Mic visualizer rewritten to mirror the output: same band layout via `AnalyserNode.getByteFrequencyData()` instead of a time-scrolling RMS history, sample rate bumped to ~30 Hz so the two panels share the same decay/peak feel
+- **Floating peak-hold markers** per bar: snap up on rises, hold for ~12 frames, then decay slowly so peaks trail off like a VU meter
+- **3-zone vertical color cascade** (cool → warm → hot) anchored to the bar's full pixel height via a `--bar-h` CSS variable kept in sync by ResizeObserver — quiet content reads cool, loud transients reach amber/red regardless of fill height
+- Independent gain knobs: worker `pow(avg, .5) * 76` for output, `AUDIO_MIC_GAIN`/`AUDIO_MIC_FLOOR` constants for mic; iterated through several rounds of sensitivity dial-in
+- **Device picker** — clicking the device-name label opens a dropdown listing every output device (with OS-default flag); selection persists in `config.json` and survives reloads. Worker also runs a virtual-cable filter so the OS default doesn't auto-select VB-Audio / Voicemeeter when a real speaker is present.
+
+### Processor & network — same cascade visual language
+- CPU cores, GPU util bars, scratch / drive bars, memory-history (60 s), GPU VRAM all share a single `setMetricBar(fill, pct)` helper that paints fill height, manages a `.core-bar-peak` / `.gpu-bar-peak` sibling, and tracks per-bar peak-hold state via element dataset
+- Old `.warn` / `.high` class swap retired (cascade gradient encodes urgency continuously instead of stepping through three colors)
+- Network RX/TX and Disk Read/Write **SVG sparklines replaced with 96-bar grids** (up from 60 samples) so they share the same look as the audio bars; per-bar peak markers; gap tightened to 1 px
+
+### Themes — 11 new + theme name + auto-cycle
+- **`crimson`** — 3-shade red palette (#C90000 / #980002 / #68030E)
+- **10 low-contrast complementary palettes**: `dust`, `slate`, `mint`, `lavender`, `harbor`, `moss`, `dusk`, `paper`, `storm`, `sage` — desaturated near-equal-luminance pairings so the HUD reads calm at a glance
+- Total themes now **22**
+- **Theme name chip** in the top-bar shows the current theme name; updates live on manual cycle, auto-cycle, or config restore
+- **Auto-cycle button**: when armed, advances theme every 25 s; spinning clock-hand icon doubles as a visual countdown; state persists in `config.themeAuto`
+
+### Thermal panel — power draw readouts + smaller temps
+- Each row (CPU / GPU 0 / GPU 1) now shows a **watts chip** beside the temperature
+- `nvidia-smi --query-gpu=power.draw` extended to feed GPU power
+- LibreHardwareMonitor / OpenHardwareMonitor PowerShell query extended to harvest `Power` sensors for both CPU package and GPUs (fills in CPU power that nvidia-smi can't see)
+- Temp font reduced 10 % (28 px → 25 px) so the new power chip fits without crowding
+
+### Tooling
+- `scripts/build-prompt-log.js` — walks the session JSONL transcript, extracts every user prompt (stripping system reminders / IDE wrappers), pairs each with the cumulative token usage of the assistant turns it triggered, writes `PROMPT-LOG.md` with a summary table + verbatim prompts. Run with `node scripts/build-prompt-log.js`.
+
 ## [0.2.0] — 2026-05-09
 
 ### System audio loopback (native WASAPI)
