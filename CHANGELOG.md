@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.4.0] — 2026-05-09
+
+### Zen idle mode
+- After **15 s** of no input the HUD slides off-screen (top row up, bottom row down, left+right of the mid row outward, combo panel up, top-bar fades up) and a centered overlay fades in
+- **Centered overlay** holds clock + cycling 5-day forecast + per-row network sparks + CPU logical-cores grid; date and weather pin to the top-left
+- **5-day forecast cycling** — `fetchWeather` now also requests Open-Meteo `daily` with `forecast_days=5`; in zen the forecast advances every 5 s, showing day label (`TODAY`/`MON`/`TUE`...) with high/low temps and condition
+- **Theme rotation** every 25 s through a 13-theme calm set (`pastel`, `rose`, `meadow`, `mint`, `lavender`, `sage`, `dust`, `slate`, `harbor`, `moss`, `dusk`, `paper`, `storm`); user's persisted theme is restored on exit
+- **Auto-dim** + low-contrast theme swap on entry; both restored on exit. Non-focal elements (network/CPU/audio) drop to opacity 0.4 so the clock+date+weather read as the focal trio
+- **Audio bars reshape** — 24 bars (per visualizer) → 96 bars stretched across each half of the bottom of the screen, 96 px tall, 1 px gap, gain scaled 0.65× so the dense spectrum reads calm. Linear interpolation upsamples the 24-band FFT input to 96 display bars. Smile curve grows edge bars up to +35 % taller than the center
+- **Insta-zen button** (crescent moon icon in topbar) — clicks force-enter zen instantly via a small `_zenForceArming` guard that suppresses the button-click bubble that would otherwise exit zen
+
+### Zen clock — animated, tabular, pinned center
+- Per-character `<span>` cells with **fixed 0.6 em** widths (and 0.28 em for separators) so digit changes never shift the centered clock — the layout is true tabular even on display fonts (Rajdhani) that don't ship with the OpenType `tnum` feature
+- An **invisible AM/PM mirror** balances the visible AM/PM on the opposite side of the time slot so the time's center is locked exactly to the viewport center
+- Each digit `pop`s on change (translateY/scale curve, 360 ms cubic-bezier) with the bottom of the cell as the transform-origin
+- Each digit also `glow`s — `filter: brightness(1.85)` held briefly then eased back to 1.0 over 1.4 s
+- The whole `.zen-clock` container also `jump`s when any digit changes (translateY -10 px → +2 px → 0)
+- Clock baseline is lifted **+40 %** above the rest of the zen overlay's brightness so it reads as the focal element
+
+### Zen power profile (eco)
+- Entering zen calls `powercfg.exe` (via a new `set-power-profile` IPC) to set the active scheme's `PROCTHROTTLEMAX = 50` and `PROCTHROTTLEMIN = 3` (AC + DC), then `/setactive SCHEME_CURRENT` to apply
+- Leaving zen restores `90` and `5`
+- **`ECO` indicator chip** in the top-right of the zen overlay — pulsing dot in the theme `--ok` color + `PWR PROFILE  ECO` label, large enough to read from across the room
+- All confirmations route through the diagnostics terminal (`power: max=50% min=3%` etc.)
+
+### Webcam popout
+- New camera button in the topbar opens a floating, draggable, resizable PIP panel showing the live webcam (`getUserMedia({video: true})`) mirrored horizontally
+- **Multi-camera cycling** — ⇆ button on the panel iterates through every detected `videoinput` device; the selected `deviceId` persists in `config.webcamDeviceId`, label and `n/N` index appear in the panel chip
+- **VHS transition** when switching cameras — CSS scanlines + a sweeping bright tracking bar with red/cyan ghost lines + RGB chromatic aberration on the video (drop-shadow filters) + a 320×240 painted-noise canvas of high-frequency monochrome static (~0.4 opacity, screen-blended). Total run ~700 ms
+- **Pixelated in zen** — 32×24 canvas takes over from the live `<video>` while idle, scaled up via CSS `image-rendering: pixelated` for chunky 8-bit blocks; rAF paint loop only runs while zen+camera both active
+- **50 % brightness dim** in zen via `filter: brightness(0.5)` on the panel
+- **Pinned to top-right** in zen (slides smoothly via 800 ms cubic-bezier on top/right/left/bottom/transform), returns to user-saved drag position on exit
+- **Security-cam timestamp** in the bottom-left of the panel: `YYYY-MM-DD  HH:MM:SS` (24-hour, ISO style), tabular numerals
+
+### YouTube popout
+- New play-icon topbar button opens a **frameless, always-on-top, 16:9-locked** window
+- Implemented as a small Electron-hosted `youtube-host.html` containing a `<webview>` pointing at `youtube.com` with `partition="persist:youtube"` so cookies and sign-in survive between launches
+- **Sign-in works** through YouTube's normal UI — host CSS only injects the chrome-hide rules on `/watch?v=…` URLs, leaving home/search/auth pages fully usable
+- **Video-only on `/watch`** — `webview.insertCSS()` hides masthead, sidebar, comments, related, metadata, popups, etc., and stretches `#movie_player` + `video.html5-main-video` to fill the window with `object-fit: contain`. After CSS injects, dispatches `window.dispatchEvent(new Event('resize'))` three times (immediate, 250 ms, 800 ms) so YouTube's player JS recomputes layout
+- **16:9 lock** via `setAspectRatio(16/9)`, plus a `will-resize` correction and a post-resize re-snap with re-entry guard so Windows can't drift the ratio during a drag
+- **Auto-hide header** at the top — 26 px strip with status URL, ←/⌂/⫐ (always-on-top toggle)/× — fades after 2 s of mouse stillness so the window becomes 100 % video; reappears on movement
+- **Esc** key closes the window; small `youtube-preload.js` provides the IPC for the AOT toggle button
+
+### Terminal / diagnostics
+- New terminal button in the topbar opens a draggable, resizable diagnostics panel with **CLR / × actions** and a controls strip
+- **Captures**: `console.log/info/warn/error` (originals still go to DevTools), `window.onerror`, `unhandledrejection`. 500-line ring buffer
+- **Telemetry channels** — interval selector (`OFF / 1s / 5s / 15s / 30s / 1m / 5m`), time format (`HH:MM:SS / ISO 8601 / +s SINCE START`), and per-channel toggles (`SYS / TEMP / NET / DISK / STORE`). Every interval the renderer calls all enabled channels in parallel and emits one log line per channel:
+  - `[SYS] cores=24 mem=18.4/63.7GB (29%)`
+  - `[TEMP] cpu=58°C(42W) gpu0=64°C/12% 110W src=si:cpu,nvidia-smi`
+  - `[NET] iface=Wi-Fi rx=84KB tx=12KB total rx=8.35GB tx=15.8GB`
+  - `[DISK] read=0B write=2.1MB q=0`
+- **Theme-tied styling** — `var(--panel-bg)` background to match the rest of the HUD, no borders or hairlines (per request), `var(--accent)` title and hover states. Pinned to the **left edge, vertically centered** when zen activates with the panel open. All settings persist (`terminalPos / terminalSize / terminalOpen / terminalInterval / terminalTimeFmt / terminalChannels`)
+- **Display fix**: the close button was a no-op for two days because `.terminal-panel { display: flex }` overrode the browser's default `[hidden] { display: none }`. Added `.terminal-panel[hidden] { display: none }` and event-delegated handlers on the panel level to avoid future drag/click conflicts
+- **Scrollbar hidden** (`scrollbar-width: none` + `::-webkit-scrollbar { display: none }`) so the log auto-scrolls to bottom without a visible scrubber
+
+### Combined Notes + Chat panel
+- Top-row Notes panel removed; the existing Chat panel in the middle of row 2 became `panel-combo` housing both modes via a `[NOTES] [CHAT]` tab strip below the panel header
+- The originally-separate IDs (`#note-textarea`, `#chat-input`, `#chat-messages`, `#notes-status`, `#chat-footer`, `#notes-tab-count`, `#chat-tag`) all remain so existing notes/chat handlers keep working without modification
+- Title / code chip / tag / footer-label all swap per mode, driven by MutationObservers on the original status elements so updates are live
+- Mode persists in `config.comboMode`. Top row collapses from 3 cols → **2 cols** (`CHRONO | METEO`)
+- **Note tabs auto-title** from the first non-empty line of the body (uppercased, 14-char max). Manual rename via double-click still wins; leaving the prompt blank clears the override and resumes auto-naming
+
+### Themes / chrome
+- **Dim button** added beside Invert: toggles `body.theme-dim` which applies `filter: brightness(0.5)` to `#app`. Stacks with invert via `body.theme-invert.theme-dim` so both compose. Persists in `config.dim`
+- **Crimson theme** added (3-shade red palette: `#C90000 / #980002 / #68030E`) plus 10 low-contrast complementary themes (`dust`, `slate`, `mint`, `lavender`, `harbor`, `moss`, `dusk`, `paper`, `storm`, `sage`) — total 22 themes
+- **Theme-name chip** + **auto-cycle button** (25 s, spinning clock-hand icon as countdown) in the topbar
+- Spark grids on net/disk bumped from 60 → **96 bars**
+
+### Tooling / packaging
+- Dashboard.bat now also copies `youtube-host.html` and `youtube-preload.js` into the packaged folder
+- New IPCs in main process: `set-power-profile`, `open-youtube`, `youtube-toggle-aot`, `audio-set-device`, `audio-out-level` push (existing)
+- New preload methods: `setPowerProfile`, `openYoutube`, `setAudioDevice`
+
 ## [0.3.0] — 2026-05-09
 
 ### Audio visualizer — frequency-spectrum + peak-hold cascade

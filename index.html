@@ -13,6 +13,127 @@
       <div class="bg-grid"></div>
       <div class="bg-grid-overlay" id="bg-grid-overlay"></div>
 
+      <!-- Floating webcam preview. Hidden until the user clicks the camera
+           button in the top bar. Drag to move; close with the × chip. -->
+      <!-- Terminal / diagnostics overlay. Floating, draggable, scrollable.
+           Captures console.log/warn/error and uncaught errors/rejections. -->
+      <div id="terminal-panel" class="terminal-panel" hidden>
+        <div class="terminal-header" id="terminal-header">
+          <span class="terminal-title">TERMINAL · DIAGNOSTICS</span>
+          <button id="terminal-clear" class="terminal-action" type="button" title="Clear log">CLR</button>
+          <button id="terminal-close" class="terminal-action terminal-close" type="button" title="Close">&times;</button>
+        </div>
+        <div class="terminal-controls">
+          <label class="terminal-ctl">
+            <span>INTERVAL</span>
+            <select id="terminal-interval" class="terminal-select">
+              <option value="0">OFF</option>
+              <option value="1">1s</option>
+              <option value="5" selected>5s</option>
+              <option value="15">15s</option>
+              <option value="30">30s</option>
+              <option value="60">1m</option>
+              <option value="300">5m</option>
+            </select>
+          </label>
+          <label class="terminal-ctl">
+            <span>TIME</span>
+            <select id="terminal-tfmt" class="terminal-select">
+              <option value="hms" selected>HH:MM:SS</option>
+              <option value="iso">ISO 8601</option>
+              <option value="rel">+s SINCE START</option>
+            </select>
+          </label>
+          <label class="terminal-ctl terminal-ctl-toggles">
+            <span>CHANNELS</span>
+            <span class="terminal-toggles">
+              <label><input type="checkbox" data-ch="sys" checked> SYS</label>
+              <label><input type="checkbox" data-ch="temp" checked> TEMP</label>
+              <label><input type="checkbox" data-ch="net" checked> NET</label>
+              <label><input type="checkbox" data-ch="disk" checked> DISK</label>
+              <label><input type="checkbox" data-ch="store"> STORE</label>
+            </span>
+          </label>
+        </div>
+        <div id="terminal-log" class="terminal-log"></div>
+        <div class="terminal-resize" id="terminal-resize" title="Drag to resize"></div>
+      </div>
+
+      <div id="webcam-panel" class="webcam-panel" hidden>
+        <video id="webcam-video" autoplay playsinline muted></video>
+        <!-- Low-res pixelated mirror of the live feed, only painted while
+             body.is-zen is set. Drawn at 32×24 then upscaled by CSS with
+             image-rendering: pixelated for chunky blocks. -->
+        <canvas id="webcam-pixel" class="webcam-pixel" width="32" height="24"></canvas>
+        <!-- VHS transition layers, opacity 0 unless `.is-switching` is set -->
+        <div id="webcam-static" class="webcam-static"></div>
+        <canvas id="webcam-noise" class="webcam-noise" width="320" height="240"></canvas>
+        <div class="webcam-scanline"></div>
+        <span class="webcam-label" id="webcam-label">CAMERA</span>
+        <span class="webcam-timestamp" id="webcam-timestamp">--:--:--</span>
+        <button id="webcam-cycle" class="webcam-btn webcam-cycle" type="button" title="Switch camera">&#8646;</button>
+        <button id="webcam-close" class="webcam-btn webcam-close" type="button" title="Close">&times;</button>
+        <div class="webcam-resize" id="webcam-resize" title="Drag to resize"></div>
+      </div>
+
+      <!-- Zen overlay: only visible when body.is-zen. Shows a centered clock
+           and current weather. Populated by the existing tickClock and
+           loadWeather functions; CSS handles show/hide + fade-in. -->
+      <div class="zen-overlay" aria-hidden="true">
+        <div class="zen-clock">
+          <!-- Invisible mirror balances the visible AM/PM on the right so the
+               time element's center stays pinned to viewport center even as
+               digits change width. -->
+          <span class="zen-ampm zen-ampm-mirror" id="zen-ampm-mirror" aria-hidden="true">--</span>
+          <span class="zen-time" id="zen-time">--:--:--</span>
+          <span class="zen-ampm" id="zen-ampm">--</span>
+        </div>
+        <div class="zen-date" id="zen-date">—</div>
+        <div class="zen-weather">
+          <span class="zen-cond" id="zen-cond">—</span>
+          <span class="zen-temp-row">
+            <span class="zen-temp" id="zen-temp">—</span>
+            <span class="zen-temp-unit">°</span>
+            <span class="zen-temp-low-wrap">
+              <span class="zen-temp-sep">/</span>
+              <span class="zen-temp-low" id="zen-temp-low">—</span>
+              <span class="zen-temp-unit">°</span>
+            </span>
+          </span>
+          <span class="zen-loc" id="zen-loc">—</span>
+        </div>
+        <div class="zen-net">
+          <div class="zen-net-row">
+            <span class="zen-net-label">DOWN</span>
+            <div class="spark-bars" id="zen-net-rx-spark"></div>
+            <span class="zen-net-rate" id="zen-net-rx-rate">— B/S</span>
+          </div>
+          <div class="zen-net-row">
+            <span class="zen-net-label">UP</span>
+            <div class="spark-bars spark-bars-tx" id="zen-net-tx-spark"></div>
+            <span class="zen-net-rate" id="zen-net-tx-rate">— B/S</span>
+          </div>
+        </div>
+        <div class="zen-cores">
+          <span class="zen-cores-label">
+            CPU · LOGICAL
+            <span class="zen-mem-value">
+              <span id="zen-cpu-temp">—</span><span class="zen-cpu-temp-unit">°C</span>
+              <span class="zen-cpu-sep">·</span>
+              <span id="zen-cpu-value">—%</span>
+            </span>
+          </span>
+          <div class="zen-cores-grid" id="zen-core-grid"></div>
+        </div>
+        <!-- Active power-profile indicator. Displayed only while in zen mode
+             since the power scheme is throttled at the same time. -->
+        <div class="zen-power">
+          <span class="zen-power-dot"></span>
+          <span class="zen-power-label">PWR PROFILE</span>
+          <span class="zen-power-name">ECO</span>
+        </div>
+      </div>
+
       <div id="audio-out-grid" class="audio-grid audio-grid-out" title="Default output (system audio) — drag to move">
         <div class="audio-bars-row" id="audio-out-bars-row"></div>
         <div class="audio-meta-row">
@@ -58,6 +179,41 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="9"/>
             <path d="M12 3 A 9 9 0 0 1 12 21 Z" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
+        <button id="dim-btn" class="topbar-btn" type="button" title="Dim 50%" aria-label="Dim 50%">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"/>
+            <path d="M12 3 V5  M12 19 V21  M3 12 H5  M19 12 H21  M5.6 5.6 L7 7  M17 17 L18.4 18.4  M5.6 18.4 L7 17  M17 7 L18.4 5.6"/>
+          </svg>
+        </button>
+
+        <button id="camera-btn" class="topbar-btn" type="button" title="Webcam" aria-label="Toggle webcam">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7h4l2-2h6l2 2h4v12H3z"/>
+            <circle cx="12" cy="13" r="3.5"/>
+          </svg>
+        </button>
+
+        <button id="terminal-btn" class="topbar-btn" type="button" title="Terminal / diagnostics" aria-label="Toggle terminal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="1"/>
+            <path d="M7 9l3 3-3 3"/>
+            <path d="M12 16h6"/>
+          </svg>
+        </button>
+
+        <button id="zen-btn" class="topbar-btn" type="button" title="Enter zen mode" aria-label="Enter zen mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+
+        <button id="youtube-btn" class="topbar-btn" type="button" title="YouTube popout" aria-label="Open YouTube popout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2.5" y="6" width="19" height="12" rx="3"/>
+            <path d="M10 9.5 L15 12 L10 14.5 Z" fill="currentColor" stroke="none"/>
           </svg>
         </button>
       </div>
@@ -159,28 +315,6 @@
                 <em class="ok">ACT STATUS</em>
                 <strong class="ok">OK</strong>
               </span>
-            </footer>
-          </section>
-
-          <!-- Notes panel (tabbed scratchpad) -->
-          <section class="panel panel-notes">
-            <header class="panel-header">
-              <span class="panel-title">NOTES <em>N1</em></span>
-              <span class="panel-code">SCRATCHPAD</span>
-              <span class="panel-id" id="notes-tab-count">—</span>
-            </header>
-            <div class="panel-body notes-body">
-              <div class="note-tabs" id="note-tabs"></div>
-              <textarea
-                id="note-textarea"
-                class="note-textarea"
-                spellcheck="false"
-                placeholder="START TYPING…"
-              ></textarea>
-            </div>
-            <footer class="panel-footer">
-              <span class="footer-label">NOTES STATUS</span>
-              <span class="footer-readout" id="notes-status">—</span>
             </footer>
           </section>
 
@@ -346,81 +480,68 @@
             </section>
           </div>
 
-          <!-- Chat panel (Ollama) — middle of row 2 -->
-          <section class="panel panel-chat">
+          <!-- Combined NOTES + CHAT panel — middle of row 2.
+               One panel with a mode toggle so each retains its own UI. -->
+          <section class="panel panel-combo" data-mode="notes">
             <header class="panel-header">
-              <span class="panel-title">CHAT <em>X1</em></span>
-              <span class="panel-code">OLLAMA</span>
-              <span class="panel-id" id="chat-tag">—</span>
+              <span class="panel-title" id="combo-title">NOTES <em>N1</em></span>
+              <span class="panel-code" id="combo-code">SCRATCHPAD</span>
+              <span class="panel-id" id="combo-tag">—</span>
             </header>
-            <div class="panel-body chat-body">
-              <div class="chat-toolbar">
-                <select id="chat-provider" class="chat-select chat-select-narrow">
-                  <option value="ollama">OLLAMA</option>
-                  <option value="azure">AZURE</option>
-                </select>
-                <select id="chat-model" class="chat-select">
-                  <option value="">— LOADING —</option>
-                </select>
-                <button id="chat-auto" class="chat-clear chat-auto" type="button" title="Auto-config Azure via az CLI">AUTO</button>
-                <button id="chat-clear" class="chat-clear" type="button" title="Clear chat">×</button>
+            <div class="combo-mode-tabs">
+              <button type="button" class="combo-mode-tab is-active" data-mode="notes">NOTES</button>
+              <button type="button" class="combo-mode-tab" data-mode="chat">CHAT</button>
+            </div>
+            <div class="panel-body combo-body">
+              <!-- NOTES pane -->
+              <div class="combo-pane combo-pane-notes is-visible">
+                <div class="note-tabs" id="note-tabs"></div>
+                <textarea
+                  id="note-textarea"
+                  class="note-textarea"
+                  spellcheck="false"
+                  placeholder="START TYPING…"
+                ></textarea>
               </div>
 
-              <div class="chat-azure-config" id="chat-azure-config" hidden>
-                <input
-                  id="azure-endpoint"
-                  class="chat-input-line"
-                  type="text"
-                  placeholder="ENDPOINT · https://YOUR-RESOURCE.openai.azure.com"
-                  spellcheck="false"
-                  autocomplete="off"
-                />
-                <div class="chat-azure-row">
-                  <input
-                    id="azure-deployment"
-                    class="chat-input-line"
-                    type="text"
-                    placeholder="DEPLOYMENT NAME"
-                    spellcheck="false"
-                    autocomplete="off"
-                  />
-                  <input
-                    id="azure-version"
-                    class="chat-input-line chat-input-narrow"
-                    type="text"
-                    placeholder="API VERSION"
-                    spellcheck="false"
-                    autocomplete="off"
-                  />
+              <!-- CHAT pane -->
+              <div class="combo-pane combo-pane-chat">
+                <div class="chat-toolbar">
+                  <select id="chat-provider" class="chat-select chat-select-narrow">
+                    <option value="ollama">OLLAMA</option>
+                    <option value="azure">AZURE</option>
+                  </select>
+                  <select id="chat-model" class="chat-select">
+                    <option value="">— LOADING —</option>
+                  </select>
+                  <button id="chat-auto" class="chat-clear chat-auto" type="button" title="Auto-config Azure via az CLI">AUTO</button>
+                  <button id="chat-clear" class="chat-clear" type="button" title="Clear chat">×</button>
                 </div>
-                <input
-                  id="azure-key"
-                  class="chat-input-line"
-                  type="password"
-                  placeholder="API KEY"
-                  spellcheck="false"
-                  autocomplete="off"
-                />
-              </div>
-              <div class="chat-messages" id="chat-messages">
-                <div class="chat-empty">CHAT IS EMPTY · TYPE BELOW TO START</div>
-              </div>
-              <div class="chat-input-row">
-                <textarea
-                  id="chat-input"
-                  class="chat-input"
-                  placeholder="ASK ANYTHING…"
-                  spellcheck="false"
-                  rows="1"
-                ></textarea>
-                <button id="chat-send" class="chat-send" type="button">SEND</button>
+                <div class="chat-azure-config" id="chat-azure-config" hidden>
+                  <input id="azure-endpoint" class="chat-input-line" type="text" placeholder="ENDPOINT · https://YOUR-RESOURCE.openai.azure.com" spellcheck="false" autocomplete="off" />
+                  <div class="chat-azure-row">
+                    <input id="azure-deployment" class="chat-input-line" type="text" placeholder="DEPLOYMENT NAME" spellcheck="false" autocomplete="off" />
+                    <input id="azure-version" class="chat-input-line chat-input-narrow" type="text" placeholder="API VERSION" spellcheck="false" autocomplete="off" />
+                  </div>
+                  <input id="azure-key" class="chat-input-line" type="password" placeholder="API KEY" spellcheck="false" autocomplete="off" />
+                </div>
+                <div class="chat-messages" id="chat-messages">
+                  <div class="chat-empty">CHAT IS EMPTY · TYPE BELOW TO START</div>
+                </div>
+                <div class="chat-input-row">
+                  <textarea id="chat-input" class="chat-input" placeholder="ASK ANYTHING…" spellcheck="false" rows="1"></textarea>
+                  <button id="chat-send" class="chat-send" type="button">SEND</button>
+                </div>
               </div>
             </div>
             <footer class="panel-footer">
-              <span class="footer-label">CHAT STATUS</span>
-              <span class="footer-readout" id="chat-footer">CONNECTING…</span>
+              <span class="footer-label" id="combo-footer-label">NOTES STATUS</span>
+              <span class="footer-readout combo-footer-notes" id="notes-status">—</span>
+              <span class="footer-readout combo-footer-chat"  id="chat-footer">CONNECTING…</span>
             </footer>
           </section>
+          <span id="notes-tab-count" hidden>—</span>
+          <span id="chat-tag" hidden>—</span>
 
           <!-- Storage stacked above Thermal -->
           <div class="panel-stack">

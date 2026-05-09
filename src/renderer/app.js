@@ -145,6 +145,68 @@ function dayOfYear(d) {
   return Math.floor((d - start) / 86400000);
 }
 
+const zenTimeEl       = document.querySelector('#zen-time');
+const zenAmpmEl       = document.querySelector('#zen-ampm');
+const zenAmpmMirEl    = document.querySelector('#zen-ampm-mirror');
+const zenDateEl       = document.querySelector('#zen-date');
+const webcamStampEl   = document.querySelector('#webcam-timestamp');
+
+// Pad helper for the webcam date stamp.
+function _pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+// Build the zen clock as per-character spans with fixed widths so the
+// centered clock can't drift sideways as digits change.
+const _zenTimeCells = [];
+let _zenTimeInitialized = false;
+function paintZenTime(text) {
+  if (!zenTimeEl) return;
+  // First call: blow away the placeholder text node ("--:--:--") that sits
+  // next to the spans we're about to add. Without this you see the dashes
+  // ghosted in front of the live clock on the first tick.
+  if (!_zenTimeInitialized) {
+    zenTimeEl.textContent = '';
+    _zenTimeInitialized = true;
+  }
+  // Reuse spans where possible to keep DOM thrash to a minimum.
+  while (_zenTimeCells.length < text.length) {
+    const s = document.createElement('span');
+    s.className = 'zen-time-char';
+    zenTimeEl.appendChild(s);
+    _zenTimeCells.push(s);
+  }
+  while (_zenTimeCells.length > text.length) {
+    const s = _zenTimeCells.pop();
+    zenTimeEl.removeChild(s);
+  }
+  let anyChanged = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const cell = _zenTimeCells[i];
+    if (cell.textContent !== ch) {
+      cell.textContent = ch;
+      anyChanged = true;
+      // Restart the pop animation: drop the class, force a reflow so the
+      // browser commits the removed state, then re-add. Without the
+      // reflow trick the animation wouldn't re-trigger when the same
+      // class is removed and re-added in the same frame.
+      cell.classList.remove('is-popping');
+      void cell.offsetWidth;
+      cell.classList.add('is-popping');
+    }
+    const sep = (ch === ':' || ch === '.') ? '1' : '0';
+    if (cell.dataset.sep !== sep) cell.dataset.sep = sep;
+  }
+  // Whole-clock hop on any digit change — same reflow trick to retrigger.
+  if (anyChanged) {
+    const clockEl = zenTimeEl.parentElement;
+    if (clockEl) {
+      clockEl.classList.remove('is-jumping');
+      void clockEl.offsetWidth;
+      clockEl.classList.add('is-jumping');
+    }
+  }
+}
+
 function tickClock() {
   const now = new Date();
   const { hms: lhms, ampm: lap } = splitTime(localTimeFmt, now);
@@ -155,6 +217,21 @@ function tickClock() {
   clockDoyEl.textContent    = doy;
   clockDoyHdrEl.textContent = doy;
   clockIdentEl.textContent  = doy;
+  // Mirror to the zen overlay (visible only while idle). Mirror element
+  // tracks the visible AM/PM text so the invisible spacer width matches
+  // exactly, keeping the time pinned to viewport center. Each character of
+  // the time goes into its own fixed-width span so the display-font (which
+  // doesn't have true tabular numerals) can't make the row jiggle.
+  if (zenTimeEl) paintZenTime(lhms);
+  if (zenAmpmEl)    zenAmpmEl.textContent    = lap;
+  if (zenAmpmMirEl) zenAmpmMirEl.textContent = lap;
+  if (zenDateEl)    zenDateEl.textContent    = dateFmt.format(now).toUpperCase();
+  // Security-cam style timestamp on the webcam panel: ISO date + 24h time.
+  if (webcamStampEl) {
+    const iso = `${now.getFullYear()}-${_pad2(now.getMonth() + 1)}-${_pad2(now.getDate())}`;
+    const t24 = `${_pad2(now.getHours())}:${_pad2(now.getMinutes())}:${_pad2(now.getSeconds())}`;
+    webcamStampEl.textContent = `${iso}  ${t24}`;
+  }
 
   if (altTimeFmt && altLocation) {
     const { hms, ampm } = splitTime(altTimeFmt, now);
@@ -284,8 +361,14 @@ function deltaLoad(prev, curr) {
 // underlying fill background is now a cool→warm→hot vertical gradient
 // anchored to the track's pixel height via --bar-h, so the peak alone
 // communicates urgency.
-const METRIC_PEAK_HOLD_FRAMES = 8;
-const METRIC_PEAK_DECAY = 2;
+//
+// Tuned for the slow update rates of these graphs (CPU/GPU/RAM tick every
+// 2 s). HOLD=1 frame ≈ 2 s pause at the peak; DECAY=30 means the peak drops
+// 30 percentage points per update, so a fresh 100 % peak clears in ~3
+// frames (≈ 6 s). The CSS transition on .core-bar-peak / .gpu-bar-peak
+// smooths the visual fall between the discrete updates.
+const METRIC_PEAK_HOLD_FRAMES = 1;
+const METRIC_PEAK_DECAY = 30;
 
 function setMetricBar(fill, pct) {
   if (!fill) return;
@@ -318,6 +401,11 @@ function setMetricBar(fill, pct) {
   peak.style.bottom = `${pk.toFixed(0)}%`;
 }
 
+// Mirror grid for the zen overlay (no labels, smaller).
+const zenCoreGridEl  = document.querySelector('#zen-core-grid');
+const zenCpuValueEl  = document.querySelector('#zen-cpu-value');
+const zenCoreFillEls = [];
+
 function buildCoreGrid(count) {
   coreGridEl.innerHTML = '';
   coreFillEls.length = 0;
@@ -337,6 +425,23 @@ function buildCoreGrid(count) {
     coreGridEl.appendChild(bar);
     coreFillEls.push(fill);
   }
+  // Build matching grid in the zen overlay (same number of bars, no labels).
+  if (zenCoreGridEl) {
+    zenCoreGridEl.innerHTML = '';
+    zenCoreFillEls.length = 0;
+    for (let i = 0; i < count; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'core-bar';
+      const track = document.createElement('div');
+      track.className = 'core-bar-track';
+      const fill = document.createElement('div');
+      fill.className = 'core-bar-fill';
+      track.appendChild(fill);
+      bar.appendChild(track);
+      zenCoreGridEl.appendChild(bar);
+      zenCoreFillEls.push(fill);
+    }
+  }
 }
 
 function paintCore(fill, load) {
@@ -347,6 +452,9 @@ function paintCore(fill, load) {
 const MEM_HIST_LEN = 30;                              // 30 samples × 2s = 60s window
 const memHistBuf = new Array(MEM_HIST_LEN).fill(0);
 const memHistFills = [];
+const zenMemGridEl  = document.querySelector('#zen-mem-grid');
+const zenMemValueEl = document.querySelector('#zen-mem-value');
+const zenMemFills   = [];
 
 function ensureMemHistGrid() {
   if (memHistFills.length === MEM_HIST_LEN) return;
@@ -364,6 +472,22 @@ function ensureMemHistGrid() {
     memHistGridEl.appendChild(bar);
     memHistFills.push(fill);
   }
+  if (zenMemGridEl && zenMemFills.length !== MEM_HIST_LEN) {
+    zenMemGridEl.innerHTML = '';
+    zenMemFills.length = 0;
+    for (let i = 0; i < MEM_HIST_LEN; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'core-bar';
+      const track = document.createElement('div');
+      track.className = 'core-bar-track';
+      const fill = document.createElement('div');
+      fill.className = 'core-bar-fill';
+      track.appendChild(fill);
+      bar.appendChild(track);
+      zenMemGridEl.appendChild(bar);
+      zenMemFills.push(fill);
+    }
+  }
 }
 
 function pushMemHistory(pct) {
@@ -372,9 +496,11 @@ function pushMemHistory(pct) {
   if (memHistBuf.length > MEM_HIST_LEN) memHistBuf.shift();
   for (let i = 0; i < MEM_HIST_LEN; i++) {
     setMetricBar(memHistFills[i], memHistBuf[i]);
+    if (zenMemFills[i]) setMetricBar(zenMemFills[i], memHistBuf[i]);
   }
+  const cur = memHistBuf[memHistBuf.length - 1] || 0;
+  if (zenMemValueEl) zenMemValueEl.textContent = `${cur.toFixed(0)}%`;
   if (memHistValueEl) {
-    const cur = memHistBuf[memHistBuf.length - 1] || 0;
     memHistValueEl.textContent = `${cur.toFixed(0)}%`;
   }
 }
@@ -449,7 +575,8 @@ async function refreshSystem() {
       let sum = 0;
       for (let i = 0; i < info.cpuTimes.length; i++) {
         const load = deltaLoad(lastCpuTimes[i], info.cpuTimes[i]);
-        if (coreFillEls[i]) paintCore(coreFillEls[i], load);
+        if (coreFillEls[i])    paintCore(coreFillEls[i], load);
+        if (zenCoreFillEls[i]) paintCore(zenCoreFillEls[i], load);
         sum += load;
       }
       cpuLoad = sum / info.cpuTimes.length;
@@ -462,6 +589,7 @@ async function refreshSystem() {
     sysCpuBarEl.style.width = `${cpuPct.toFixed(0)}%`;
     sysCpuBarEl.classList.toggle('high', cpuPct >= 85);
     sysCpuValEl.textContent = `${cpuPct.toFixed(0)}%`;
+    if (zenCpuValueEl) zenCpuValueEl.textContent = `${cpuPct.toFixed(0)}%`;
 
     const memFrac = info.usedMem / info.totalMem;
     const memPct  = memFrac * 100;
@@ -549,6 +677,7 @@ const tempsTagEl      = document.querySelector('#temps-tag');
 const powerCpuEl      = document.querySelector('#power-cpu');
 const powerGpu0El     = document.querySelector('#power-gpu0');
 const powerGpu1El     = document.querySelector('#power-gpu1');
+const zenCpuTempEl    = document.querySelector('#zen-cpu-temp');
 
 function paintPower(el, watts) {
   if (!el) return;
@@ -675,18 +804,52 @@ function paintGpuMem(rowEls, used, total) {
   rowEls.vals.textContent = `${fmtBytes(used)} / ${fmtBytes(total)}`;
 }
 
+// Zen overlay GPU mirror — one vertical bar per GPU, parallel to CPU cores.
+const zenGpuGridEl = document.querySelector('#zen-gpu-grid');
+const zenGpuTempsEl = document.querySelector('#zen-gpu-temps');
+const zenGpuFillEls = [];
+
+function buildZenGpuGrid(count) {
+  if (!zenGpuGridEl) return;
+  if (zenGpuFillEls.length === count) return;
+  zenGpuGridEl.innerHTML = '';
+  zenGpuFillEls.length = 0;
+  for (let i = 0; i < count; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'core-bar';
+    const track = document.createElement('div');
+    track.className = 'core-bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'core-bar-fill';
+    track.appendChild(fill);
+    bar.appendChild(track);
+    zenGpuGridEl.appendChild(bar);
+    zenGpuFillEls.push(fill);
+  }
+}
+
 function paintGpuPanel(gpus) {
   const list = Array.isArray(gpus) ? gpus : [];
   if (gpuFillEls.length !== list.length) buildGpuGrid(list);
   if (gpuMemRowEls.length !== list.length) buildGpuMemList(list);
+  buildZenGpuGrid(list.length);
 
   let totalUsed = 0, totalCap = 0;
+  const tempBits = [];
   for (let i = 0; i < list.length; i++) {
     const g = list[i];
     paintGpuUtil(gpuFillEls[i], gpuPctEls[i], g?.load);
     paintGpuMem(gpuMemRowEls[i], g?.memUsed, g?.memTotal);
+    if (zenGpuFillEls[i]) {
+      const util = Math.max(0, Math.min(100, Number.isFinite(g?.load) ? g.load : 0));
+      setMetricBar(zenGpuFillEls[i], util);
+    }
+    if (Number.isFinite(g?.temp)) tempBits.push(`G${i} ${Math.round(g.temp)}°`);
     if (Number.isFinite(g?.memUsed))  totalUsed += g.memUsed;
     if (Number.isFinite(g?.memTotal)) totalCap  += g.memTotal;
+  }
+  if (zenGpuTempsEl) {
+    zenGpuTempsEl.textContent = tempBits.length ? tempBits.join(' · ') : '—';
   }
 
   if (sysGpuCountEl) {
@@ -704,6 +867,7 @@ async function refreshTemps() {
     paintGpuPanel(t.gpus);
     paintTemp(tempCpuEl, tempCpuBarEl, t.cpu);
     paintPower(powerCpuEl, t.cpuPower);
+    if (zenCpuTempEl) zenCpuTempEl.textContent = Number.isFinite(t.cpu) ? `${Math.round(t.cpu)}` : '—';
     tempCpuNameEl.textContent = (t.cpu == null) ? 'NEEDS LHM/OHM' : 'ACPI/SMBUS';
     if (tempCpuNameEl) {
       tempCpuNameEl.title = (t.cpu == null)
@@ -754,6 +918,10 @@ const netIfaceTagEl = document.querySelector('#net-iface-tag');
 const netStatusEl   = document.querySelector('#net-status');
 const netRxSparkEl  = document.querySelector('#net-rx-spark');
 const netTxSparkEl  = document.querySelector('#net-tx-spark');
+const zenNetRxSparkEl = document.querySelector('#zen-net-rx-spark');
+const zenNetTxSparkEl = document.querySelector('#zen-net-tx-spark');
+const zenNetRxRateEl  = document.querySelector('#zen-net-rx-rate');
+const zenNetTxRateEl  = document.querySelector('#zen-net-tx-rate');
 
 const SPARK_SAMPLES = 96;
 const rxBuf = new Array(SPARK_SAMPLES).fill(0);
@@ -776,8 +944,12 @@ function pushSpark(buf, val) {
 // each call re-heights them from the samples buffer and updates a floating
 // peak marker per bar (snap up, hold, then slow decay).
 const _sparkState = new WeakMap(); // container → { peaks: Float32Array, hold: Int32Array, fills: HTMLElement[], peakEls: HTMLElement[], ro: ResizeObserver }
-const SPARK_PEAK_HOLD_FRAMES = 6;
-const SPARK_PEAK_DECAY = 3;
+// Tuned for 1 Hz spark updates (network) / 0.5 Hz (disk). HOLD=2 frames = 1–2 s
+// hover; DECAY=20 means the peak loses 20 percentage points per update, so
+// it visibly falls toward the current bar over a few seconds. CSS transition
+// on .spark-bar-peak smooths the fall between the discrete updates.
+const SPARK_PEAK_HOLD_FRAMES = 2;
+const SPARK_PEAK_DECAY = 20;
 
 function renderSpark(container, samples) {
   if (!container) return;
@@ -854,6 +1026,12 @@ async function refreshNet() {
 
     renderSpark(netRxSparkEl, rxBuf);
     renderSpark(netTxSparkEl, txBuf);
+
+    // Mirror to zen overlay sparks (visible only while idle).
+    if (zenNetRxSparkEl) renderSpark(zenNetRxSparkEl, rxBuf);
+    if (zenNetTxSparkEl) renderSpark(zenNetTxSparkEl, txBuf);
+    if (zenNetRxRateEl) zenNetRxRateEl.textContent = `${r.num} ${r.unit}`;
+    if (zenNetTxRateEl) zenNetTxRateEl.textContent = `${t.num} ${t.unit}`;
 
     const total = (n.rxSec || 0) + (n.txSec || 0);
     if (total <= 0) {
@@ -996,6 +1174,8 @@ async function fetchWeather(lat, lon) {
     latitude: String(lat),
     longitude: String(lon),
     current: 'temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m',
+    daily: 'temperature_2m_max,temperature_2m_min,weather_code',
+    forecast_days: '5',
     timezone: 'auto',
     wind_speed_unit: 'mph',
     temperature_unit: 'fahrenheit',
@@ -1020,6 +1200,34 @@ function locationCode(loc) {
   return `${lat}-${lon}`;
 }
 
+const zenTempEl    = document.querySelector('#zen-temp');
+const zenTempLowEl = document.querySelector('#zen-temp-low');
+const zenCondEl    = document.querySelector('#zen-cond');
+const zenLocEl     = document.querySelector('#zen-loc');
+
+// Cached 5-day forecast + cycling state for zen mode.
+let _forecastDaily = []; // [{ date, max, min, code }, ...]
+let _forecastLocLabel = '';
+let _zenForecastIdx = 0;
+let _zenForecastTimer = null;
+const ZEN_FORECAST_CYCLE_MS = 5000;
+
+function paintZenForecast(idx) {
+  if (!_forecastDaily.length || !zenCondEl) return;
+  const d = _forecastDaily[idx % _forecastDaily.length];
+  if (!d) return;
+  const [text, icon] = describeWeather(d.code);
+  const dayLabel = idx === 0
+    ? 'TODAY'
+    : (d.date instanceof Date && !isNaN(d.date)
+        ? d.date.toLocaleDateString([], { weekday: 'short' }).toUpperCase()
+        : '—');
+  zenCondEl.textContent = `${dayLabel} · ${icon} ${text.toUpperCase()}`;
+  if (zenTempEl)    zenTempEl.textContent    = Number.isFinite(d.max) ? `${Math.round(d.max)}` : '—';
+  if (zenTempLowEl) zenTempLowEl.textContent = Number.isFinite(d.min) ? `${Math.round(d.min)}` : '—';
+  if (zenLocEl)     zenLocEl.textContent     = _forecastLocLabel;
+}
+
 async function loadWeather(loc) {
   setStatus('UPDATING…');
   try {
@@ -1030,6 +1238,19 @@ async function loadWeather(loc) {
     weatherCondEl.textContent = `${icon} ${text.toUpperCase()}`;
     const region = [loc.admin1, loc.country_code || loc.country].filter(Boolean).join(' · ');
     weatherLocEl.textContent = `${loc.name}${region ? ' · ' + region : ''}`.toUpperCase();
+
+    // Cache the 5-day forecast for the zen overlay's cycling display.
+    _forecastDaily = [];
+    if (data.daily?.time?.length) {
+      _forecastDaily = data.daily.time.map((t, i) => ({
+        date: new Date(`${t}T12:00:00`),
+        max:  data.daily.temperature_2m_max?.[i],
+        min:  data.daily.temperature_2m_min?.[i],
+        code: data.daily.weather_code?.[i],
+      }));
+    }
+    _forecastLocLabel = `${loc.name}${region ? ' · ' + region : ''}`.toUpperCase();
+    paintZenForecast(_zenForecastIdx);
     const feels = c.apparent_temperature != null ? `FEELS ${Math.round(c.apparent_temperature)}°` : '';
     const hum   = c.relative_humidity_2m != null ? `${c.relative_humidity_2m}% RH` : '';
     const wind  = c.wind_speed_10m != null ? `${Math.round(c.wind_speed_10m)} MPH` : '';
@@ -1064,7 +1285,20 @@ weatherCityEl.addEventListener('keydown', (e) => {
 });
 
 // ── Audio bar-grids (mic input + system output loopback) ────────────────────
-const AUDIO_BAR_COUNT = 24;
+// Two distinct counts:
+//   AUDIO_BAND_COUNT  — number of FFT bands the worker (loopback) and the
+//                       mic sampler emit. Fixed at 24 because that's what
+//                       the worker hardcodes.
+//   AUDIO_BAR_COUNT_* — number of visible bars per visualizer. Bars upsample
+//                       from bands via linear interpolation when count > 24.
+const AUDIO_BAND_COUNT = 24;
+const AUDIO_BAR_COUNT_NORMAL = 24;
+const AUDIO_BAR_COUNT_ZEN    = 96;
+// Multiplier applied to incoming band/level values. 1.0 in normal mode;
+// lower in zen so the dense bar spectrum reads as a calm visualization
+// rather than a wall of solid color.
+const AUDIO_ZEN_GAIN_SCALE = 0.65;
+let _audioGainScale = 1.0;
 const AUDIO_MIN_W = 100;
 const AUDIO_MIN_H = 40;
 // Mic byte-frequency to percent multiplier. Byte data is already dB-mapped
@@ -1097,22 +1331,33 @@ function shortDeviceName(label, fallback) {
 function createAudioVisualizer({
   gridEl, barsRowEl, muteBtnEl, deviceNameEl, posKey, sizeKey, mutedKey, fallbackLabel,
 }) {
-  const levels    = new Array(AUDIO_BAR_COUNT).fill(0);
-  const displayed = new Array(AUDIO_BAR_COUNT).fill(0); // visible bar height
-  const peaks     = new Array(AUDIO_BAR_COUNT).fill(0); // floating peak marker
-  const peakHold  = new Array(AUDIO_BAR_COUNT).fill(0); // frames before peak starts falling
-  const bars  = [];
+  let levels    = new Array(AUDIO_BAR_COUNT_NORMAL).fill(0);
+  let displayed = new Array(AUDIO_BAR_COUNT_NORMAL).fill(0); // visible bar height
+  let peaks     = new Array(AUDIO_BAR_COUNT_NORMAL).fill(0); // floating peak marker
+  let peakHold  = new Array(AUDIO_BAR_COUNT_NORMAL).fill(0); // frames before peak starts falling
+  const bars    = [];
   const peakEls = [];
   let analyser = null;
   let track = null;
   let muted = false;
 
-  // Build bars (each bar = fill + floating peak marker)
-  if (barsRowEl) {
+  function rebuildBars(n) {
+    levels    = new Array(n).fill(0);
+    displayed = new Array(n).fill(0);
+    peaks     = new Array(n).fill(0);
+    peakHold  = new Array(n).fill(0);
+    bars.length = 0;
+    peakEls.length = 0;
+    if (!barsRowEl) return;
     barsRowEl.innerHTML = '';
-    for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
+    for (let i = 0; i < n; i++) {
       const bar = document.createElement('div');
       bar.className = 'audio-bar';
+      // Smile curve: per-bar vertical scale that grows toward both edges of
+      // the row. dist = 0 at the center, 1 at either end → CSS uses this to
+      // boost scaleY so edge bars read as taller than the middle.
+      const dist = n > 1 ? Math.abs(i / (n - 1) - 0.5) * 2 : 0;
+      bar.style.setProperty('--edge-dist', dist.toFixed(3));
       const fill = document.createElement('div');
       fill.className = 'audio-bar-fill';
       const peak = document.createElement('div');
@@ -1123,6 +1368,11 @@ function createAudioVisualizer({
       bars.push(fill);
       peakEls.push(peak);
     }
+  }
+
+  rebuildBars(AUDIO_BAR_COUNT_NORMAL);
+
+  if (barsRowEl) {
     // Track the row's pixel height so the 3-zone color gradient on each fill
     // can be anchored to the full bar height instead of the fill's own height.
     // Without this the warm/hot zones would scale with the fill and you'd
@@ -1158,11 +1408,11 @@ function createAudioVisualizer({
       const sr = an.context?.sampleRate || 48000;
       const N  = an.fftSize;
       const fMax = Math.min(AUDIO_BAND_FMAX, sr / 2);
-      bandLoBin = new Int32Array(AUDIO_BAR_COUNT);
-      bandHiBin = new Int32Array(AUDIO_BAR_COUNT);
-      for (let b = 0; b < AUDIO_BAR_COUNT; b++) {
-        const fLo = AUDIO_BAND_FMIN * Math.pow(fMax / AUDIO_BAND_FMIN, b       / AUDIO_BAR_COUNT);
-        const fHi = AUDIO_BAND_FMIN * Math.pow(fMax / AUDIO_BAND_FMIN, (b + 1) / AUDIO_BAR_COUNT);
+      bandLoBin = new Int32Array(AUDIO_BAND_COUNT);
+      bandHiBin = new Int32Array(AUDIO_BAND_COUNT);
+      for (let b = 0; b < AUDIO_BAND_COUNT; b++) {
+        const fLo = AUDIO_BAND_FMIN * Math.pow(fMax / AUDIO_BAND_FMIN, b       / AUDIO_BAND_COUNT);
+        const fHi = AUDIO_BAND_FMIN * Math.pow(fMax / AUDIO_BAND_FMIN, (b + 1) / AUDIO_BAND_COUNT);
         bandLoBin[b] = Math.max(1, Math.floor((fLo * N) / sr));
         bandHiBin[b] = Math.max(bandLoBin[b] + 1, Math.floor((fHi * N) / sr));
       }
@@ -1180,8 +1430,8 @@ function createAudioVisualizer({
   function sample() {
     if (!analyser || !bars.length || !bandLoBin || !freqBuf) return;
     analyser.getByteFrequencyData(freqBuf);
-    const out = new Array(AUDIO_BAR_COUNT);
-    for (let b = 0; b < AUDIO_BAR_COUNT; b++) {
+    const out = new Array(AUDIO_BAND_COUNT);
+    for (let b = 0; b < AUDIO_BAND_COUNT; b++) {
       const lo = bandLoBin[b], hi = bandHiBin[b];
       let sum = 0;
       for (let k = lo; k < hi; k++) sum += freqBuf[k];
@@ -1198,18 +1448,35 @@ function createAudioVisualizer({
     if (!bars.length) return;
     levels.push(pct);
     levels.shift();
-    for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
-      updateBar(i, levels[i]);
+    const g = _audioGainScale;
+    for (let i = 0; i < bars.length; i++) {
+      updateBar(i, levels[i] * g);
     }
   }
 
   // Frequency-band push — used by the loopback visualizer (each bar = a
-  // log-spaced FFT band). Static column positions, peak markers per band.
+  // log-spaced FFT band). When the visible bar count exceeds the input band
+  // count (e.g. zen mode with 96 bars vs 24 bands), linearly interpolate so
+  // the bars look like a smooth-ish spectrum instead of repeating in groups.
   function setBands(bands) {
     if (!bars.length || !bands) return;
-    for (let i = 0; i < AUDIO_BAR_COUNT; i++) {
-      const target = Number.isFinite(bands[i]) ? bands[i] : 0;
-      updateBar(i, target);
+    const n = bars.length;
+    const m = bands.length;
+    const g = _audioGainScale;
+    for (let i = 0; i < n; i++) {
+      let target;
+      if (n === m) {
+        target = Number.isFinite(bands[i]) ? bands[i] : 0;
+      } else {
+        const f  = (i / Math.max(1, n - 1)) * (m - 1);
+        const lo = Math.floor(f);
+        const hi = Math.min(m - 1, lo + 1);
+        const t  = f - lo;
+        const a  = Number.isFinite(bands[lo]) ? bands[lo] : 0;
+        const b  = Number.isFinite(bands[hi]) ? bands[hi] : 0;
+        target = a * (1 - t) + b * t;
+      }
+      updateBar(i, target * g);
     }
   }
 
@@ -1349,7 +1616,7 @@ function createAudioVisualizer({
     if (savedMuted) setMuted(true);
   }
 
-  return { sample, pushLevel, setBands, setMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom };
+  return { sample, pushLevel, setBands, setMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom, rebuildBars };
 }
 
 const audioInViz = createAudioVisualizer({
@@ -1614,11 +1881,22 @@ const notesTabCountEl = document.querySelector('#notes-tab-count');
 const TAB_NAME_MAX = 14;
 let notesState = { active: null, tabs: [] };
 let noteSaveTimer = null;
+let activeTabNameSpan = null;
 
 function newTabId() { return 'tab-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e4); }
 
 function activeNoteTab() {
   return notesState.tabs.find(t => t.id === notesState.active) || null;
+}
+
+// Derive a tab's display name. Manual override (`tab.name`) wins; otherwise
+// take the first non-empty line of the note body. Falls back to NOTE N if
+// the note is still blank.
+function tabDisplayName(tab, idx) {
+  if (tab.name && tab.name.trim()) return tab.name;
+  const firstLine = (tab.body || '').split(/\r?\n/).find(l => l.trim());
+  if (firstLine) return firstLine.trim().toUpperCase().slice(0, TAB_NAME_MAX);
+  return `NOTE ${idx + 1}`;
 }
 
 function makeTabEl(tab) {
@@ -1630,7 +1908,8 @@ function makeTabEl(tab) {
 
   const nameSpan = document.createElement('span');
   nameSpan.className = 'note-tab-name';
-  nameSpan.textContent = tab.name || 'NOTE';
+  nameSpan.textContent = tabDisplayName(tab, notesState.tabs.indexOf(tab));
+  if (tab.id === notesState.active) activeTabNameSpan = nameSpan;
 
   const closeSpan = document.createElement('span');
   closeSpan.className = 'note-tab-close';
@@ -1651,12 +1930,12 @@ function makeTabEl(tab) {
 
   btn.addEventListener('dblclick', (e) => {
     if (e.target === closeSpan) return;
-    const newName = window.prompt('Tab name', tab.name || 'NOTE');
-    if (newName && newName.trim()) {
-      tab.name = newName.trim().toUpperCase().slice(0, TAB_NAME_MAX);
-      renderNoteTabs();
-      saveNotesNow();
-    }
+    // Manual override. Leave blank to revert to first-line auto-naming.
+    const newName = window.prompt('Tab name (leave blank to auto-name from first line)', tab.name || '');
+    if (newName === null) return;
+    tab.name = newName.trim().toUpperCase().slice(0, TAB_NAME_MAX);
+    renderNoteTabs();
+    saveNotesNow();
   });
 
   return btn;
@@ -1697,7 +1976,8 @@ function switchNote(id) {
 
 function addNote() {
   const id = newTabId();
-  notesState.tabs.push({ id, name: `NOTE ${notesState.tabs.length + 1}`, body: '' });
+  // Empty name → display falls back to first line of body (or NOTE N if blank).
+  notesState.tabs.push({ id, name: '', body: '' });
   notesState.active = id;
   renderNoteTabs();
   renderActiveNote();
@@ -1735,6 +2015,10 @@ function scheduleNoteSave() {
   const tab = activeNoteTab();
   if (tab) tab.body = noteTextareaEl.value;
   setNotesStatus('EDITING', 'amber');
+  // Live-update the active tab's title from the first line of the body.
+  if (tab && activeTabNameSpan) {
+    activeTabNameSpan.textContent = tabDisplayName(tab, notesState.tabs.indexOf(tab));
+  }
   clearTimeout(noteSaveTimer);
   noteSaveTimer = setTimeout(saveNotesNow, 500);
 }
@@ -2347,7 +2631,65 @@ function attachCollapseButton(panel) {
   header.appendChild(btn);
 }
 
-document.querySelectorAll('.panel-notes, .panel-chat').forEach(attachCollapseButton);
+document.querySelectorAll('.panel-combo').forEach(attachCollapseButton);
+
+// Notes/Chat mode toggle inside the combined panel.
+const comboPanel = document.querySelector('.panel-combo');
+if (comboPanel) {
+  const titleEl       = comboPanel.querySelector('#combo-title');
+  const codeEl        = comboPanel.querySelector('#combo-code');
+  const tagEl         = comboPanel.querySelector('#combo-tag');
+  const footerLabelEl = comboPanel.querySelector('#combo-footer-label');
+  const notesPane     = comboPanel.querySelector('.combo-pane-notes');
+  const chatPane      = comboPanel.querySelector('.combo-pane-chat');
+  const notesTabCount = document.getElementById('notes-tab-count');
+  const chatTagSrc    = document.getElementById('chat-tag');
+
+  function paintComboHeader() {
+    const mode = comboPanel.dataset.mode || 'notes';
+    if (mode === 'notes') {
+      titleEl.innerHTML = 'NOTES <em>N1</em>';
+      codeEl.textContent = 'SCRATCHPAD';
+      tagEl.textContent = notesTabCount?.textContent || '—';
+      footerLabelEl.textContent = 'NOTES STATUS';
+    } else {
+      titleEl.innerHTML = 'CHAT <em>X1</em>';
+      const provider = document.getElementById('chat-provider')?.value;
+      codeEl.textContent = provider === 'azure' ? 'AZURE' : 'OLLAMA';
+      tagEl.textContent = chatTagSrc?.textContent || '—';
+      footerLabelEl.textContent = 'CHAT STATUS';
+    }
+  }
+
+  function setComboMode(mode, persist = true) {
+    if (mode !== 'notes' && mode !== 'chat') mode = 'notes';
+    comboPanel.dataset.mode = mode;
+    notesPane?.classList.toggle('is-visible', mode === 'notes');
+    chatPane ?.classList.toggle('is-visible', mode === 'chat');
+    comboPanel.querySelectorAll('.combo-mode-tab').forEach(b => {
+      b.classList.toggle('is-active', b.dataset.mode === mode);
+    });
+    paintComboHeader();
+    if (persist && window.dash?.setConfig) window.dash.setConfig({ comboMode: mode });
+  }
+
+  comboPanel.querySelectorAll('.combo-mode-tab').forEach(btn => {
+    btn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't drag-grab
+    btn.addEventListener('click', () => setComboMode(btn.dataset.mode));
+  });
+
+  // Keep the visible tag/code chip in sync with whichever mode is active —
+  // the underlying notes/chat code keeps writing to the original hidden IDs.
+  if (notesTabCount) new MutationObserver(paintComboHeader).observe(notesTabCount, { childList: true, characterData: true, subtree: true });
+  if (chatTagSrc)    new MutationObserver(paintComboHeader).observe(chatTagSrc,    { childList: true, characterData: true, subtree: true });
+  document.getElementById('chat-provider')?.addEventListener('change', paintComboHeader);
+
+  // Restore persisted mode.
+  (async () => {
+    const cfg = await window.dash?.getConfig?.() || {};
+    setComboMode(cfg.comboMode || 'notes', false);
+  })();
+}
 
 // Per-element strobe staggering — each meter/row/cell gets a random phase.
 const STROBE_SELECTOR =
@@ -2404,7 +2746,42 @@ staggerStrobeAll();
 
   applyTheme(cfg?.theme || null); // also paints the theme-name chip
   if (cfg?.invert) applyInvert(true);
+  if (cfg?.dim)    applyDim(true);
   if (cfg?.themeAuto) setThemeAuto(true);
+  if (webcamPanelEl && cfg?.webcamPos) {
+    webcamPanelEl.style.left = `${cfg.webcamPos.x}px`;
+    webcamPanelEl.style.top  = `${cfg.webcamPos.y}px`;
+    webcamPanelEl.style.right = 'auto';
+  }
+  if (webcamPanelEl && cfg?.webcamSize) {
+    webcamPanelEl.style.width  = `${cfg.webcamSize.width}px`;
+    webcamPanelEl.style.height = `${cfg.webcamSize.height}px`;
+  }
+  if (cfg?.webcamOpen) setWebcamOpen(true, cfg.webcamDeviceId || undefined);
+  if (terminalPanelEl && cfg?.terminalPos) {
+    terminalPanelEl.style.left = `${cfg.terminalPos.x}px`;
+    terminalPanelEl.style.top  = `${cfg.terminalPos.y}px`;
+  }
+  if (terminalPanelEl && cfg?.terminalSize) {
+    terminalPanelEl.style.width  = `${cfg.terminalSize.width}px`;
+    terminalPanelEl.style.height = `${cfg.terminalSize.height}px`;
+  }
+  if (cfg?.terminalOpen) {
+    terminalPanelEl.hidden = false;
+    terminalBtnEl?.classList.add('is-active');
+  }
+  if (cfg?.terminalChannels && typeof cfg.terminalChannels === 'object') {
+    Object.assign(_termChannels, cfg.terminalChannels);
+    terminalChannelEls.forEach(cb => { cb.checked = !!_termChannels[cb.dataset.ch]; });
+  }
+  if (cfg?.terminalTimeFmt) {
+    _termTimeFmt = cfg.terminalTimeFmt;
+    if (terminalTfmtEl) terminalTfmtEl.value = _termTimeFmt;
+  }
+  // Default to 5s if nothing saved (matches the <select> initial selected).
+  const startInterval = Number.isFinite(cfg?.terminalInterval) ? cfg.terminalInterval : 5;
+  if (terminalIntervalEl) terminalIntervalEl.value = String(startInterval);
+  applyTermInterval(startInterval);
   audioInViz?.applySavedGeom(cfg?.audioInPos,  cfg?.audioInSize,  cfg?.audioInMuted);
   audioOutViz?.applySavedGeom(cfg?.audioOutPos, cfg?.audioOutSize, cfg?.audioOutMuted);
   if (cfg?.collapsed) {
@@ -2454,6 +2831,11 @@ function applyInvert(on) {
   document.body.classList.toggle('theme-invert', !!on);
 }
 
+function applyDim(on) {
+  document.body.classList.toggle('theme-dim', !!on);
+  document.querySelector('#dim-btn')?.classList.toggle('is-active', !!on);
+}
+
 async function advanceTheme(step = 1) {
   const cfg = (await window.dash?.getConfig?.()) || {};
   const cur = cfg.theme ?? null;
@@ -2488,6 +2870,17 @@ document.querySelector('#invert-btn')?.addEventListener('click', async () => {
   if (window.dash?.setConfig) await window.dash.setConfig({ invert: next });
 });
 
+document.querySelector('#dim-btn')?.addEventListener('click', async () => {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  const next = !cfg.dim;
+  applyDim(next);
+  if (window.dash?.setConfig) await window.dash.setConfig({ dim: next });
+});
+
+document.querySelector('#youtube-btn')?.addEventListener('click', () => {
+  window.dash?.openYoutube?.();
+});
+
 // Keyboard shortcuts:
 //   F11           — toggle fullscreen
 //   F5            — reload the dashboard
@@ -2507,4 +2900,626 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     resetAllPanelSizes();
   }
+});
+
+// ── Terminal / diagnostics overlay ──────────────────────────────────────────
+const terminalBtnEl    = document.querySelector('#terminal-btn');
+const terminalPanelEl  = document.querySelector('#terminal-panel');
+const terminalHeaderEl = document.querySelector('#terminal-header');
+const terminalLogEl    = document.querySelector('#terminal-log');
+const terminalClearEl  = document.querySelector('#terminal-clear');
+const terminalCloseEl  = document.querySelector('#terminal-close');
+const terminalResizeEl = document.querySelector('#terminal-resize');
+
+const TERMINAL_MAX_LINES = 500;
+const TERMINAL_START = Date.now();
+let _termTimeFmt = 'hms';
+
+function _termTs() {
+  const d = new Date();
+  if (_termTimeFmt === 'iso') {
+    return d.toISOString().replace('T', ' ').slice(0, 19);
+  }
+  if (_termTimeFmt === 'rel') {
+    const s = ((Date.now() - TERMINAL_START) / 1000).toFixed(1);
+    return `+${s.padStart(7, ' ')}s`;
+  }
+  return `${_pad2(d.getHours())}:${_pad2(d.getMinutes())}:${_pad2(d.getSeconds())}`;
+}
+
+function termLog(level, args) {
+  if (!terminalLogEl) return;
+  const line = document.createElement('div');
+  line.className = `log-line lvl-${level}`;
+  const timeEl = document.createElement('span');
+  timeEl.className = 'log-time';
+  timeEl.textContent = _termTs();
+  const lvlEl = document.createElement('span');
+  lvlEl.className = 'log-lvl';
+  lvlEl.textContent = level;
+  const text = document.createElement('span');
+  text.textContent = (Array.isArray(args) ? args : [args]).map(a => {
+    if (a == null) return String(a);
+    if (typeof a === 'string') return a;
+    if (a instanceof Error) return a.stack || a.message;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(' ');
+  line.appendChild(timeEl);
+  line.appendChild(lvlEl);
+  line.appendChild(text);
+  terminalLogEl.appendChild(line);
+  while (terminalLogEl.children.length > TERMINAL_MAX_LINES) {
+    terminalLogEl.removeChild(terminalLogEl.firstChild);
+  }
+  terminalLogEl.scrollTop = terminalLogEl.scrollHeight;
+}
+
+// Mirror console.log / warn / error into the terminal panel without
+// breaking DevTools logging — original methods are still called.
+const _origConsole = {
+  log:   console.log.bind(console),
+  warn:  console.warn.bind(console),
+  error: console.error.bind(console),
+  info:  console.info.bind(console),
+};
+console.log   = (...a) => { _origConsole.log(...a);   termLog('info',  a); };
+console.info  = (...a) => { _origConsole.info(...a);  termLog('info',  a); };
+console.warn  = (...a) => { _origConsole.warn(...a);  termLog('warn',  a); };
+console.error = (...a) => { _origConsole.error(...a); termLog('error', a); };
+
+window.addEventListener('error', (e) => {
+  termLog('error', [`${e.message || 'Error'}  (${e.filename || '?'}:${e.lineno || '?'}:${e.colno || '?'})`]);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  termLog('error', ['Unhandled rejection:', e.reason]);
+});
+
+// Initial diagnostics line so the user sees the terminal is alive.
+termLog('info', [`DASHBOARD3D · UA=${navigator.userAgent.split(' ').slice(-2).join(' ')}`]);
+
+terminalBtnEl?.addEventListener('click', async () => {
+  if (!terminalPanelEl) return;
+  const next = terminalPanelEl.hidden;
+  terminalPanelEl.hidden = !next;
+  terminalBtnEl.classList.toggle('is-active', next);
+  if (next) terminalLogEl.scrollTop = terminalLogEl.scrollHeight;
+  if (window.dash?.setConfig) await window.dash.setConfig({ terminalOpen: next });
+});
+
+async function closeTerminal() {
+  if (!terminalPanelEl) return;
+  terminalPanelEl.hidden = true;
+  terminalBtnEl?.classList.remove('is-active');
+  if (window.dash?.setConfig) await window.dash.setConfig({ terminalOpen: false });
+}
+
+// Event-delegated handlers on the panel itself — survive any inner DOM
+// changes and won't be accidentally suppressed by sibling listeners.
+terminalPanelEl?.addEventListener('mousedown', (e) => {
+  // Don't let action-button mousedowns reach the header's drag listener.
+  if (e.target.closest && e.target.closest('.terminal-action')) {
+    e.stopPropagation();
+  }
+});
+terminalPanelEl?.addEventListener('click', (e) => {
+  if (e.target.closest && e.target.closest('#terminal-close')) {
+    e.stopPropagation();
+    closeTerminal();
+    return;
+  }
+  if (e.target.closest && e.target.closest('#terminal-clear')) {
+    e.stopPropagation();
+    if (terminalLogEl) terminalLogEl.innerHTML = '';
+    return;
+  }
+});
+
+// Drag from the header (so clicks on log text don't grab a drag).
+// Use closest() so a click on any descendant (icon, text node, span)
+// of an action button is treated as a button click, not a drag start.
+terminalHeaderEl?.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (e.target.closest && e.target.closest('.terminal-action')) return;
+  e.preventDefault();
+  const rect = terminalPanelEl.getBoundingClientRect();
+  const startX = e.clientX, startY = e.clientY;
+  const startLeft = rect.left, startTop = rect.top;
+  terminalPanelEl.style.left = `${startLeft}px`;
+  terminalPanelEl.style.top  = `${startTop}px`;
+  terminalPanelEl.style.right = 'auto';
+  const onMove = (ev) => {
+    terminalPanelEl.style.left = `${startLeft + (ev.clientX - startX)}px`;
+    terminalPanelEl.style.top  = `${startTop  + (ev.clientY - startY)}px`;
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    saveTerminalGeom();
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+terminalResizeEl?.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const rect = terminalPanelEl.getBoundingClientRect();
+  const startX = e.clientX, startY = e.clientY;
+  const startW = rect.width, startH = rect.height;
+  const onMove = (ev) => {
+    terminalPanelEl.style.width  = `${Math.max(280, startW + (ev.clientX - startX))}px`;
+    terminalPanelEl.style.height = `${Math.max(140, startH + (ev.clientY - startY))}px`;
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    saveTerminalGeom();
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+async function saveTerminalGeom() {
+  if (!terminalPanelEl || !window.dash?.setConfig) return;
+  const x = parseInt(terminalPanelEl.style.left, 10);
+  const y = parseInt(terminalPanelEl.style.top,  10);
+  const w = parseInt(terminalPanelEl.style.width,  10);
+  const h = parseInt(terminalPanelEl.style.height, 10);
+  const partial = {};
+  if (Number.isFinite(x) && Number.isFinite(y)) partial.terminalPos  = { x, y };
+  if (Number.isFinite(w) && Number.isFinite(h)) partial.terminalSize = { width: w, height: h };
+  if (Object.keys(partial).length) await window.dash.setConfig(partial);
+}
+
+// ── Terminal telemetry ──────────────────────────────────────────────────────
+const terminalIntervalEl = document.querySelector('#terminal-interval');
+const terminalTfmtEl     = document.querySelector('#terminal-tfmt');
+const terminalChannelEls = document.querySelectorAll('.terminal-toggles input[type="checkbox"]');
+let _termTelemetryTimer = null;
+let _termChannels = { sys: true, temp: true, net: true, disk: true, store: false };
+
+function fmt1(n)   { return Number.isFinite(n) ? n.toFixed(1) : '—'; }
+function fmt0(n)   { return Number.isFinite(n) ? Math.round(n).toString() : '—'; }
+function fmtRateShort(b) {
+  const r = fmtRate(b || 0);
+  return `${r.num}${r.unit.replace('B/S', 'B').replace('/S', '')}`;
+}
+
+async function gatherTelemetry() {
+  if (!window.dash) return;
+  const tasks = [];
+  if (_termChannels.sys && window.dash.systemInfo)
+    tasks.push(window.dash.systemInfo().then(d => ['SYS', formatSys(d)]).catch(e => ['SYS', `ERR ${e.message}`]));
+  if (_termChannels.temp && window.dash.tempsInfo)
+    tasks.push(window.dash.tempsInfo().then(d => ['TEMP', formatTemp(d)]).catch(e => ['TEMP', `ERR ${e.message}`]));
+  if (_termChannels.net && window.dash.netInfo)
+    tasks.push(window.dash.netInfo().then(d => ['NET', formatNet(d)]).catch(e => ['NET', `ERR ${e.message}`]));
+  if (_termChannels.disk && window.dash.diskInfo)
+    tasks.push(window.dash.diskInfo().then(d => ['DISK', formatDisk(d)]).catch(e => ['DISK', `ERR ${e.message}`]));
+  if (_termChannels.store && window.dash.storageInfo)
+    tasks.push(window.dash.storageInfo().then(d => ['STORE', formatStore(d)]).catch(e => ['STORE', `ERR ${e.message}`]));
+  const results = await Promise.allSettled(tasks);
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue;
+    const [tag, msg] = r.value;
+    termLog('info', [`[${tag}] ${msg}`]);
+  }
+}
+
+function formatSys(d) {
+  if (!d) return 'no data';
+  const cpuCount = d.cpuCount || 0;
+  const memUsedGB  = d.usedMem  ? (d.usedMem  / 1073741824) : null;
+  const memTotalGB = d.totalMem ? (d.totalMem / 1073741824) : null;
+  const memPct = memUsedGB && memTotalGB ? (memUsedGB / memTotalGB) * 100 : null;
+  return `cores=${cpuCount} mem=${fmt1(memUsedGB)}/${fmt1(memTotalGB)}GB (${fmt0(memPct)}%)`;
+}
+function formatTemp(d) {
+  if (!d) return 'no data';
+  const cpu = Number.isFinite(d.cpu) ? `cpu=${fmt0(d.cpu)}°C` : 'cpu=—';
+  const cpuP = Number.isFinite(d.cpuPower) ? `${fmt0(d.cpuPower)}W` : '';
+  const gpus = (d.gpus || []).map((g, i) => {
+    const t = Number.isFinite(g.temp)  ? `${fmt0(g.temp)}°C` : '—';
+    const u = Number.isFinite(g.load)  ? `${fmt0(g.load)}%`  : '—';
+    const p = Number.isFinite(g.power) ? ` ${fmt0(g.power)}W` : '';
+    return `gpu${i}=${t}/${u}${p}`;
+  }).join(' ');
+  return [cpu + (cpuP ? `(${cpuP})` : ''), gpus, `src=${(d.sources || []).join(',') || 'none'}`].filter(Boolean).join(' ');
+}
+function formatNet(d) {
+  if (!d) return 'no data';
+  return `iface=${d.iface || 'none'} rx=${fmtRateShort(d.rxSec)} tx=${fmtRateShort(d.txSec)} total rx=${fmtBytes(d.rxTotal || 0)} tx=${fmtBytes(d.txTotal || 0)}`;
+}
+function formatDisk(d) {
+  if (!d) return 'no data';
+  return `read=${fmtRateShort(d.readSec)} write=${fmtRateShort(d.writeSec)} q=${fmt0(d.queueLen)} ${d.unsupported ? 'UNSUPPORTED' : ''}`.trim();
+}
+function formatStore(d) {
+  if (!Array.isArray(d) || !d.length) return 'no drives';
+  return d.slice(0, 6).map(x => {
+    const used = x.used ? `${fmtBytes(x.used)}/${fmtBytes(x.total)}` : '[net]';
+    return `${x.mount}=${used}`;
+  }).join(' ');
+}
+
+function applyTermInterval(seconds) {
+  clearInterval(_termTelemetryTimer);
+  _termTelemetryTimer = null;
+  if (!seconds || seconds <= 0) {
+    termLog('info', ['telemetry: OFF']);
+    return;
+  }
+  termLog('info', [`telemetry: every ${seconds}s, channels=${Object.entries(_termChannels).filter(([,v]) => v).map(([k]) => k).join(',')}`]);
+  // Fire one immediately so the user sees data right away, then on interval.
+  gatherTelemetry();
+  _termTelemetryTimer = setInterval(gatherTelemetry, seconds * 1000);
+}
+
+terminalIntervalEl?.addEventListener('change', async () => {
+  const sec = parseInt(terminalIntervalEl.value, 10);
+  applyTermInterval(sec);
+  if (window.dash?.setConfig) await window.dash.setConfig({ terminalInterval: sec });
+});
+terminalTfmtEl?.addEventListener('change', async () => {
+  _termTimeFmt = terminalTfmtEl.value;
+  if (window.dash?.setConfig) await window.dash.setConfig({ terminalTimeFmt: _termTimeFmt });
+});
+terminalChannelEls.forEach(cb => {
+  cb.addEventListener('change', async () => {
+    _termChannels[cb.dataset.ch] = cb.checked;
+    if (window.dash?.setConfig) await window.dash.setConfig({ terminalChannels: { ..._termChannels } });
+  });
+});
+
+// ── Webcam preview ──────────────────────────────────────────────────────────
+const cameraBtnEl    = document.querySelector('#camera-btn');
+const webcamPanelEl  = document.querySelector('#webcam-panel');
+const webcamVideoEl  = document.querySelector('#webcam-video');
+const webcamCloseEl  = document.querySelector('#webcam-close');
+const webcamCycleEl  = document.querySelector('#webcam-cycle');
+const webcamLabelEl  = document.querySelector('#webcam-label');
+const webcamResizeEl = document.querySelector('#webcam-resize');
+const webcamPixelEl  = document.querySelector('#webcam-pixel');
+
+// rAF loop that downsamples the live video into the small canvas. Only runs
+// while zen is active AND the webcam panel is open. Sync via syncWebcamPixel.
+let _pixelRAF = null;
+function startPixelLoop() {
+  if (_pixelRAF || !webcamPixelEl || !webcamVideoEl) return;
+  const ctx = webcamPixelEl.getContext('2d');
+  if (!ctx) return;
+  ctx.imageSmoothingEnabled = false;
+  const draw = () => {
+    if (webcamVideoEl.videoWidth > 0 && webcamVideoEl.videoHeight > 0) {
+      ctx.drawImage(webcamVideoEl, 0, 0, webcamPixelEl.width, webcamPixelEl.height);
+    }
+    _pixelRAF = requestAnimationFrame(draw);
+  };
+  _pixelRAF = requestAnimationFrame(draw);
+}
+function stopPixelLoop() {
+  if (_pixelRAF) cancelAnimationFrame(_pixelRAF);
+  _pixelRAF = null;
+}
+function syncWebcamPixel() {
+  const zen = document.body.classList.contains('is-zen');
+  const open = webcamPanelEl && !webcamPanelEl.hidden;
+  if (zen && open) startPixelLoop();
+  else stopPixelLoop();
+}
+// Painted random-noise canvas adds true TV-static dropout on top of the
+// CSS scanlines + tracking bar. Stops automatically after the transition
+// window. _noiseRAF guards against overlapping loops on rapid cycles.
+const webcamNoiseEl = document.querySelector('#webcam-noise');
+let _noiseRAF = null;
+function runNoise(durationMs = 700) {
+  if (!webcamNoiseEl || _noiseRAF) return;
+  const ctx = webcamNoiseEl.getContext('2d', { willReadFrequently: false });
+  if (!ctx) return;
+  const w = webcamNoiseEl.width;
+  const h = webcamNoiseEl.height;
+  const stop = performance.now() + durationMs;
+  const step = () => {
+    if (performance.now() > stop) { _noiseRAF = null; return; }
+    const img = ctx.createImageData(w, h);
+    const d = img.data;
+    // Pure fine-grain monochrome snow at canvas resolution. 320×240 against
+    // ~280×200 panels means each canvas pixel is ~= one screen pixel, so
+    // the grain is fine instead of chunky. The CSS layer (.webcam-static)
+    // adds the scanlines on top of this.
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (Math.random() * 230) | 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+      d[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    _noiseRAF = requestAnimationFrame(step);
+  };
+  _noiseRAF = requestAnimationFrame(step);
+}
+let _webcamStream = null;
+let _cameras = [];           // cached video input device list
+let _activeCameraId = null;  // deviceId of the currently streaming camera
+
+async function refreshCameraList() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    _cameras = devices.filter(d => d.kind === 'videoinput');
+  } catch (err) {
+    console.warn('enumerateDevices failed:', err.message);
+  }
+}
+
+function updateWebcamLabel() {
+  if (!webcamLabelEl) return;
+  if (!_activeCameraId || !_cameras.length) {
+    webcamLabelEl.textContent = 'CAMERA';
+    return;
+  }
+  const idx = _cameras.findIndex(c => c.deviceId === _activeCameraId);
+  const cam = idx >= 0 ? _cameras[idx] : null;
+  // Labels are only populated after a getUserMedia grant, so fall back to
+  // a numeric index until we have the friendly name.
+  const name = cam?.label?.trim();
+  const tag = `${idx + 1}/${_cameras.length}`;
+  webcamLabelEl.textContent = (name ? name : `CAMERA`).toUpperCase().slice(0, 26) + (
+    _cameras.length > 1 ? `  ·  ${tag}` : ''
+  );
+}
+
+async function startWebcam(deviceId = null) {
+  // Stop any prior stream cleanly so the camera light goes off in between.
+  if (_webcamStream) {
+    for (const t of _webcamStream.getTracks()) { try { t.stop(); } catch {} }
+    _webcamStream = null;
+  }
+  try {
+    const constraints = {
+      video: deviceId ? { deviceId: { exact: deviceId } } : true,
+      audio: false,
+    };
+    _webcamStream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (webcamVideoEl) webcamVideoEl.srcObject = _webcamStream;
+    const settings = _webcamStream.getVideoTracks()[0]?.getSettings?.();
+    _activeCameraId = deviceId || settings?.deviceId || _activeCameraId;
+    await refreshCameraList(); // labels are now usable
+    updateWebcamLabel();
+    return true;
+  } catch (err) {
+    console.error('webcam start failed:', err);
+    return false;
+  }
+}
+
+function stopWebcam() {
+  if (webcamVideoEl) webcamVideoEl.srcObject = null;
+  if (_webcamStream) {
+    for (const t of _webcamStream.getTracks()) { try { t.stop(); } catch {} }
+    _webcamStream = null;
+  }
+}
+
+async function cycleCamera() {
+  await refreshCameraList();
+  if (_cameras.length < 2) return;
+  const curIdx = Math.max(0, _cameras.findIndex(c => c.deviceId === _activeCameraId));
+  const nextIdx = (curIdx + 1) % _cameras.length;
+  const nextId = _cameras[nextIdx].deviceId;
+  // VHS transition: scanlines + tracking bar + painted RGB noise + roll
+  // for ~700ms while the new stream comes up under it.
+  webcamPanelEl?.classList.add('is-switching');
+  runNoise(700);
+  await startWebcam(nextId);
+  setTimeout(() => webcamPanelEl?.classList.remove('is-switching'), 700);
+  if (window.dash?.setConfig) await window.dash.setConfig({ webcamDeviceId: nextId });
+}
+
+async function setWebcamOpen(on, deviceId = undefined) {
+  if (!webcamPanelEl) return;
+  cameraBtnEl?.classList.toggle('is-active', !!on);
+  if (on) {
+    webcamPanelEl.hidden = false;
+    const ok = await startWebcam(deviceId);
+    if (!ok) {
+      webcamPanelEl.hidden = true;
+      cameraBtnEl?.classList.remove('is-active');
+      return;
+    }
+  } else {
+    webcamPanelEl.hidden = true;
+    stopWebcam();
+  }
+  syncWebcamPixel();
+  if (window.dash?.setConfig) await window.dash.setConfig({ webcamOpen: on });
+}
+
+cameraBtnEl?.addEventListener('click', async () => {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  await setWebcamOpen(!cfg.webcamOpen, cfg.webcamDeviceId || undefined);
+});
+webcamCloseEl?.addEventListener('mousedown', (e) => e.stopPropagation());
+webcamCloseEl?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setWebcamOpen(false);
+});
+webcamCycleEl?.addEventListener('mousedown', (e) => e.stopPropagation());
+webcamCycleEl?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  cycleCamera();
+});
+
+// Drag to move (anywhere on the panel except the resize handle/close button)
+webcamPanelEl?.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (e.target === webcamCloseEl || e.target === webcamResizeEl) return;
+  e.preventDefault();
+  const rect = webcamPanelEl.getBoundingClientRect();
+  const startX = e.clientX, startY = e.clientY;
+  const startLeft = rect.left, startTop = rect.top;
+  webcamPanelEl.style.left = `${startLeft}px`;
+  webcamPanelEl.style.top  = `${startTop}px`;
+  webcamPanelEl.style.right = 'auto';
+  const onMove = (ev) => {
+    webcamPanelEl.style.left = `${startLeft + (ev.clientX - startX)}px`;
+    webcamPanelEl.style.top  = `${startTop  + (ev.clientY - startY)}px`;
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    saveWebcamGeom();
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+// Resize from the bottom-right handle
+webcamResizeEl?.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const rect = webcamPanelEl.getBoundingClientRect();
+  const startX = e.clientX, startY = e.clientY;
+  const startW = rect.width, startH = rect.height;
+  const onMove = (ev) => {
+    const w = Math.max(160, startW + (ev.clientX - startX));
+    const h = Math.max(120, startH + (ev.clientY - startY));
+    webcamPanelEl.style.width  = `${w}px`;
+    webcamPanelEl.style.height = `${h}px`;
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    saveWebcamGeom();
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+async function saveWebcamGeom() {
+  if (!webcamPanelEl || !window.dash?.setConfig) return;
+  const x = parseInt(webcamPanelEl.style.left, 10);
+  const y = parseInt(webcamPanelEl.style.top,  10);
+  const w = parseInt(webcamPanelEl.style.width,  10);
+  const h = parseInt(webcamPanelEl.style.height, 10);
+  const partial = {};
+  if (Number.isFinite(x) && Number.isFinite(y)) partial.webcamPos  = { x, y };
+  if (Number.isFinite(w) && Number.isFinite(h)) partial.webcamSize = { width: w, height: h };
+  if (Object.keys(partial).length) await window.dash.setConfig(partial);
+}
+
+// Zen idle: after 15 s of no mouse/keyboard activity, slide every tool panel
+// off-screen so only the audio meters and background grid remain. Any input
+// brings them back. CSS handles the actual motion via `body.is-zen`.
+//
+// While zen is active, swap to a low-contrast palette + dim filter so the
+// remaining audio bars + grid read as a calm screensaver. Snapshot the
+// user's previous theme/dim before swapping so we can restore on exit
+// without writing to config (so the user's saved theme is preserved).
+const ZEN_IDLE_MS = 15000;
+const ZEN_CYCLE_MS = 25000;
+// Pastel + low-contrast set used as a slow theme rotation while idle.
+const ZEN_THEMES = [
+  'pastel', 'rose', 'meadow',
+  'mint', 'lavender', 'sage',
+  'dust', 'slate', 'harbor', 'moss', 'dusk', 'paper', 'storm',
+];
+let _zenTimer = null;
+let _zenCycleTimer = null;
+let _zenActive = false;
+let _zenPrevTheme = null;
+let _zenPrevDim   = false;
+let _zenIdx = 0;
+
+// Zen power-throttle settings — adjust the active Windows power scheme so
+// the CPU is gentler when idle and snaps back on resume.
+const ZEN_POWER_ZEN    = { maxCpu: 50, minCpu: 3 };
+const ZEN_POWER_NORMAL = { maxCpu: 90, minCpu: 5 };
+
+function applyZenPower(opts) {
+  if (!window.dash?.setPowerProfile) return;
+  window.dash.setPowerProfile(opts).then((r) => {
+    if (r?.ok) console.log(`power: max=${r.max}% min=${r.min}%`);
+    else if (r?.error) console.warn(`power: ${r.error}`);
+  }).catch((err) => console.warn('power:', err.message));
+}
+
+function enterZen() {
+  if (_zenActive) return;
+  _zenActive = true;
+  _zenPrevTheme = document.documentElement.getAttribute('data-theme') || null;
+  _zenPrevDim   = document.body.classList.contains('theme-dim');
+  _zenIdx = Math.floor(Math.random() * ZEN_THEMES.length);
+  applyTheme(ZEN_THEMES[_zenIdx]);
+  applyDim(true);
+  applyZenPower(ZEN_POWER_ZEN);
+  document.body.classList.add('is-zen');
+  // Audio bars get expanded and stretched wide → upsample from 24 to 96.
+  // Drop the gain so the dense bar spectrum reads as a calm visualization.
+  audioOutViz?.rebuildBars?.(AUDIO_BAR_COUNT_ZEN);
+  audioInViz ?.rebuildBars?.(AUDIO_BAR_COUNT_ZEN);
+  _audioGainScale = AUDIO_ZEN_GAIN_SCALE;
+  syncWebcamPixel();
+  clearInterval(_zenCycleTimer);
+  _zenCycleTimer = setInterval(() => {
+    _zenIdx = (_zenIdx + 1) % ZEN_THEMES.length;
+    applyTheme(ZEN_THEMES[_zenIdx]);
+  }, ZEN_CYCLE_MS);
+  // Cycle through the 5-day forecast in the corner widget.
+  _zenForecastIdx = 0;
+  paintZenForecast(0);
+  clearInterval(_zenForecastTimer);
+  _zenForecastTimer = setInterval(() => {
+    if (!_forecastDaily.length) return;
+    _zenForecastIdx = (_zenForecastIdx + 1) % _forecastDaily.length;
+    paintZenForecast(_zenForecastIdx);
+  }, ZEN_FORECAST_CYCLE_MS);
+}
+
+function leaveZen() {
+  if (!_zenActive) return;
+  _zenActive = false;
+  clearInterval(_zenCycleTimer);
+  _zenCycleTimer = null;
+  document.body.classList.remove('is-zen');
+  applyTheme(_zenPrevTheme);
+  applyDim(_zenPrevDim);
+  applyZenPower(ZEN_POWER_NORMAL);
+  audioOutViz?.rebuildBars?.(AUDIO_BAR_COUNT_NORMAL);
+  audioInViz ?.rebuildBars?.(AUDIO_BAR_COUNT_NORMAL);
+  _audioGainScale = 1.0;
+  clearInterval(_zenForecastTimer);
+  _zenForecastTimer = null;
+  _zenForecastIdx = 0;
+  syncWebcamPixel();
+}
+
+// When the user clicks the zen button, the same click bubbles up to the
+// global input listeners that would normally exit zen — so we suppress the
+// arm/leave path for a short window around the button click.
+let _zenForceArming = false;
+
+function armZenTimer() {
+  if (_zenForceArming) return;
+  if (_zenActive) leaveZen();
+  clearTimeout(_zenTimer);
+  _zenTimer = setTimeout(enterZen, ZEN_IDLE_MS);
+}
+['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart', 'touchmove']
+  .forEach(ev => window.addEventListener(ev, armZenTimer, { passive: true }));
+armZenTimer();
+
+const zenBtnEl = document.querySelector('#zen-btn');
+zenBtnEl?.addEventListener('mousedown', (e) => {
+  e.stopPropagation();
+  _zenForceArming = true; // suppress leaveZen on the bubbling mousedown
+});
+zenBtnEl?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  clearTimeout(_zenTimer);
+  enterZen();
+  // Re-enable the normal arm/exit behavior after this click cycle settles
+  // so the user can leave zen by moving the mouse / typing.
+  setTimeout(() => { _zenForceArming = false; }, 250);
 });

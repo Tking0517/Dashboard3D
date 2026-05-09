@@ -21,4 +21,10 @@ contextBridge.exposeInMainWorld('dash', {
     return () => ipcRenderer.removeListener('audio-out-level', handler);
   },
   setAudioDevice: (deviceId) => ipcRenderer.invoke('audio-set-device', deviceId),
+
+  // Set Windows power-scheme processor min/max state (used to throttle CPU
+  // during zen mode and restore performance on resume).
+  setPowerProfile: (opts) => ipcRenderer.invoke('set-power-profile', opts),
+
+  openYoutube: () => ipcRenderer.invoke('open-youtube'),
 });

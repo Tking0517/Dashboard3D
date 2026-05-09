@@ -2,12 +2,12 @@
 
 Generated from session transcript: `2b962f0d-cb68-4ce0-a6de-60410ee9806e.jsonl`
 
-**Total prompts:** 108  
-**Total input tokens:** 3,279  
-**Total output tokens:** 2,002,467  
-**Total cache read:** 623,574,876  
-**Total cache creation:** 17,752,172  
-**Grand total tokens:** 643,332,794
+**Total prompts:** 178  
+**Total input tokens:** 4,703  
+**Total output tokens:** 2,628,984  
+**Total cache read:** 932,876,136  
+**Total cache creation:** 19,744,522  
+**Grand total tokens:** 955,254,345
 
 ## How to read this
 
@@ -129,7 +129,77 @@ Each row is one user prompt and the cumulative token usage of every assistant tu
 | 105 | 2026-05-09 14:32:20 | 6 | 16 | 2,905 | 1,570,153 | 2,902 | for the network and the drive graphs lets increase the amount of blocks \bars |
 | 106 | 2026-05-09 14:36:14 | 30 | 40 | 23,239 | 8,231,157 | 34,306 | the temp numbers are too big, make them 10% smaller, and rightr beside, can we add the pow… |
 | 107 | 2026-05-09 14:42:11 | 2 | 12 | 1,910 | 572,744 | 692 | what are we making it in |
-| 108 | 2026-05-09 14:46:02 | 12 | 27 | 13,487 | 3,468,629 | 12,372 | looking back, lets make a doc, i want to record what prompts i useds, how many, and how ma… |
+| 108 | 2026-05-09 14:46:02 | 16 | 31 | 15,992 | 4,652,423 | 15,588 | looking back, lets make a doc, i want to record what prompts i useds, how many, and how ma… |
+| 109 | 2026-05-09 14:49:50 | 9 | 19 | 6,059 | 2,702,170 | 9,115 | push this to github, And version up |
+| 110 | 2026-05-09 14:51:47 | 30 | 40 | 21,468 | 9,393,993 | 31,666 | ok we need to combine the chat and the notes tab |
+| 111 | 2026-05-09 14:56:33 | 14 | 24 | 6,936 | 4,561,023 | 10,778 | for the notes  take the first line and use that ads the norte tittle |
+| 112 | 2026-05-09 14:59:47 | 17 | 27 | 6,361 | 5,651,648 | 8,146 | for the themes we have invert,  lets make a dim button too that darken the entire ui all o… |
+| 113 | 2026-05-09 15:04:26 | 2 | 12 | 10,826 | 671,362 | 584 | we built a theme, i supplied swtaches, you converted to hex codes, and created a theme ssy… |
+| 114 | 2026-05-09 15:07:53 | 13 | 43 | 28,100 | 4,494,710 | 46,835 | the peaks of the graphs arnt falling like the ones on my audio bars, can we make them do t… |
+| 115 | 2026-05-09 15:12:46 | 15 | 25 | 13,728 | 5,391,203 | 13,403 | when i dont touch a key or the mouse for 15 seconds, i want all tool panels to push out of… |
+| 116 | 2026-05-09 15:18:36 | 0 | 0 | 0 | 0 | 0 | i want to make a browser shortcut, make it a icon that maches the ui, and i want it to lau… |
+| 117 | 2026-05-09 15:19:20 | 0 | 0 | 0 | 0 | 0 | [Request interrupted by user] |
+| 118 | 2026-05-09 15:20:48 | 5 | 15 | 5,971 | 1,824,776 | 4,394 | when entering zen mode, lets auto enable dim, and low contrast mode, and when leaving zen… |
+| 119 | 2026-05-09 15:22:41 | 16 | 26 | 12,858 | 5,951,486 | 16,049 | when zen mode lets ad a clock and weather forcast to the center |
+| 120 | 2026-05-09 15:27:50 | 12 | 22 | 6,428 | 4,576,434 | 7,985 | in zen mode lets add a network graph under the weather |
+| 121 | 2026-05-09 15:31:14 | 5 | 15 | 3,955 | 1,927,816 | 2,943 | when i nzen mode, cycle throug the pastel  and lowe contrast themes every 25 seconds |
+| 122 | 2026-05-09 15:35:45 | 13 | 23 | 6,311 | 5,068,402 | 7,762 | in zen mode, under the network trafic add the logical processors graphs |
+| 123 | 2026-05-09 15:39:11 | 5 | 15 | 2,328 | 1,970,518 | 2,078 | make the logical cores only oine line |
+| 124 | 2026-05-09 15:40:20 | 10 | 20 | 6,172 | 3,970,433 | 7,296 | under the logical cores lets add  the ram graghj |
+| 125 | 2026-05-09 15:45:39 | 9 | 19 | 5,999 | 3,614,233 | 6,777 | in zen mode the lets shrink the audio graphs and widen, they transition from tall and thin… |
+| 126 | 2026-05-09 15:50:26 | 1 | 6 | 8 | 404,303 | 512 | in zen mode lets triple the amount of blocks and bars they are too stretrched, lets also m… |
+| 127 | 2026-05-09 15:51:06 | 0 | 0 | 0 | 0 | 0 | [Request interrupted by user] |
+| 128 | 2026-05-09 15:51:23 | 18 | 28 | 20,447 | 7,463,283 | 30,025 | n zen mode lets triple the amount of blocks and bars they are too stretrched, lets also ma… |
+| 129 | 2026-05-09 15:56:54 | 12 | 22 | 8,376 | 5,098,952 | 9,233 | even more bars and less sensitive |
+| 130 | 2026-05-09 15:59:24 | 13 | 23 | 4,452 | 5,587,248 | 6,719 | add the load % to the logical cores |
+| 131 | 2026-05-09 16:01:39 | 7 | 17 | 6,869 | 3,037,746 | 6,685 | in zen mode, move the weather and dATE TO THE TOP LEFT AREA |
+| 132 | 2026-05-09 16:04:15 | 17 | 27 | 14,970 | 7,530,198 | 15,549 | lets make the weather and date 30% larger, and make  it a 5 day forcast that cycles throug… |
+| 133 | 2026-05-09 16:08:49 | 9 | 19 | 4,398 | 4,057,018 | 4,756 | on the logical cores add the cpu tmep |
+| 134 | 2026-05-09 16:11:31 | 11 | 21 | 12,236 | 5,015,635 | 11,418 | our audio bars are good, but lets make it so near the edges of the screen they grow larger |
+| 135 | 2026-05-09 16:15:12 | 8 | 18 | 11,772 | 3,717,084 | 9,250 | add the logical cores for t he gpu under the ram usage be sure to include the temps |
+| 136 | 2026-05-09 16:18:03 | 5 | 15 | 2,930 | 2,350,469 | 2,585 | in zen mode, lets make evrything but the clock 30%darker |
+| 137 | 2026-05-09 16:20:57 | 5 | 15 | 1,736 | 2,360,237 | 1,788 | scratch taht revert and make evrything 60% darker accept for the date weather and time |
+| 138 | 2026-05-09 16:23:03 | 2 | 12 | 4,024 | 946,306 | 554 | lets make the network, cpu and gpu lower |
+| 139 | 2026-05-09 16:23:47 | 0 | 0 | 0 | 0 | 0 | [Request interrupted by user for tool use] |
+| 140 | 2026-05-09 16:24:10 | 7 | 17 | 5,868 | 3,332,553 | 9,705 | lets remove the ram, and the gpu greaphs, and then move the network and cpu down |
+| 141 | 2026-05-09 16:26:31 | 6 | 21 | 11,835 | 2,882,830 | 5,600 | when the time is ticking it seems to move side to side, can we weight it cewntered, so whe… |
+| 142 | 2026-05-09 16:29:36 | 9 | 24 | 15,540 | 4,382,456 | 8,357 | its still shifting to the left and the right depending on the number, i always want a cons… |
+| 143 | 2026-05-09 16:32:04 | 6 | 21 | 7,008 | 2,951,492 | 4,016 | lets make them tabular numeral |
+| 144 | 2026-05-09 16:33:51 | 10 | 25 | 8,782 | 4,957,768 | 7,445 | what font did you change it to, i likeed the one it was before |
+| 145 | 2026-05-09 16:36:06 | 6 | 21 | 6,718 | 2,997,765 | 3,518 | there are some strange cross like characters in front now? |
+| 146 | 2026-05-09 16:40:25 | 14 | 24 | 11,873 | 7,070,601 | 14,244 | lets make a camera button, when we press said button it opens a small live view of out web… |
+| 147 | 2026-05-09 16:43:40 | 10 | 20 | 11,729 | 5,130,014 | 11,435 | i have more then one camera, the preview needs to be able to cycle |
+| 148 | 2026-05-09 16:47:29 | 10 | 20 | 10,457 | 5,203,266 | 9,688 | when i switch cameras can we make a tech transition,  maaybe static or soemthign techy |
+| 149 | 2026-05-09 16:50:18 | 9 | 19 | 9,183 | 4,744,884 | 10,087 | lets make the transition more of a vhs scanline |
+| 150 | 2026-05-09 16:53:10 | 12 | 22 | 13,337 | 6,428,337 | 11,109 | if the camera is on in zen mode pixalate the image |
+| 151 | 2026-05-09 16:56:09 | 6 | 16 | 2,319 | 3,243,517 | 2,864 | lets make the pixalation even larger, and the window 50% darker |
+| 152 | 2026-05-09 16:57:47 | 6 | 16 | 3,816 | 3,259,583 | 3,158 | in zen mode if the camera is on move it to the top right of the screen |
+| 153 | 2026-05-09 16:59:20 | 9 | 19 | 5,351 | 4,922,260 | 5,404 | lets add a time stamp to the camera |
+| 154 | 2026-05-09 17:01:09 | 9 | 19 | 6,583 | 4,962,678 | 5,321 | i like the transition we have but lats add more static to tht transition |
+| 155 | 2026-05-09 17:05:31 | 10 | 20 | 8,569 | 5,564,588 | 7,591 | i dont like that static its low res, lets add scanlines, and make the snow\noise higher fr… |
+| 156 | 2026-05-09 17:08:33 | 13 | 23 | 18,582 | 7,334,981 | 19,213 | lets add a terminal button and have it log errors diagnostics |
+| 157 | 2026-05-09 17:14:20 | 16 | 31 | 29,094 | 9,218,847 | 25,622 | my terminal doesnt close when i click the x, lets fix that, and lets make it so this logs… |
+| 158 | 2026-05-09 17:19:39 | 7 | 17 | 8,749 | 4,098,916 | 9,617 | adda buttoon to insta zen, we go right to zen from the button |
+| 159 | 2026-05-09 17:21:25 | 10 | 25 | 26,253 | 5,958,858 | 30,259 | this doesnt obey the theme, and the button to close it doesnt work |
+| 160 | 2026-05-09 17:24:38 | 7 | 22 | 11,185 | 4,235,635 | 5,997 | that window still doesnt obey the colors and or theme, it also doesnt close when i hit the… |
+| 161 | 2026-05-09 17:26:59 | 11 | 21 | 10,293 | 6,716,488 | 10,309 | close works, theme doesnt make the theme the same as the rest of the ui tie it in |
+| 162 | 2026-05-09 17:29:40 | 10 | 20 | 5,297 | 6,171,517 | 5,935 | on the terminal, it still ahs lines\borders. lewts not have those |
+| 163 | 2026-05-09 17:32:13 | 7 | 17 | 6,445 | 4,348,233 | 6,639 | if ther terminal is open in zen mode move to the left of the screen |
+| 164 | 2026-05-09 17:34:39 | 5 | 15 | 1,884 | 3,122,111 | 2,136 | the terminal hase these hatches in the corner can yhou remove that |
+| 165 | 2026-05-09 17:36:50 | 5 | 15 | 1,874 | 3,130,253 | 1,597 | the terminal hasa seek bar on it, lets get rid of that and instead have it scroll itself w… |
+| 166 | 2026-05-09 17:39:11 | 7 | 17 | 5,496 | 4,398,555 | 5,712 | for the clock in zen mode, whenever a number changes lets have it pop up and down |
+| 167 | 2026-05-09 17:41:26 | 5 | 15 | 7,296 | 3,161,550 | 4,777 | in zen mode the whe nthe clock changes a number, have it not only animate, but increase th… |
+| 168 | 2026-05-09 17:44:04 | 5 | 15 | 2,167 | 3,178,937 | 2,403 | we aded a glow, i want the color to just be lighter |
+| 169 | 2026-05-09 17:46:00 | 5 | 15 | 3,371 | 3,189,632 | 2,483 | lets bring up the lightenss of the clock in zen miode by 40% |
+| 170 | 2026-05-09 17:50:16 | 8 | 18 | 4,940 | 5,126,822 | 4,421 | when the clock changes a number make the whiole thing jump up |
+| 171 | 2026-05-09 17:53:15 | 18 | 43 | 11,203 | 11,651,853 | 11,603 | when me enter zen  mode, we want to change windows power profiles, we want to adjsut the c… |
+| 172 | 2026-05-09 17:57:14 | 6 | 16 | 6,817 | 3,914,850 | 11,209 | when in zen mode, add a power profile indication wit ha the name eco |
+| 173 | 2026-05-09 18:00:02 | 7 | 17 | 5,147 | 4,601,997 | 5,508 | lets make it bigger and more bright its hard to see |
+| 174 | 2026-05-09 18:02:16 | 5 | 15 | 3,016 | 3,302,161 | 2,954 | thats too bright, lets make it the same as the date and time inzen mode. |
+| 175 | 2026-05-09 18:05:04 | 24 | 64 | 37,118 | 16,122,560 | 31,453 | next i would like a video window a youtube borderless window that only displayes the ideo… |
+| 176 | 2026-05-09 18:11:23 | 7 | 32 | 4,724 | 3,441,668 | 1,320,887 | the saclaing is off, we need a locked 16:9 |
+| 177 | 2026-05-09 18:15:15 | 9 | 39 | 30,253 | 6,165,393 | 40,749 | the scaling is still off |
+| 178 | 2026-05-09 18:20:38 | 6 | 16 | 8,122 | 4,152,371 | 33,224 | push to gethub and version up, the nupdate change logs |
 
 ## Full prompts
 
@@ -777,7 +847,427 @@ Each row is one user prompt and the cumulative token usage of every assistant tu
 
 ### 108. 2026-05-09 14:46:02
 
-**Tokens** — in: 27 · out: 13,487 · cache read: 3,468,629 · cache create: 12,372 · turns: 12
+**Tokens** — in: 31 · out: 15,992 · cache read: 4,652,423 · cache create: 15,588 · turns: 16
 
 > looking back, lets make a doc, i want to record what prompts i useds, how many, and how many tokens each one used
+
+### 109. 2026-05-09 14:49:50
+
+**Tokens** — in: 19 · out: 6,059 · cache read: 2,702,170 · cache create: 9,115 · turns: 9
+
+> push this to github, And version up
+
+### 110. 2026-05-09 14:51:47
+
+**Tokens** — in: 40 · out: 21,468 · cache read: 9,393,993 · cache create: 31,666 · turns: 30
+
+> ok we need to combine the chat and the notes tab
+
+### 111. 2026-05-09 14:56:33
+
+**Tokens** — in: 24 · out: 6,936 · cache read: 4,561,023 · cache create: 10,778 · turns: 14
+
+> for the notes  take the first line and use that ads the norte tittle
+
+### 112. 2026-05-09 14:59:47
+
+**Tokens** — in: 27 · out: 6,361 · cache read: 5,651,648 · cache create: 8,146 · turns: 17
+
+> for the themes we have invert,  lets make a dim button too that darken the entire ui all of it by 50%
+
+### 113. 2026-05-09 15:04:26
+
+**Tokens** — in: 12 · out: 10,826 · cache read: 671,362 · cache create: 584 · turns: 2
+
+> we built a theme, i supplied swtaches, you converted to hex codes, and created a theme ssytem , can you give me a prompt that includes my swatches and themes including the dim, cycle, naming etc. so i can pass it off to a coleague
+
+### 114. 2026-05-09 15:07:53
+
+**Tokens** — in: 43 · out: 28,100 · cache read: 4,494,710 · cache create: 46,835 · turns: 13
+
+> the peaks of the graphs arnt falling like the ones on my audio bars, can we make them do the same
+
+### 115. 2026-05-09 15:12:46
+
+**Tokens** — in: 25 · out: 13,728 · cache read: 5,391,203 · cache create: 13,403 · turns: 15
+
+> when i dont touch a key or the mouse for 15 seconds, i want all tool panels to push out of the screen and only show the audio and the grid. push apart smoothly
+
+### 116. 2026-05-09 15:18:36
+
+**Tokens** — in: 0 · out: 0 · cache read: 0 · cache create: 0 · turns: 0
+
+> i want to make a browser shortcut, make it a icon that maches the ui, and i want it to launch out own youtube window that is only the video nothing else
+
+### 117. 2026-05-09 15:19:20
+
+**Tokens** — in: 0 · out: 0 · cache read: 0 · cache create: 0 · turns: 0
+
+> [Request interrupted by user]
+
+### 118. 2026-05-09 15:20:48
+
+**Tokens** — in: 15 · out: 5,971 · cache read: 1,824,776 · cache create: 4,394 · turns: 5
+
+> when entering zen mode, lets auto enable dim, and low contrast mode, and when leaving zen mode renable last theme
+
+### 119. 2026-05-09 15:22:41
+
+**Tokens** — in: 26 · out: 12,858 · cache read: 5,951,486 · cache create: 16,049 · turns: 16
+
+> when zen mode lets ad a clock and weather forcast to the center
+
+### 120. 2026-05-09 15:27:50
+
+**Tokens** — in: 22 · out: 6,428 · cache read: 4,576,434 · cache create: 7,985 · turns: 12
+
+> in zen mode lets add a network graph under the weather
+
+### 121. 2026-05-09 15:31:14
+
+**Tokens** — in: 15 · out: 3,955 · cache read: 1,927,816 · cache create: 2,943 · turns: 5
+
+> when i nzen mode, cycle throug the pastel  and lowe contrast themes every 25 seconds
+
+### 122. 2026-05-09 15:35:45
+
+**Tokens** — in: 23 · out: 6,311 · cache read: 5,068,402 · cache create: 7,762 · turns: 13
+
+> in zen mode, under the network trafic add the logical processors graphs
+
+### 123. 2026-05-09 15:39:11
+
+**Tokens** — in: 15 · out: 2,328 · cache read: 1,970,518 · cache create: 2,078 · turns: 5
+
+> make the logical cores only oine line
+
+### 124. 2026-05-09 15:40:20
+
+**Tokens** — in: 20 · out: 6,172 · cache read: 3,970,433 · cache create: 7,296 · turns: 10
+
+> under the logical cores lets add  the ram graghj
+
+### 125. 2026-05-09 15:45:39
+
+**Tokens** — in: 19 · out: 5,999 · cache read: 3,614,233 · cache create: 6,777 · turns: 9
+
+> in zen mode the lets shrink the audio graphs and widen, they transition from tall and thin, to short and wide for them both
+
+### 126. 2026-05-09 15:50:26
+
+**Tokens** — in: 6 · out: 8 · cache read: 404,303 · cache create: 512 · turns: 1
+
+> in zen mode lets triple the amount of blocks and bars they are too stretrched, lets also make  them bot ha little taller
+
+### 127. 2026-05-09 15:51:06
+
+**Tokens** — in: 0 · out: 0 · cache read: 0 · cache create: 0 · turns: 0
+
+> [Request interrupted by user]
+
+### 128. 2026-05-09 15:51:23
+
+**Tokens** — in: 28 · out: 20,447 · cache read: 7,463,283 · cache create: 30,025 · turns: 18
+
+> n zen mode lets triple the amount of blocks and bars they are too stretrched, lets also make  them bot ha little taller audio bars at the bottom
+
+### 129. 2026-05-09 15:56:54
+
+**Tokens** — in: 22 · out: 8,376 · cache read: 5,098,952 · cache create: 9,233 · turns: 12
+
+> even more bars and less sensitive
+
+### 130. 2026-05-09 15:59:24
+
+**Tokens** — in: 23 · out: 4,452 · cache read: 5,587,248 · cache create: 6,719 · turns: 13
+
+> add the load % to the logical cores
+
+### 131. 2026-05-09 16:01:39
+
+**Tokens** — in: 17 · out: 6,869 · cache read: 3,037,746 · cache create: 6,685 · turns: 7
+
+> in zen mode, move the weather and dATE TO THE TOP LEFT AREA
+
+### 132. 2026-05-09 16:04:15
+
+**Tokens** — in: 27 · out: 14,970 · cache read: 7,530,198 · cache create: 15,549 · turns: 17
+
+> lets make the weather and date 30% larger, and make  it a 5 day forcast that cycles through
+
+### 133. 2026-05-09 16:08:49
+
+**Tokens** — in: 19 · out: 4,398 · cache read: 4,057,018 · cache create: 4,756 · turns: 9
+
+> on the logical cores add the cpu tmep
+
+### 134. 2026-05-09 16:11:31
+
+**Tokens** — in: 21 · out: 12,236 · cache read: 5,015,635 · cache create: 11,418 · turns: 11
+
+> our audio bars are good, but lets make it so near the edges of the screen they grow larger
+
+### 135. 2026-05-09 16:15:12
+
+**Tokens** — in: 18 · out: 11,772 · cache read: 3,717,084 · cache create: 9,250 · turns: 8
+
+> add the logical cores for t he gpu under the ram usage be sure to include the temps
+
+### 136. 2026-05-09 16:18:03
+
+**Tokens** — in: 15 · out: 2,930 · cache read: 2,350,469 · cache create: 2,585 · turns: 5
+
+> in zen mode, lets make evrything but the clock 30%darker
+
+### 137. 2026-05-09 16:20:57
+
+**Tokens** — in: 15 · out: 1,736 · cache read: 2,360,237 · cache create: 1,788 · turns: 5
+
+> scratch taht revert and make evrything 60% darker accept for the date weather and time
+
+### 138. 2026-05-09 16:23:03
+
+**Tokens** — in: 12 · out: 4,024 · cache read: 946,306 · cache create: 554 · turns: 2
+
+> lets make the network, cpu and gpu lower
+
+### 139. 2026-05-09 16:23:47
+
+**Tokens** — in: 0 · out: 0 · cache read: 0 · cache create: 0 · turns: 0
+
+> [Request interrupted by user for tool use]
+
+### 140. 2026-05-09 16:24:10
+
+**Tokens** — in: 17 · out: 5,868 · cache read: 3,332,553 · cache create: 9,705 · turns: 7
+
+> lets remove the ram, and the gpu greaphs, and then move the network and cpu down
+
+### 141. 2026-05-09 16:26:31
+
+**Tokens** — in: 21 · out: 11,835 · cache read: 2,882,830 · cache create: 5,600 · turns: 6
+
+> when the time is ticking it seems to move side to side, can we weight it cewntered, so whe numbers change its always centered
+
+### 142. 2026-05-09 16:29:36
+
+**Tokens** — in: 24 · out: 15,540 · cache read: 4,382,456 · cache create: 8,357 · turns: 9
+
+> its still shifting to the left and the right depending on the number, i always want a constant center. a fixed pint in the center for the clock in zen mode
+
+### 143. 2026-05-09 16:32:04
+
+**Tokens** — in: 21 · out: 7,008 · cache read: 2,951,492 · cache create: 4,016 · turns: 6
+
+> lets make them tabular numeral
+
+### 144. 2026-05-09 16:33:51
+
+**Tokens** — in: 25 · out: 8,782 · cache read: 4,957,768 · cache create: 7,445 · turns: 10
+
+> what font did you change it to, i likeed the one it was before
+
+### 145. 2026-05-09 16:36:06
+
+**Tokens** — in: 21 · out: 6,718 · cache read: 2,997,765 · cache create: 3,518 · turns: 6
+
+> there are some strange cross like characters in front now?
+
+### 146. 2026-05-09 16:40:25
+
+**Tokens** — in: 24 · out: 11,873 · cache read: 7,070,601 · cache create: 14,244 · turns: 14
+
+> lets make a camera button, when we press said button it opens a small live view of out webcaam
+
+### 147. 2026-05-09 16:43:40
+
+**Tokens** — in: 20 · out: 11,729 · cache read: 5,130,014 · cache create: 11,435 · turns: 10
+
+> i have more then one camera, the preview needs to be able to cycle
+
+### 148. 2026-05-09 16:47:29
+
+**Tokens** — in: 20 · out: 10,457 · cache read: 5,203,266 · cache create: 9,688 · turns: 10
+
+> when i switch cameras can we make a tech transition,  maaybe static or soemthign techy
+
+### 149. 2026-05-09 16:50:18
+
+**Tokens** — in: 19 · out: 9,183 · cache read: 4,744,884 · cache create: 10,087 · turns: 9
+
+> lets make the transition more of a vhs scanline
+
+### 150. 2026-05-09 16:53:10
+
+**Tokens** — in: 22 · out: 13,337 · cache read: 6,428,337 · cache create: 11,109 · turns: 12
+
+> if the camera is on in zen mode pixalate the image
+
+### 151. 2026-05-09 16:56:09
+
+**Tokens** — in: 16 · out: 2,319 · cache read: 3,243,517 · cache create: 2,864 · turns: 6
+
+> lets make the pixalation even larger, and the window 50% darker
+
+### 152. 2026-05-09 16:57:47
+
+**Tokens** — in: 16 · out: 3,816 · cache read: 3,259,583 · cache create: 3,158 · turns: 6
+
+> in zen mode if the camera is on move it to the top right of the screen
+
+### 153. 2026-05-09 16:59:20
+
+**Tokens** — in: 19 · out: 5,351 · cache read: 4,922,260 · cache create: 5,404 · turns: 9
+
+> lets add a time stamp to the camera
+
+### 154. 2026-05-09 17:01:09
+
+**Tokens** — in: 19 · out: 6,583 · cache read: 4,962,678 · cache create: 5,321 · turns: 9
+
+> i like the transition we have but lats add more static to tht transition
+
+### 155. 2026-05-09 17:05:31
+
+**Tokens** — in: 20 · out: 8,569 · cache read: 5,564,588 · cache create: 7,591 · turns: 10
+
+> i dont like that static its low res, lets add scanlines, and make the snow\noise higher frequency and dimmer
+
+### 156. 2026-05-09 17:08:33
+
+**Tokens** — in: 23 · out: 18,582 · cache read: 7,334,981 · cache create: 19,213 · turns: 13
+
+> lets add a terminal button and have it log errors diagnostics
+
+### 157. 2026-05-09 17:14:20
+
+**Tokens** — in: 31 · out: 29,094 · cache read: 9,218,847 · cache create: 25,622 · turns: 16
+
+> my terminal doesnt close when i click the x, lets fix that, and lets make it so this logs telemitry data on everything, and lets add a section where we can choose the time and log intervals
+
+### 158. 2026-05-09 17:19:39
+
+**Tokens** — in: 17 · out: 8,749 · cache read: 4,098,916 · cache create: 9,617 · turns: 7
+
+> adda buttoon to insta zen, we go right to zen from the button
+
+### 159. 2026-05-09 17:21:25
+
+**Tokens** — in: 25 · out: 26,253 · cache read: 5,958,858 · cache create: 30,259 · turns: 10
+
+> this doesnt obey the theme, and the button to close it doesnt work
+
+### 160. 2026-05-09 17:24:38
+
+**Tokens** — in: 22 · out: 11,185 · cache read: 4,235,635 · cache create: 5,997 · turns: 7
+
+> that window still doesnt obey the colors and or theme, it also doesnt close when i hit the x, and the button on top
+
+### 161. 2026-05-09 17:26:59
+
+**Tokens** — in: 21 · out: 10,293 · cache read: 6,716,488 · cache create: 10,309 · turns: 11
+
+> close works, theme doesnt make the theme the same as the rest of the ui tie it in
+
+### 162. 2026-05-09 17:29:40
+
+**Tokens** — in: 20 · out: 5,297 · cache read: 6,171,517 · cache create: 5,935 · turns: 10
+
+> on the terminal, it still ahs lines\borders. lewts not have those
+
+### 163. 2026-05-09 17:32:13
+
+**Tokens** — in: 17 · out: 6,445 · cache read: 4,348,233 · cache create: 6,639 · turns: 7
+
+> if ther terminal is open in zen mode move to the left of the screen
+
+### 164. 2026-05-09 17:34:39
+
+**Tokens** — in: 15 · out: 1,884 · cache read: 3,122,111 · cache create: 2,136 · turns: 5
+
+> the terminal hase these hatches in the corner can yhou remove that
+
+### 165. 2026-05-09 17:36:50
+
+**Tokens** — in: 15 · out: 1,874 · cache read: 3,130,253 · cache create: 1,597 · turns: 5
+
+> the terminal hasa seek bar on it, lets get rid of that and instead have it scroll itself with no scroll bar on the side
+
+### 166. 2026-05-09 17:39:11
+
+**Tokens** — in: 17 · out: 5,496 · cache read: 4,398,555 · cache create: 5,712 · turns: 7
+
+> for the clock in zen mode, whenever a number changes lets have it pop up and down
+
+### 167. 2026-05-09 17:41:26
+
+**Tokens** — in: 15 · out: 7,296 · cache read: 3,161,550 · cache create: 4,777 · turns: 5
+
+> in zen mode the whe nthe clock changes a number, have it not only animate, but increase the brightens and slow fade back
+
+### 168. 2026-05-09 17:44:04
+
+**Tokens** — in: 15 · out: 2,167 · cache read: 3,178,937 · cache create: 2,403 · turns: 5
+
+> we aded a glow, i want the color to just be lighter
+
+### 169. 2026-05-09 17:46:00
+
+**Tokens** — in: 15 · out: 3,371 · cache read: 3,189,632 · cache create: 2,483 · turns: 5
+
+> lets bring up the lightenss of the clock in zen miode by 40%
+
+### 170. 2026-05-09 17:50:16
+
+**Tokens** — in: 18 · out: 4,940 · cache read: 5,126,822 · cache create: 4,421 · turns: 8
+
+> when the clock changes a number make the whiole thing jump up
+
+### 171. 2026-05-09 17:53:15
+
+**Tokens** — in: 43 · out: 11,203 · cache read: 11,651,853 · cache create: 11,603 · turns: 18
+
+> when me enter zen  mode, we want to change windows power profiles, we want to adjsut the cpu usage,  max cpu to 50% and min to 3% when it comes out of zen mode, it goes back to max 90%  and min 5%
+
+### 172. 2026-05-09 17:57:14
+
+**Tokens** — in: 16 · out: 6,817 · cache read: 3,914,850 · cache create: 11,209 · turns: 6
+
+> when in zen mode, add a power profile indication wit ha the name eco
+
+### 173. 2026-05-09 18:00:02
+
+**Tokens** — in: 17 · out: 5,147 · cache read: 4,601,997 · cache create: 5,508 · turns: 7
+
+> lets make it bigger and more bright its hard to see
+
+### 174. 2026-05-09 18:02:16
+
+**Tokens** — in: 15 · out: 3,016 · cache read: 3,302,161 · cache create: 2,954 · turns: 5
+
+> thats too bright, lets make it the same as the date and time inzen mode.
+
+### 175. 2026-05-09 18:05:04
+
+**Tokens** — in: 64 · out: 37,118 · cache read: 16,122,560 · cache create: 31,453 · turns: 24
+
+> next i would like a video window a youtube borderless window that only displayes the ideo and  nothing else ,  we need to sign in then be boderless, and alweays on top of other apps
+
+### 176. 2026-05-09 18:11:23
+
+**Tokens** — in: 32 · out: 4,724 · cache read: 3,441,668 · cache create: 1,320,887 · turns: 7
+
+> the saclaing is off, we need a locked 16:9
+
+### 177. 2026-05-09 18:15:15
+
+**Tokens** — in: 39 · out: 30,253 · cache read: 6,165,393 · cache create: 40,749 · turns: 9
+
+> the scaling is still off
+
+### 178. 2026-05-09 18:20:38
+
+**Tokens** — in: 16 · out: 8,122 · cache read: 4,152,371 · cache create: 33,224 · turns: 6
+
+> push to gethub and version up, the nupdate change logs
 

@@ -88,6 +88,70 @@ function createWindow() {
   win.on('closed', stopWasapiLoopback);
 }
 
+// Borderless always-on-top YouTube popout. Loads our own host HTML which
+// contains a <webview> pointing at youtube.com — sign-in works through
+// the persistent session partition, and CSS is injected on /watch URLs so
+// the window becomes a video-only PIP.
+let _ytWin = null;
+function openYouTubeWindow() {
+  if (_ytWin && !_ytWin.isDestroyed()) {
+    _ytWin.show();
+    _ytWin.focus();
+    return;
+  }
+  _ytWin = new BrowserWindow({
+    width: 640,
+    height: 360,
+    minWidth: 320,
+    minHeight: 180,
+    frame: false,
+    alwaysOnTop: true,
+    backgroundColor: '#000000',
+    title: 'YouTube',
+    useContentSize: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'youtube-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+    },
+  });
+  _ytWin.removeMenu();
+  // Lock the *content* to exact 16:9. setAspectRatio is the native lock;
+  // will-resize / resize fallbacks correct any rounding drift on Windows
+  // where the OS occasionally lets a non-conforming size through.
+  _ytWin.setAspectRatio(16 / 9);
+  _ytWin.setContentSize(640, 360);
+  _ytWin.on('will-resize', (event, newBounds) => {
+    const target = Math.round(newBounds.width * 9 / 16);
+    if (newBounds.height !== target) {
+      event.preventDefault();
+      _ytWin.setBounds({
+        x: newBounds.x,
+        y: newBounds.y,
+        width: newBounds.width,
+        height: target,
+      });
+    }
+  });
+  let _ytFixing = false;
+  _ytWin.on('resize', () => {
+    if (_ytFixing) return;
+    const [w, h] = _ytWin.getContentSize();
+    const target = Math.round(w * 9 / 16);
+    if (h !== target) {
+      _ytFixing = true;
+      _ytWin.setContentSize(w, target);
+      setTimeout(() => { _ytFixing = false; }, 50);
+    }
+  });
+  _ytWin.loadFile(path.join(__dirname, 'youtube-host.html'));
+  _ytWin.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') _ytWin?.close();
+  });
+  _ytWin.on('closed', () => { _ytWin = null; });
+}
+
 let _audioProc = null;
 let _audioWin = null;
 function startWasapiLoopback(win, deviceId = null) {
@@ -286,6 +350,19 @@ function registerIpc() {
     return true;
   });
 
+  ipcMain.handle('set-power-profile', async (_e, opts) => {
+    return await setPowerProfile(opts || {});
+  });
+
+  ipcMain.handle('open-youtube', () => openYouTubeWindow());
+  ipcMain.handle('youtube-toggle-aot', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return false;
+    const next = !win.isAlwaysOnTop();
+    win.setAlwaysOnTop(next);
+    return next;
+  });
+
   ipcMain.handle('toggle-fullscreen', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win) return false;
@@ -329,6 +406,42 @@ function getDiskIo() {
       }
     );
   });
+}
+
+// Adjust the active Windows power scheme's processor min/max state via
+// powercfg.exe. Used by zen mode to throttle CPU when idle and restore
+// performance on resume. AC + DC values are both updated so the change
+// applies on battery and wall power.
+async function setPowerProfile({ maxCpu, minCpu } = {}) {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'powercfg only on win32' };
+  }
+  const max = Math.max(0, Math.min(100, Math.round(Number(maxCpu))));
+  const min = Math.max(0, Math.min(100, Math.round(Number(minCpu))));
+  if (!Number.isFinite(max) || !Number.isFinite(min)) {
+    return { ok: false, error: 'invalid maxCpu/minCpu' };
+  }
+  const settings = [
+    ['SUB_PROCESSOR', 'PROCTHROTTLEMAX', max],
+    ['SUB_PROCESSOR', 'PROCTHROTTLEMIN', min],
+  ];
+  const run = (args) => new Promise((resolve, reject) => {
+    execFile('powercfg.exe', args, { timeout: 5000, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) { reject(new Error(stderr?.trim() || err.message)); return; }
+      resolve(stdout);
+    });
+  });
+  try {
+    for (const [sub, setting, val] of settings) {
+      await run(['/setacvalueindex', 'SCHEME_CURRENT', sub, setting, String(val)]);
+      await run(['/setdcvalueindex', 'SCHEME_CURRENT', sub, setting, String(val)]);
+    }
+    // Re-apply the active scheme so the new values actually take effect.
+    await run(['/setactive', 'SCHEME_CURRENT']);
+    return { ok: true, max, min };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 // Auto-discover Azure OpenAI config from the user's `az` CLI login.

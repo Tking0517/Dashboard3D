@@ -1,0 +1,164 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>YouTube</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    .yt-header {
+      position: fixed; top: 0; left: 0; right: 0;
+      height: 26px;
+      background: rgba(0, 0, 0, 0.85);
+      -webkit-app-region: drag;
+      display: flex; align-items: center; justify-content: flex-end;
+      z-index: 1000;
+      color: #ddd;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      transition: opacity 220ms ease;
+    }
+    .yt-header.is-hidden { opacity: 0; pointer-events: none; }
+    .yt-status {
+      flex: 1;
+      padding: 0 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #888;
+    }
+    .yt-header button {
+      -webkit-app-region: no-drag;
+      appearance: none;
+      background: transparent;
+      border: 0;
+      color: #ddd;
+      cursor: pointer;
+      padding: 0 12px;
+      height: 100%;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    .yt-header button:hover { background: rgba(255, 255, 255, 0.1); }
+    .yt-header button.is-active { color: #5ccfff; }
+    .yt-header button.close:hover { background: #c00; color: #fff; }
+    webview {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100%; height: 100%;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+  <div class="yt-header" id="hdr">
+    <span class="yt-status" id="status">YOUTUBE</span>
+    <button id="back" title="Back">&#8592;</button>
+    <button id="home" title="YouTube home">⌂</button>
+    <button id="aot" class="is-active" title="Toggle always on top">⫐</button>
+    <button id="close" class="close" title="Close">×</button>
+  </div>
+  <webview id="wv"
+           src="https://www.youtube.com/"
+           allowpopups
+           partition="persist:youtube"></webview>
+  <script>
+    const wv      = document.getElementById('wv');
+    const hdr     = document.getElementById('hdr');
+    const status  = document.getElementById('status');
+    const aotBtn  = document.getElementById('aot');
+
+    document.getElementById('close').onclick = () => window.close();
+    document.getElementById('back').onclick  = () => { try { wv.goBack(); } catch {} };
+    document.getElementById('home').onclick  = () => wv.loadURL('https://www.youtube.com/');
+    aotBtn.onclick = async () => {
+      const next = await window.youtubeHost.toggleAlwaysOnTop();
+      aotBtn.classList.toggle('is-active', !!next);
+    };
+
+    function isWatchUrl(url) { return /youtube\.com\/watch/.test(url || ''); }
+
+    function injectVideoOnlyCSS() {
+      // Hide everything but the player on /watch pages so the window
+      // becomes a true picture-in-picture. On non-watch URLs (home,
+      // signin, search) leave YouTube's UI intact so the user can
+      // navigate and log in.
+      const url = wv.getURL();
+      if (!isWatchUrl(url)) return;
+      wv.insertCSS(`
+        ytd-masthead, #masthead-container, ytd-mini-guide-renderer,
+        ytd-watch-flexy #secondary, #below, #related, ytd-comments,
+        ytd-watch-metadata, ytd-merch-shelf-renderer,
+        ytd-engagement-panel-section-list-renderer,
+        tp-yt-paper-toast, ytd-popup-container { display: none !important; }
+        html, body, ytd-app, ytd-page-manager, ytd-watch-flexy {
+          background: #000 !important;
+          overflow: hidden !important;
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+        ytd-watch-flexy[role="main"] { padding: 0 !important; }
+        /* Fill the window with the full player tree so YouTube's own
+           layout engine recomputes against the window's 16:9. */
+        ytd-watch-flexy #player.ytd-watch-flexy,
+        ytd-watch-flexy[fixed-panels] #player.ytd-watch-flexy,
+        #player-container-id, #player-container-inner, #player-container,
+        #ytd-player {
+          position: fixed !important;
+          inset: 0 !important;
+          width: 100vw !important;
+          height: 100vh !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          max-width: none !important;
+          max-height: none !important;
+        }
+        /* Force the actual video element + player chrome to fill the
+           container with proper aspect-fit. !important beats YouTube's
+           inline width/height/left/top styles. */
+        #movie_player, .html5-video-player {
+          width: 100% !important;
+          height: 100% !important;
+          left: 0 !important;
+          top: 0 !important;
+        }
+        .html5-video-container { width: 100% !important; height: 100% !important; }
+        video.html5-main-video {
+          width: 100% !important;
+          height: 100% !important;
+          left: 0 !important;
+          top: 0 !important;
+          object-fit: contain !important;
+        }
+      `);
+      // After chrome-hide, the player still has its old dimensions cached
+      // in JS. Fire a resize so YouTube recomputes the video frame to fill
+      // the new container. Run a few times since the SPA layout settles
+      // over a couple of frames.
+      const kick = `
+        window.dispatchEvent(new Event('resize'));
+        const v = document.querySelector('video.html5-main-video');
+        if (v) { v.style.left = '0'; v.style.top = '0'; v.style.width = '100%'; v.style.height = '100%'; }
+      `;
+      wv.executeJavaScript(kick).catch(() => {});
+      setTimeout(() => wv.executeJavaScript(kick).catch(() => {}), 250);
+      setTimeout(() => wv.executeJavaScript(kick).catch(() => {}), 800);
+    }
+
+    wv.addEventListener('did-navigate',         (e) => { status.textContent = e.url; injectVideoOnlyCSS(); });
+    wv.addEventListener('did-navigate-in-page', (e) => { status.textContent = e.url; injectVideoOnlyCSS(); });
+    wv.addEventListener('dom-ready',            ()  => { injectVideoOnlyCSS(); });
+
+    // Auto-fade the header after 2s of mouse stillness so the window is
+    // 100% video; reappears the moment the cursor moves.
+    let _hdrTimer = null;
+    function showHdr() {
+      hdr.classList.remove('is-hidden');
+      clearTimeout(_hdrTimer);
+      _hdrTimer = setTimeout(() => hdr.classList.add('is-hidden'), 2000);
+    }
+    document.addEventListener('mousemove', showHdr);
+    showHdr();
+  </script>
+</body>
+</html>

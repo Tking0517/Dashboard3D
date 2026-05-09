@@ -222,6 +222,356 @@
 body.theme-invert #app {
   filter: invert(1) hue-rotate(180deg);
 }
+/* Dim toggle — applies a 50% brightness filter to the entire app. Stacks
+   with invert (declared after so it composes on top of any invert filter
+   already present). */
+body.theme-dim #app {
+  filter: brightness(0.5);
+}
+body.theme-invert.theme-dim #app {
+  filter: invert(1) hue-rotate(180deg) brightness(0.5);
+}
+
+/* Zen overlay: big centered clock + weather summary, only visible while
+   body.is-zen. Panels fade out first; the overlay fades in slightly later
+   so the eye sees the panels leave before the new content arrives. */
+.zen-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0;
+  transform: translateY(-2vh);
+  transition: opacity 700ms ease 350ms, transform 700ms ease 350ms;
+  color: var(--text);
+}
+body.is-zen .zen-overlay {
+  opacity: 1;
+  transform: translateY(0);
+}
+/* Focal trio = clock, date, weather. Every other zen element (network rows,
+   CPU cores, RAM, GPU) and the bottom audio meters render 60% darker. */
+body.is-zen .zen-overlay > *:not(.zen-clock):not(.zen-date):not(.zen-weather):not(.zen-power),
+body.is-zen .audio-grid {
+  opacity: 0.4;
+  transition: opacity 600ms ease;
+}
+.zen-clock {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 18px;
+  font-family: var(--font-display);
+  font-weight: 300;
+  /* Lift the clock 40% above the rest of the zen overlay's brightness so
+     the time stays the focal element after the global dim is applied. */
+  filter: brightness(1.4);
+}
+.zen-time {
+  /* Back on Rajdhani (the display font). To keep the centered clock from
+     wobbling we render each character in a fixed-width inline-block span
+     (built in tickClock), so digit changes can't change overall width. */
+  font-size: clamp(96px, 16vw, 240px);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  display: inline-block;
+  text-align: center;
+  white-space: nowrap;
+}
+.zen-time-char {
+  display: inline-block;
+  width: 0.6em;
+  text-align: center;
+  /* Origin lower so the pop bounces from the digit's own baseline. */
+  transform-origin: 50% 100%;
+}
+.zen-time-char[data-sep="1"] {
+  /* Colons need less than a digit's worth of space. */
+  width: 0.28em;
+}
+/* Pop animation — JS adds .is-popping to a digit cell whenever its
+   character actually changes. translateY up, slight overshoot down,
+   settle. transform-origin at the bottom keeps the bounce grounded. */
+@keyframes zen-time-pop {
+  0%   { transform: translateY(0)     scale(1); }
+  30%  { transform: translateY(-18%)  scale(1.06); }
+  60%  { transform: translateY(4%)    scale(0.98); }
+  100% { transform: translateY(0)     scale(1); }
+}
+/* Brightness flash — the digit lights up the moment it changes, then
+   slowly fades back to normal. No glow / halo, just a brighter color
+   that eases back to baseline over ~1.4 s. */
+@keyframes zen-time-glow {
+  0%   { filter: brightness(1.85); }
+  10%  { filter: brightness(1.85); }
+  100% { filter: brightness(1); }
+}
+.zen-time-char.is-popping {
+  animation:
+    zen-time-pop  360ms cubic-bezier(.4, 0, .2, 1),
+    zen-time-glow 1400ms ease-out;
+}
+
+/* Whole-clock bump — JS adds .is-jumping to .zen-clock whenever ANY digit
+   changes, so the entire time/AM-PM group hops up and settles. */
+@keyframes zen-clock-jump {
+  0%   { transform: translateY(0); }
+  35%  { transform: translateY(-10px); }
+  70%  { transform: translateY(2px); }
+  100% { transform: translateY(0); }
+}
+.zen-clock.is-jumping {
+  animation: zen-clock-jump 380ms cubic-bezier(.4, 0, .2, 1);
+}
+.zen-ampm-mirror {
+  visibility: hidden;
+  pointer-events: none;
+}
+.zen-ampm {
+  font-size: clamp(22px, 3vw, 44px);
+  color: var(--muted);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+/* In zen mode the date and weather pin to the top-left corner so the centered
+   stack stays clean: just clock → network → cores → ram. Sized ~30% larger
+   than panel sub-headers so the corner is readable at a glance. */
+.zen-date {
+  position: absolute;
+  top: 28px;
+  left: 32px;
+  margin: 0;
+  font-family: var(--font-tech);
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-size: clamp(14px, 1.56vw, 18px);
+  text-align: left;
+}
+.zen-weather {
+  position: absolute;
+  top: 60px;
+  left: 32px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--accent);
+  text-align: left;
+}
+.zen-cond {
+  font-family: var(--font-tech);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-size: clamp(14px, 1.43vw, 17px);
+  color: var(--muted);
+  transition: opacity 220ms ease;
+}
+.zen-temp-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: var(--font-display);
+  transition: opacity 220ms ease;
+}
+.zen-temp,
+.zen-temp-low {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.zen-temp { font-size: clamp(36px, 4.16vw, 62px); }
+.zen-temp-low,
+.zen-temp-sep {
+  font-size: clamp(20px, 2.3vw, 32px);
+  color: var(--muted);
+}
+.zen-temp-low-wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  margin-left: 6px;
+}
+.zen-temp-unit {
+  font-size: clamp(14px, 1.56vw, 21px);
+  color: var(--muted);
+}
+.zen-loc {
+  font-family: var(--font-tech);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-size: clamp(13px, 1.3vw, 16px);
+  color: var(--muted);
+}
+
+/* Power-profile indicator: pinned to the top-right. Same brightness
+   treatment as the date / weather in the top-left — excluded from the
+   60%-darken rule but no extra brightness boost, so it sits naturally
+   alongside the focal trio without overpowering it. */
+.zen-power {
+  position: absolute;
+  top: 28px;
+  right: 32px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--font-tech);
+  font-size: clamp(15px, 1.7vw, 22px);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.zen-power-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow:
+    0 0 12px color-mix(in srgb, var(--ok) 80%, transparent),
+    0 0 24px color-mix(in srgb, var(--ok) 40%, transparent);
+  animation: zen-power-pulse 2s ease-in-out infinite;
+}
+.zen-power-name {
+  color: var(--accent);
+  letter-spacing: 0.34em;
+  font-weight: 600;
+}
+@keyframes zen-power-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* Zen network mini-graphs (RX + TX) under the weather. Each row pairs a
+   left label, a bar-grid sparkline, and a right-side numeric rate.
+   Big margin-top pushes the telemetry pair (net + cpu) toward the bottom
+   of the screen — since the overlay uses justify-content: center this
+   also lifts the clock a bit, which is the focal element. */
+.zen-net {
+  margin-top: 16vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(56vw, 640px);
+}
+.zen-net-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 100px;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--font-tech);
+  font-size: clamp(10px, 1.1vw, 13px);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.zen-net-row .spark-bars {
+  height: 32px;
+}
+.zen-net-rate {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* Zen logical-processor grid: same per-core bars as the main panel, just
+   placed under the network rows in the zen overlay. */
+.zen-cores {
+  margin-top: 28px;
+  width: min(56vw, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.zen-cores-label {
+  font-family: var(--font-tech);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-size: clamp(10px, 1.1vw, 13px);
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.zen-cores-grid {
+  display: flex;
+  gap: 3px;
+  align-items: stretch;
+  height: 48px;
+}
+.zen-cores-grid .core-bar { flex: 1; min-width: 0; height: 100%; }
+.zen-cores-grid .core-bar-track { height: 100%; }
+.zen-mem .zen-cores-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.zen-mem-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.18em;
+}
+.zen-cpu-temp-unit { color: var(--muted); margin-left: 1px; }
+.zen-cpu-sep      { color: var(--muted); margin: 0 6px; }
+
+/* Zen mode: after a period of idle, slide every tool panel off-screen so
+   only the audio meters and the background grid remain. Each panel
+   translates toward the nearest viewport edge based on its grid position.
+   Triggered by `body.is-zen`; cleared on any input. */
+.hud .panel,
+.hud .panel-stack,
+.topbar-controls {
+  transition: transform 800ms cubic-bezier(0.5, 0, 0.2, 1), opacity 800ms ease;
+}
+body.is-zen .hud .panel,
+body.is-zen .hud .panel-stack {
+  opacity: 0;
+  pointer-events: none;
+}
+body.is-zen .topbar-controls {
+  opacity: 0;
+  transform: translate(-50%, -120%); /* up off-screen, preserving the centering */
+  pointer-events: none;
+}
+/* Top row → push up. Bottom row → push down. */
+body.is-zen .hud-row-top    .panel { transform: translateY(-110vh); }
+body.is-zen .hud-row-bottom .panel { transform: translateY( 110vh); }
+/* Mid row: left panel goes left, right stack goes right, middle goes up. */
+body.is-zen .hud-row-mid > .panel:first-child  { transform: translateX(-110vw); }
+body.is-zen .hud-row-mid > .panel:nth-child(2) { transform: translateY(-110vh); }
+body.is-zen .hud-row-mid > .panel-stack        { transform: translateX( 110vw); }
+
+/* In zen mode, the two audio meters stop being chunky bottom corners and
+   become a full-width pair across the bottom — short, wide, and out of the
+   way of the centered clock/weather/cores stack. !important is needed so
+   we override the inline left/top/width/height the drag/resize logic may
+   have written to the elements. */
+body.is-zen .audio-grid-out {
+  left: 12px !important;
+  right: auto !important;
+  bottom: 12px !important;
+  top: auto !important;
+  width: calc(50vw - 18px) !important;
+  height: 96px !important;
+}
+body.is-zen .audio-grid-in {
+  left: auto !important;
+  right: 12px !important;
+  bottom: 12px !important;
+  top: auto !important;
+  width: calc(50vw - 18px) !important;
+  height: 96px !important;
+}
+/* Tighter gap between bars at zen's higher count so they read as a denser
+   spectrum instead of a sparse bar chart. */
+body.is-zen .audio-grid .audio-bars-row {
+  gap: 1px;
+}
 
 * { box-sizing: border-box; }
 
@@ -256,6 +606,13 @@ html, body {
   flex-direction: column;
   gap: 3px;
   user-select: none;
+  transition:
+    width 800ms cubic-bezier(0.5, 0, 0.2, 1),
+    height 800ms cubic-bezier(0.5, 0, 0.2, 1),
+    left 800ms cubic-bezier(0.5, 0, 0.2, 1),
+    right 800ms cubic-bezier(0.5, 0, 0.2, 1),
+    bottom 800ms cubic-bezier(0.5, 0, 0.2, 1),
+    top 800ms cubic-bezier(0.5, 0, 0.2, 1);
 }
 .audio-grid-out { left: 18px;  --audio-color: var(--accent); }
 .audio-grid-in  { right: 18px; --audio-color: var(--amber); }
@@ -363,7 +720,12 @@ html, body {
   border-top: 1px solid var(--rule-dim);
   border-bottom: 1px solid var(--rule-dim);
   overflow: hidden;
+  /* Smile curve: bars near each edge grow taller. --edge-dist is set per
+     bar by JS (0 at center, 1 at either end). Boosts scaleY by up to 35%. */
+  transform: scaleY(calc(1 + var(--edge-dist, 0) * 0.35));
+  transform-origin: bottom;
 }
+.audio-grid .audio-bars-row { overflow: visible; }
 .audio-grid .audio-bar-fill {
   position: absolute;
   left: 0; right: 0; bottom: 0;
@@ -552,7 +914,7 @@ html, body {
   align-items: stretch;
   min-height: 0;
 }
-.hud-row-top    { grid-template-columns: 1fr 1fr 1fr; }
+.hud-row-top    { grid-template-columns: 1fr 1fr; }
 .hud-row-mid    { grid-template-columns: 1fr 1fr 1fr; }
 .hud-row-bottom { grid-template-columns: 1fr 1fr; }
 
@@ -597,6 +959,426 @@ html, body {
 #refresh-btn:active svg { transform: rotate(360deg); transition-duration: 0.15s; }
 #theme-btn:hover    svg { transform: scale(1.1); }
 #invert-btn:hover   svg { transform: rotate(180deg); }
+#dim-btn.is-active,
+#camera-btn.is-active,
+#terminal-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* Terminal / diagnostics overlay — styled to match the rest of the HUD
+   panels. Background = --panel-bg (same dark translucent every panel uses);
+   chrome (title, borders, hover) = current theme accent. */
+.terminal-panel {
+  position: fixed;
+  top: 80px;
+  left: 80px;
+  width: 520px;
+  height: 240px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  user-select: none;
+  font-family: var(--font-tech), 'Consolas', monospace;
+  color: var(--text);
+  overflow: hidden;
+  /* Smooth slide on zen entry/exit (and back to user's saved spot). */
+  transition:
+    top 800ms cubic-bezier(.5, 0, .2, 1),
+    left 800ms cubic-bezier(.5, 0, .2, 1),
+    right 800ms cubic-bezier(.5, 0, .2, 1),
+    bottom 800ms cubic-bezier(.5, 0, .2, 1),
+    transform 800ms cubic-bezier(.5, 0, .2, 1),
+    filter 600ms ease;
+}
+/* Override .terminal-panel { display: flex } so the [hidden] attribute
+   actually hides the panel — without this, hidden=true was a no-op. */
+.terminal-panel[hidden] { display: none; }
+
+/* Match the regular .panel-header look: same padding, font, divider. */
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: move;
+}
+.terminal-header:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.terminal-title {
+  flex: 1;
+  color: var(--accent);
+  font-weight: 600;
+}
+/* Action buttons mimic the panel-collapse-btn — small, hairline border, hover glow. */
+.terminal-action {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  padding: 0;
+  cursor: pointer;
+  width: 28px;
+  height: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+.terminal-action:hover { color: var(--accent); }
+.terminal-close {
+  font-size: 14px;
+  font-family: inherit;
+}
+.terminal-close:hover { color: var(--red); }
+.terminal-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.terminal-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.terminal-ctl > span { color: var(--muted); }
+.terminal-select {
+  appearance: none;
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.terminal-select:hover { color: var(--accent); }
+/* Style native dropdown options — Chromium/Electron honors these in the
+   open list so the menu also reads as themed. */
+.terminal-select option {
+  background: var(--bg);
+  color: var(--text);
+}
+.terminal-toggles {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.terminal-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.terminal-toggles input[type="checkbox"] {
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--rule-dim);
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+.terminal-toggles input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.terminal-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text);
+  /* Hide the scrollbar but keep scroll behavior — wheel still works,
+     and the JS auto-scrolls to the bottom on every new line. */
+  scrollbar-width: none;
+}
+.terminal-log::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.terminal-log .log-line {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.terminal-log .log-time {
+  color: var(--muted);
+  margin-right: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.terminal-log .log-lvl {
+  display: inline-block;
+  min-width: 36px;
+  margin-right: 8px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.terminal-log .log-line.lvl-info  .log-lvl { color: var(--accent); }
+.terminal-log .log-line.lvl-warn  .log-lvl { color: var(--amber); }
+.terminal-log .log-line.lvl-error .log-lvl { color: var(--red); }
+.terminal-log .log-line.lvl-warn  { color: color-mix(in srgb, var(--amber) 70%, var(--text)); }
+.terminal-log .log-line.lvl-error { color: color-mix(in srgb, var(--red)   70%, var(--text)); }
+.terminal-resize {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 14px; height: 14px;
+  cursor: nwse-resize;
+  /* Invisible — the cursor change is the only affordance. */
+  background: transparent;
+}
+
+/* Floating webcam preview — small live PIP. Drag anywhere to move; the
+   bottom-right handle resizes. Persists position + size in config. */
+.webcam-panel {
+  position: fixed;
+  top: 80px;
+  right: 18px;
+  width: 280px;
+  height: 200px;
+  z-index: 80;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  cursor: move;
+  overflow: hidden;
+  user-select: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Smooth slide on zen entry/exit (and back to the user's saved spot). */
+  transition:
+    top 800ms cubic-bezier(.5, 0, .2, 1),
+    right 800ms cubic-bezier(.5, 0, .2, 1),
+    left 800ms cubic-bezier(.5, 0, .2, 1),
+    bottom 800ms cubic-bezier(.5, 0, .2, 1),
+    filter 600ms ease;
+}
+.webcam-panel video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  /* Mirror so the user sees themselves like a mirror, not a reverse webcam. */
+  transform: scaleX(-1);
+  transition: opacity 350ms ease;
+}
+.webcam-pixel {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges; /* Firefox fallback */
+  z-index: 5;
+  pointer-events: none;
+  transform: scaleX(-1); /* match the video mirror */
+}
+/* In zen mode, replace the live video with the pixelated canvas, dim the
+   whole panel ~50%, and pin it to the top-right corner of the screen
+   regardless of the user's saved drag position. */
+body.is-zen .webcam-panel:not([hidden]) .webcam-pixel { display: block; }
+body.is-zen .webcam-panel:not([hidden]) video        { opacity: 0; }
+body.is-zen .webcam-panel {
+  filter: brightness(0.5);
+  /* !important needed to override inline left/top set by the drag handler. */
+  top:    18px !important;
+  right:  18px !important;
+  left:   auto !important;
+  bottom: auto !important;
+}
+/* Mirror treatment for the terminal: pinned to the left edge,
+   vertically centered, dimmed alongside everything else. */
+body.is-zen .terminal-panel:not([hidden]) {
+  filter: brightness(0.5);
+  top:    50% !important;
+  left:   18px !important;
+  right:  auto !important;
+  bottom: auto !important;
+  transform: translateY(-50%) !important;
+}
+.webcam-label {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 1px 6px;
+  pointer-events: none;
+}
+/* Security-cam style date + time stamp, bottom-left so the resize grip
+   in the bottom-right stays clear. */
+.webcam-timestamp {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.45);
+  padding: 1px 6px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  z-index: 2;
+}
+.webcam-btn {
+  position: absolute;
+  top: 4px;
+  width: 22px;
+  height: 22px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--rule-dim);
+  color: var(--accent);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: center;
+  padding: 0;
+  z-index: 2;
+}
+.webcam-btn:hover { border-color: var(--accent); }
+.webcam-close { right: 4px; }
+.webcam-cycle { right: 30px; }
+.webcam-close:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+.webcam-resize {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 14px; height: 14px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 0 50%, var(--accent) 50% 60%, transparent 60% 70%, var(--accent) 70% 80%, transparent 80%);
+  opacity: 0.6;
+  z-index: 2;
+}
+
+/* VHS camera-switch transition.
+   - .webcam-static is a permanent (during switch) scanline + light grain
+     overlay screened over the video.
+   - .webcam-scanline is a bright tracking band that sweeps top→bottom
+     twice with a slight vertical wobble.
+   - The video underneath gets a crunched VHS look + RGB ghosting via
+     drop-shadows for chromatic aberration. */
+.webcam-static {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  /* multiply darkens behind the scanlines while still letting the picture
+     show through between them — the proper CRT raster look. */
+  mix-blend-mode: multiply;
+  transition: opacity 140ms ease;
+  z-index: 3;
+  background:
+    /* dark scanlines: 1px line every 2px = 50% raster coverage, more
+       prominent than the previous 1-of-3 split. */
+    repeating-linear-gradient(0deg,
+      rgba(0, 0, 0, 0.85) 0px,
+      rgba(0, 0, 0, 0.85) 1px,
+      transparent 1px,
+      transparent 2px);
+}
+.webcam-scanline {
+  position: absolute;
+  left: -2%;
+  right: -2%;
+  top: -22%;
+  height: 22%;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 4;
+  /* The bar itself: bright core, soft top/bottom, slight color tint. */
+  background: linear-gradient(180deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.05) 30%,
+    rgba(255, 255, 255, 0.55) 48%,
+    rgba(255, 255, 255, 0.85) 50%,
+    rgba(255, 255, 255, 0.55) 52%,
+    rgba(255, 255, 255, 0.05) 70%,
+    transparent 100%);
+  /* Add a colored ghost above/below the bright core for the VHS bleed. */
+  box-shadow:
+    0 -2px 0 rgba(255, 60, 80, 0.35),
+    0  2px 0 rgba(60, 200, 255, 0.35);
+  mix-blend-mode: screen;
+  filter: blur(0.8px);
+}
+.webcam-panel.is-switching .webcam-static {
+  opacity: 0.9;
+}
+
+/* Painted high-frequency monochrome noise on top of the CSS scanlines for
+   an actual broken-signal feel, only during the switch. Drawn at 320×240
+   so each canvas pixel ~= one screen pixel — fine TV snow rather than
+   chunky blocks. Dimmer than before so it veils the picture instead of
+   replacing it. */
+.webcam-noise {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  mix-blend-mode: screen;
+  transition: opacity 140ms ease;
+  z-index: 6;
+}
+.webcam-panel.is-switching .webcam-noise {
+  opacity: 0.4;
+}
+.webcam-panel.is-switching .webcam-scanline {
+  opacity: 1;
+  animation: webcam-vhs-track 700ms cubic-bezier(.45, 0, .55, 1) 1;
+}
+.webcam-panel.is-switching video {
+  filter:
+    contrast(1.15)
+    saturate(1.8)
+    brightness(0.96)
+    blur(0.4px)
+    /* RGB ghosting: red shifts left, cyan shifts right */
+    drop-shadow(2px 0 0 rgba(255, 30, 60, 0.55))
+    drop-shadow(-2px 0 0 rgba(40, 220, 255, 0.55));
+  animation: webcam-vhs-roll 700ms ease-in-out 1;
+}
+@keyframes webcam-vhs-track {
+  0%   { top: -22%; }
+  18%  { top:  20%; }
+  22%  { top:  16%; }       /* tiny stutter */
+  100% { top: 105%; }
+}
+@keyframes webcam-vhs-roll {
+  0%, 100% { transform: scaleX(-1) translateY(0); }
+  18%      { transform: scaleX(-1) translateY(-2px); }
+  40%      { transform: scaleX(-1) translateY(1px); }
+  62%      { transform: scaleX(-1) translateY(-1px); }
+  85%      { transform: scaleX(-1) translateY(2px); }
+}
 
 /* Auto-cycle theme button: spinning clock-hand when armed */
 #theme-auto-btn.is-active {
@@ -1191,7 +1973,9 @@ html, body {
   background-repeat: no-repeat;
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, white);
   pointer-events: none;
-  transition: bottom 0.25s ease;
+  /* Long-ish ease-out so each downward step (one per data update) renders
+     as a smooth slide instead of a snap, matching the audio bars' feel. */
+  transition: bottom 1.6s ease-out;
 }
 /* warn/high modifiers retained as no-ops for older code paths that still
    set them. The cascade gradient communicates the same thing visually. */
@@ -1290,7 +2074,7 @@ html, body {
   background-repeat: no-repeat;
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, white);
   pointer-events: none;
-  transition: bottom 0.25s ease;
+  transition: bottom 1.6s ease-out;
 }
 .gpu-bar-fill.warn,
 .gpu-bar-fill.high { background: inherit; }
@@ -1502,6 +2286,8 @@ html, body {
   background: color-mix(in srgb, var(--spark-color) 30%, white);
   box-shadow: 0 0 5px color-mix(in srgb, var(--spark-color) 50%, white);
   pointer-events: none;
+  /* Smooth slide between sparse data updates (1 Hz net, 0.5 Hz disk). */
+  transition: bottom 0.9s ease-out;
 }
 
 .sparkline {
@@ -1760,4 +2546,56 @@ html, body {
   letter-spacing: 0.18em;
   text-transform: uppercase;
 }
+
+/* ── Combined Notes + Chat panel ─────────────────────────────── */
+.panel-combo .combo-mode-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--rule-dim);
+  margin: 0 -14px 8px;
+  padding: 0 14px;
+}
+.panel-combo .combo-mode-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.panel-combo .combo-mode-tab:hover {
+  color: color-mix(in srgb, var(--accent) 60%, var(--text));
+}
+.panel-combo .combo-mode-tab.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Body fills available space; each pane fills the body */
+.panel-combo .combo-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.panel-combo .combo-pane {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+.panel-combo .combo-pane.is-visible { display: flex; }
+
+/* Inherit notes/chat-pane internals — the notes/chat sub-trees keep their
+   original IDs and class names so all existing JS continues to work. */
+
+/* Footer status: show the readout that matches the active mode. */
+.panel-combo[data-mode="notes"] .combo-footer-chat  { display: none; }
+.panel-combo[data-mode="chat"]  .combo-footer-notes { display: none; }
 
