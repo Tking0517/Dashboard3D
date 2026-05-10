@@ -717,6 +717,33 @@ app.on('window-all-closed', () => {
 });
 
 // ─── IPC HANDLERS ──────────────────────────────────────────────────
+//
+// Inventory of channels (preload.js exposes each as window.dash.<name>):
+//
+//   Telemetry pulls (renderer polls these on its own intervals)
+//     system-info / storage-info / temps-info / net-info / disk-info
+//
+//   Config (single JSON file in userData/config.json)
+//     config-get / config-set / config-path
+//
+//   Audio (Core Audio + IPolicyConfig via PowerShell + inline C# COM)
+//     audio-set-device  audio-set-out-mute  audio-set-in-mute
+//     audio-get-mute-states  audio-set-default-endpoint
+//
+//   Web pane (in-panel <webview>)
+//     web-install-adblock  web-force-dark   (CDP auto-dark via debugger)
+//
+//   Process / window
+//     toggle-fullscreen  app-relaunch  app-quit
+//     get-screen-sources  set-power-profile
+//     open-youtube  set-youtube-zen-mode
+//     azure-auto-config  airplane-mode
+//
+//   Push events (main → renderer; renderer subscribes via on*)
+//     audio-out-level  web-request-blocked  force-leave-zen
+//
+// Async handlers should resolve to either a value or a `{ ok, error }`
+// shape on failure — see runPowerShell + setSystemMute as examples.
 
 function registerIpc() {
   ipcMain.handle('system-info',     () => getSystemInfo());

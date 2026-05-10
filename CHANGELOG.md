@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1] — 2026-05-10
+
+### Coder-friendliness pass
+- **Z-index ladder** documented at the top of `:root` in styles.css — every tier (bg → 0, zen backdrop → 40, combo-fold backdrop → 49, zen overlay + combo-fold content → 50, audio → 60–80, topbar → 100, alerts → 200) is named so a new contributor knows where new positioned elements should sit
+- **IPC inventory comment** added above `registerIpc()` in main.js — all 20+ channels grouped by domain (telemetry / config / audio / web / process / push events) plus the `{ ok, error }` return convention
+- Removed empty `.panel-chat {}` selector and 3 stale `console.log` debug calls from the audio device pickers (kept the meaningful `console.warn` lines that fire on enumerate failures)
+
 ## [0.5.0] — 2026-05-10
 
 ### Audio overhaul

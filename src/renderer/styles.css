@@ -53,6 +53,21 @@
   font-weight: 300 700; font-style: normal; font-display: swap;
 }
 
+/* ── Z-index ladder ───────────────────────────────────────────
+   Use these tiers when adding new positioned elements so layering
+   stays predictable. Picked in order from back to front:
+     0   default flow (background grid, hud rows, panels)
+     40  zen fade-through-black backdrop (body::after)
+     49  combo-panel full-fold backdrop (body::before)
+     50  zen overlay (clock / weather / power chip) and
+         combo-panel fold-half / fold-full content
+     60  audio visualizers (sit above zen backdrop)
+     70  audio resize handles
+     75  audio mute buttons (must beat resize handle hit area)
+     80  audio bar canvas inside its row
+    100  topbar controls (above all panels)
+    200  toast / global alert overlays
+   Anything larger should be considered modal-only. */
 :root {
   --bg: #070a0e;
   --panel-bg: rgba(9, 12, 16, 0.58);
@@ -2540,7 +2555,6 @@ body.is-combo-fold-full::before {
 }
 
 /* ── Chat (Ollama) specifics ─────────────────────────────────── */
-.panel-chat {}
 .chat-body { gap: 10px; }
 
 .chat-toolbar {

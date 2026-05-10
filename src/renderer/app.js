@@ -1994,7 +1994,6 @@ if (NATIVE_LOOPBACK_BOUND) {
       e.stopPropagation();
     });
     rowEl.addEventListener('click', (e) => {
-      console.log('[picker] audio-out row click', { target: e.target.tagName, devices: _audioDeviceList.length });
       if (e.target.closest('.audio-mute-btn')) return;
       e.stopPropagation();
       if (!_audioDeviceList.length) {
@@ -2225,11 +2224,9 @@ async function startAudioWaves() {
       e.stopPropagation();
     });
     micRowEl.addEventListener('click', async (e) => {
-      console.log('[picker] audio-in row click', { target: e.target.tagName, devices: _micDeviceList.length });
       if (e.target.closest('.audio-mute-btn')) return;
       e.stopPropagation();
       await populateMicDeviceList();
-      console.log('[picker] audio-in after populate', { devices: _micDeviceList.length, names: _micDeviceList.map((d) => d.name) });
       if (!_micDeviceList.length) {
         console.warn('[picker] audio-in: no devices — enumerateDevices may need permission');
         return;
