@@ -1,0 +1,47 @@
+{
+  "_comment": "Default layout shipped with the app. Read by main.js readConfig() as a base layer; any user customizations stored in %APPDATA%\\Dashboard3D\\config.json override these values per-key.",
+  "theme": "dust",
+  "invert": true,
+  "dim": true,
+  "themeAuto": false,
+  "comboMode": "chat",
+  "collapsed": {
+    "notes": true,
+    "chat": true,
+    "combo": true
+  },
+  "panelSizes": {
+    "clock":   { "x": 8,    "y": 18,   "width": 451, "height": 414 },
+    "weather": { "x": 1985, "y": 12,   "width": 568, "height": 215 },
+    "thermal": { "x": 1986, "y": 232,  "width": 567, "height": 333 },
+    "system":  { "x": 10,   "y": 435,  "width": 455, "height": 774 },
+    "cpu":     { "x": 9,    "y": 436,  "width": 450, "height": 329 },
+    "gpu":     { "x": 9,    "y": 770,  "width": 451, "height": 265 },
+    "ram":     { "x": 11,   "y": 1040, "width": 451, "height": 384 },
+    "storage": { "x": 1986, "y": 855,  "width": 567, "height": 295 },
+    "network": { "x": 1985, "y": 569,  "width": 569, "height": 282 },
+    "driveio": { "x": 1986, "y": 1153, "width": 567, "height": 270 },
+    "combo":   { "x": 789,  "y": 48,   "width": 865, "height": 331 },
+    "notes":   { "x": 965,  "y": 311,  "width": 674, "height": 34  },
+    "chat":    { "x": 976,  "y": 346,  "width": 685, "height": 34  }
+  },
+  "audioOutPos":  { "x": 479,  "y": 1121 },
+  "audioOutSize": { "width": 201, "height": 294 },
+  "audioOutMuted": false,
+  "audioInPos":   { "x": 1760, "y": 1121 },
+  "audioInSize":  { "width": 199, "height": 293 },
+  "audioInMuted": false,
+  "webcamPos":  { "x": 529, "y": 470 },
+  "webcamSize": { "width": 342, "height": 330 },
+  "terminalPos":  { "x": 797, "y": 392 },
+  "terminalSize": { "width": 601, "height": 458 },
+  "terminalInterval": 0,
+  "terminalTimeFmt": "rel",
+  "terminalChannels": {
+    "sys":   true,
+    "temp":  true,
+    "net":   true,
+    "disk":  true,
+    "store": false
+  }
+}

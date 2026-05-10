@@ -26,6 +26,7 @@ xcopy /Y "%ROOT%src\main\preload.js"          "%ROOT%Dashboard3D-win32-x64\resou
 xcopy /Y "%ROOT%src\main\audify-worker.js"    "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 xcopy /Y "%ROOT%src\main\youtube-host.html"   "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 xcopy /Y "%ROOT%src\main\youtube-preload.js"  "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
+xcopy /Y "%ROOT%src\main\default-config.json" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 
 if exist "%APP_EXE%" (
   start "" "%APP_EXE%"

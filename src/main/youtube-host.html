@@ -18,15 +18,29 @@
       letter-spacing: 0.16em;
       transition: opacity 220ms ease;
     }
-    .yt-header.is-hidden { opacity: 0; pointer-events: none; }
-    .yt-status {
+    /* Keep pointer-events auto when hidden so mouseenter fires when the
+       cursor moves into the (invisible) top strip. */
+    .yt-header.is-hidden { opacity: 0; }
+    .yt-search {
+      -webkit-app-region: no-drag;
       flex: 1;
+      min-width: 0;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.06);
+      border: 0;
+      outline: none;
+      color: #ddd;
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
       padding: 0 12px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: #888;
+      margin: 0 8px;
+      height: 18px;
+      line-height: 18px;
     }
+    .yt-search:focus { background: rgba(255, 255, 255, 0.12); color: #fff; }
+    .yt-search::placeholder { color: #666; letter-spacing: 0.18em; }
     .yt-header button {
       -webkit-app-region: no-drag;
       appearance: none;
@@ -52,7 +66,7 @@
 </head>
 <body>
   <div class="yt-header" id="hdr">
-    <span class="yt-status" id="status">YOUTUBE</span>
+    <input class="yt-search" id="search" type="search" placeholder="SEARCH YOUTUBE…" autocomplete="off" spellcheck="false" />
     <button id="back" title="Back">&#8592;</button>
     <button id="home" title="YouTube home">⌂</button>
     <button id="aot" class="is-active" title="Toggle always on top">⫐</button>
@@ -61,16 +75,27 @@
   <webview id="wv"
            src="https://www.youtube.com/"
            allowpopups
-           partition="persist:youtube"></webview>
+           partition="persist:youtube"
+           useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.92 Safari/537.36"></webview>
   <script>
-    const wv      = document.getElementById('wv');
-    const hdr     = document.getElementById('hdr');
-    const status  = document.getElementById('status');
-    const aotBtn  = document.getElementById('aot');
+    const wv       = document.getElementById('wv');
+    const hdr      = document.getElementById('hdr');
+    const aotBtn   = document.getElementById('aot');
+    const searchEl = document.getElementById('search');
 
     document.getElementById('close').onclick = () => window.close();
     document.getElementById('back').onclick  = () => { try { wv.goBack(); } catch {} };
     document.getElementById('home').onclick  = () => wv.loadURL('https://www.youtube.com/');
+
+    // Search: Enter triggers a navigation to YouTube's results page so the
+    // user never has to expose YouTube's own search bar / chrome.
+    searchEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const q = searchEl.value.trim();
+      if (!q) return;
+      wv.loadURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`);
+      searchEl.blur();
+    });
     aotBtn.onclick = async () => {
       const next = await window.youtubeHost.toggleAlwaysOnTop();
       aotBtn.classList.toggle('is-active', !!next);
@@ -145,20 +170,51 @@
       setTimeout(() => wv.executeJavaScript(kick).catch(() => {}), 800);
     }
 
-    wv.addEventListener('did-navigate',         (e) => { status.textContent = e.url; injectVideoOnlyCSS(); });
-    wv.addEventListener('did-navigate-in-page', (e) => { status.textContent = e.url; injectVideoOnlyCSS(); });
-    wv.addEventListener('dom-ready',            ()  => { injectVideoOnlyCSS(); });
-
-    // Auto-fade the header after 2s of mouse stillness so the window is
-    // 100% video; reappears the moment the cursor moves.
-    let _hdrTimer = null;
-    function showHdr() {
-      hdr.classList.remove('is-hidden');
-      clearTimeout(_hdrTimer);
-      _hdrTimer = setTimeout(() => hdr.classList.add('is-hidden'), 2000);
+    // Stub document.hidden / visibilityState / hasFocus + swallow any
+    // visibilitychange events. YouTube's player (and most HTML5 video
+    // libs) pause the video when the document goes "hidden" — which
+    // Chromium reports as soon as another window (the zen overlay) sits
+    // on top of ours. This keeps the page believing it's always
+    // foreground/visible so video keeps decoding.
+    function patchVideoKeepAlive() {
+      const js = `
+        (function() {
+          try {
+            Object.defineProperty(document, 'hidden',                  { configurable: true, get: () => false });
+            Object.defineProperty(document, 'webkitHidden',            { configurable: true, get: () => false });
+            Object.defineProperty(document, 'visibilityState',         { configurable: true, get: () => 'visible' });
+            Object.defineProperty(document, 'webkitVisibilityState',   { configurable: true, get: () => 'visible' });
+            Object.defineProperty(document, 'hasFocus',                { configurable: true, value: () => true });
+            const stop = (e) => { try { e.stopImmediatePropagation(); e.stopPropagation(); } catch {} };
+            document.addEventListener('visibilitychange',         stop, true);
+            document.addEventListener('webkitvisibilitychange',   stop, true);
+            window.addEventListener('blur',                       stop, true);
+          } catch (e) { /* shadowed already, fine */ }
+        })();
+      `;
+      wv.executeJavaScript(js).catch(() => {});
     }
-    document.addEventListener('mousemove', showHdr);
-    showHdr();
+
+    wv.addEventListener('did-navigate',         () => { patchVideoKeepAlive(); injectVideoOnlyCSS(); });
+    wv.addEventListener('did-navigate-in-page', () => { patchVideoKeepAlive(); injectVideoOnlyCSS(); });
+    wv.addEventListener('dom-ready',            () => { patchVideoKeepAlive(); injectVideoOnlyCSS(); });
+
+    // Hover-based reveal: header is invisible until the cursor enters its
+    // top strip, hides when the cursor leaves. Stays visible while the
+    // search input is focused so a typing user can move their mouse off
+    // without losing the field.
+    let _hdrFocused = false;
+    function showHdr() { hdr.classList.remove('is-hidden'); }
+    function maybeHideHdr() {
+      if (_hdrFocused) return;
+      if (hdr.matches(':hover')) return;
+      hdr.classList.add('is-hidden');
+    }
+    hdr.addEventListener('mouseenter', showHdr);
+    hdr.addEventListener('mouseleave', maybeHideHdr);
+    searchEl.addEventListener('focus', () => { _hdrFocused = true; showHdr(); });
+    searchEl.addEventListener('blur',  () => { _hdrFocused = false; maybeHideHdr(); });
+    hdr.classList.add('is-hidden');
   </script>
 </body>
 </html>

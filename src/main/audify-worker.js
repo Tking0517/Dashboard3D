@@ -149,8 +149,11 @@ function start() {
         }
 
         frameCount++;
-        // Run the FFT every other callback (~21 ms cadence at 48 kHz/512).
-        if ((frameCount & 1) === 0) {
+        // Run the FFT every fourth callback (~43 ms cadence at 48 kHz/512,
+        // ~23 Hz). Halved from the previous ~47 Hz — these meters don't
+        // need realtime updates and the lower cadence cuts the renderer
+        // canvas redraws + IPC traffic in half.
+        if ((frameCount & 3) === 0) {
           for (let i = 0; i < FFT_SIZE; i++) {
             const idx = (sampleBufIdx + i) % FFT_SIZE;
             fftReal[i] = sampleBuf[idx] * hann[i];

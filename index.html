@@ -166,12 +166,46 @@
           </svg>
         </button>
 
+        <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
+        <span id="font-name" class="theme-name">DEFAULT</span>
+        <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 19 L9 5 L13 19"/>
+            <path d="M6.5 14 H11.5"/>
+            <path d="M16 19 V9"/>
+            <path d="M14 11.5 Q16 9 18 11.5"/>
+          </svg>
+        </button>
+
+        <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
+
         <button id="refresh-btn" class="topbar-btn" type="button" title="Reload (F5)" aria-label="Reload">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 12a9 9 0 0 1 15.5-6.4"/>
             <path d="M21 5v4h-4"/>
             <path d="M21 12a9 9 0 0 1-15.5 6.4"/>
             <path d="M3 19v-4h4"/>
+          </svg>
+        </button>
+
+        <button id="restart-btn" class="topbar-btn" type="button" title="Full restart (relaunches main + renderer)" aria-label="Full restart">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 4 V2 L9 5 L12 8 V6"/>
+            <path d="M12 6 a8 8 0 1 1 -8 8"/>
+            <circle cx="12" cy="13" r="1.2" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
+        <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 6 L18 18"/>
+            <path d="M18 6 L6 18"/>
+          </svg>
+        </button>
+
+        <button id="airplane-btn" class="topbar-btn" type="button" title="Airplane mode (disables network adapters · requires admin)" aria-label="Airplane mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12 L13 12 L11 20 L9 20 L9.5 12 L3 12 L4 9 L9.5 9 L9 4 L11 4 L13 9 L21 9 Z"/>
           </svg>
         </button>
 
@@ -188,6 +222,8 @@
             <path d="M12 3 V5  M12 19 V21  M3 12 H5  M19 12 H21  M5.6 5.6 L7 7  M17 17 L18.4 18.4  M5.6 18.4 L7 17  M17 7 L18.4 5.6"/>
           </svg>
         </button>
+
+        <span id="topbar-div-3" class="topbar-divider" title="Drag to reposition divider"></span>
 
         <button id="camera-btn" class="topbar-btn" type="button" title="Webcam" aria-label="Toggle webcam">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -491,6 +527,8 @@
             <div class="combo-mode-tabs">
               <button type="button" class="combo-mode-tab is-active" data-mode="notes">NOTES</button>
               <button type="button" class="combo-mode-tab" data-mode="chat">CHAT</button>
+              <button type="button" class="combo-mode-tab" data-mode="paper">PAPER</button>
+              <button type="button" class="combo-mode-tab" data-mode="web">WEB</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -531,6 +569,82 @@
                 <div class="chat-input-row">
                   <textarea id="chat-input" class="chat-input" placeholder="ASK ANYTHING…" spellcheck="false" rows="1"></textarea>
                   <button id="chat-send" class="chat-send" type="button">SEND</button>
+                </div>
+              </div>
+
+              <!-- PAPER pane (basic word processor) -->
+              <div class="combo-pane combo-pane-paper">
+                <div class="paper-toolbar" id="paper-toolbar">
+                  <select id="paper-font" class="paper-tool-select" title="Editor font (paper only)">
+                    <option value="tech"        data-stack="var(--font-tech)">UI FONT</option>
+                    <option value="display"     data-stack="var(--font-display)">UI DISPLAY</option>
+                    <option value="jetbrains"   data-stack="'JetBrains Mono', Consolas, monospace">JETBRAINS MONO</option>
+                    <option value="ibm-mono"    data-stack="'IBM Plex Mono', Consolas, monospace">IBM PLEX MONO</option>
+                    <option value="ibm-sans"    data-stack="'IBM Plex Sans', 'Helvetica Neue', sans-serif">IBM PLEX SANS</option>
+                    <option value="inter"       data-stack="'Inter', 'Helvetica Neue', sans-serif">INTER</option>
+                    <option value="space"       data-stack="'Space Grotesk', 'Inter', sans-serif">SPACE GROTESK</option>
+                    <option value="lora"        data-stack="'Lora', Georgia, serif">LORA</option>
+                    <option value="source-serif" data-stack="'Source Serif', Georgia, serif">SOURCE SERIF</option>
+                    <option value="serif"       data-stack="Georgia, 'Cambria', serif">GEORGIA</option>
+                    <option value="sans"        data-stack="'Helvetica Neue', Arial, sans-serif">HELVETICA</option>
+                    <option value="mono"        data-stack="'Courier New', Consolas, monospace">COURIER</option>
+                    <option value="system"      data-stack="system-ui, -apple-system, 'Segoe UI', sans-serif">SYSTEM</option>
+                  </select>
+                  <span class="paper-tool-sep"></span>
+                  <button type="button" class="paper-tool" data-cmd="bold"      title="Bold (Ctrl+B)"><b>B</b></button>
+                  <button type="button" class="paper-tool" data-cmd="italic"    title="Italic (Ctrl+I)"><i>I</i></button>
+                  <button type="button" class="paper-tool" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+                  <span class="paper-tool-sep"></span>
+                  <button type="button" class="paper-tool" data-cmd="h1" title="Heading 1">H1</button>
+                  <button type="button" class="paper-tool" data-cmd="h2" title="Heading 2">H2</button>
+                  <button type="button" class="paper-tool" data-cmd="h3" title="Heading 3">H3</button>
+                  <button type="button" class="paper-tool" data-cmd="p"  title="Paragraph">¶</button>
+                  <span class="paper-tool-sep"></span>
+                  <button type="button" class="paper-tool" data-cmd="insertUnorderedList" title="Bulleted list">•</button>
+                  <button type="button" class="paper-tool" data-cmd="insertOrderedList"   title="Numbered list">1.</button>
+                  <button type="button" class="paper-tool" data-cmd="formatBlock:blockquote" title="Quote">❝</button>
+                  <span class="paper-tool-sep"></span>
+                  <button type="button" class="paper-tool" data-cmd="justifyLeft"   title="Align left">⇤</button>
+                  <button type="button" class="paper-tool" data-cmd="justifyCenter" title="Align center">⇔</button>
+                  <button type="button" class="paper-tool" data-cmd="justifyRight"  title="Align right">⇥</button>
+                  <span class="paper-tool-sep"></span>
+                  <button type="button" class="paper-tool" data-cmd="undo" title="Undo (Ctrl+Z)">↺</button>
+                  <button type="button" class="paper-tool" data-cmd="redo" title="Redo (Ctrl+Shift+Z)">↻</button>
+                  <span class="paper-tool-stats" id="paper-stats">0 W · 0 C</span>
+                </div>
+                <div
+                  id="paper-editor"
+                  class="paper-editor"
+                  contenteditable="true"
+                  spellcheck="true"
+                  data-placeholder="Start writing…"
+                ></div>
+              </div>
+
+              <!-- WEB pane (lightweight in-panel browser with adblock + tabs) -->
+              <div class="combo-pane combo-pane-web">
+                <div class="web-tabs" id="web-tabs">
+                  <button type="button" class="web-tab-add" id="web-tab-new" title="New tab">＋</button>
+                  <button type="button" class="web-tab-add web-tab-private-add" id="web-tab-new-private" title="New private tab (no history)">⊘</button>
+                </div>
+                <div class="web-toolbar">
+                  <button type="button" class="web-btn" id="web-back" title="Back">‹</button>
+                  <button type="button" class="web-btn" id="web-forward" title="Forward">›</button>
+                  <button type="button" class="web-btn" id="web-reload" title="Reload">↻</button>
+                  <button type="button" class="web-btn" id="web-home" title="Home">⌂</button>
+                  <input
+                    id="web-url"
+                    class="web-url"
+                    type="text"
+                    placeholder="ENTER URL OR SEARCH …"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <button type="button" class="web-btn" id="web-go" title="Go">→</button>
+                  <span class="web-blocked" id="web-blocked" title="Requests blocked this session">0 BLK</span>
+                </div>
+                <div class="web-view-wrap" id="web-view-wrap">
+                  <!-- webviews are injected here by app.js, one per tab -->
                 </div>
               </div>
             </div>

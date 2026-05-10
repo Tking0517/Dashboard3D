@@ -1,3 +1,58 @@
+/* ── Bundled web fonts ───────────────────────────────────────────
+   Self-hosted (no network at runtime) so the dashboard renders the
+   same on any machine. Vite hashes + copies the woff2 files into
+   the build output via these relative URLs. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Inter';
+  src: url('./fonts/Inter-Regular.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Inter';
+  src: url('./fonts/Inter-Bold.woff2') format('woff2');
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif';
+  src: url('./fonts/SourceSerif-Regular.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif';
+  src: url('./fonts/SourceSerif-Bold.woff2') format('woff2');
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Lora';
+  src: url('./fonts/Lora-VF.woff2') format('woff2-variations');
+  font-weight: 400 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('./fonts/IBMPlexMono-Regular.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./fonts/IBMPlexSans-Regular.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('./fonts/SpaceGrotesk-VF.woff2') format('woff2-variations');
+  font-weight: 300 700; font-style: normal; font-display: swap;
+}
+
 :root {
   --bg: #070a0e;
   --panel-bg: rgba(9, 12, 16, 0.58);
@@ -17,6 +72,37 @@
   --font-tech:    'Share Tech Mono', 'Consolas', 'Courier New', monospace;
 
   --gap: 14px;
+}
+
+/* ── UI font themes ─────────────────────────────────────────────
+   Cycled by the topbar font button. Each class flips both
+   --font-tech (body / data) and --font-display (headlines / big
+   numerics) so the entire dashboard takes on a different feel.
+   The default body class (none of the below) keeps the original
+   Rajdhani / Share Tech Mono look. */
+body.font-tech {
+  --font-display: 'Space Grotesk', 'Rajdhani', sans-serif;
+  --font-tech:    'JetBrains Mono', 'Consolas', monospace;
+}
+body.font-clean {
+  --font-display: 'Inter', 'Helvetica Neue', sans-serif;
+  --font-tech:    'Inter', 'Helvetica Neue', sans-serif;
+}
+body.font-classic {
+  --font-display: 'Source Serif', 'Cambria', Georgia, serif;
+  --font-tech:    'Source Serif', 'Cambria', Georgia, serif;
+}
+body.font-mono {
+  --font-display: 'IBM Plex Mono', 'Consolas', monospace;
+  --font-tech:    'IBM Plex Mono', 'Consolas', monospace;
+}
+body.font-mixed {
+  --font-display: 'Space Grotesk', 'Inter', sans-serif;
+  --font-tech:    'IBM Plex Sans', 'Inter', sans-serif;
+}
+body.font-writing {
+  --font-display: 'Lora', Georgia, serif;
+  --font-tech:    'Source Serif', Georgia, serif;
 }
 
 /* ── Theme palettes ─────────────────────────────────────────── */
@@ -119,12 +205,42 @@
   --muted:  #a55050;
   --dim:    #3a0a10;
 }
+/* Alert theme — auto-engaged when offline, on errors, or when CPU/GPU load
+   crosses 90%. Same animation cadence as every other theme; the strobe
+   peaks 70% brighter via swapped keyframes (panel-pulse-alert / element-
+   pulse-alert) so the dashboard visibly throbs without speeding up. */
+[data-theme="alert"] {
+  --accent: #ff1010;
+  --amber:  #ff4000;
+  --red:    #ff0000;
+  --ok:     #ff7040;
+  --text:   #ffd0b8;
+  --muted:  #d02010;
+  --dim:    #400000;
+  --bg:       #050000;
+  --panel-bg: rgba(12, 0, 0, 0.72);
+}
+[data-theme="alert"] .panel { animation-name: panel-pulse-alert; }
+[data-theme="alert"] .meter,
+[data-theme="alert"] .time-row,
+[data-theme="alert"] .temp-row,
+[data-theme="alert"] .storage-row,
+[data-theme="alert"] .net-row,
+[data-theme="alert"] .gpu-mem-row,
+[data-theme="alert"] .note-tab,
+[data-theme="alert"] .chat-msg,
+[data-theme="alert"] .weather-left,
+[data-theme="alert"] .weather-right { animation-name: element-pulse-alert; }
+@keyframes panel-pulse-alert {
+  0%, 100% { filter: brightness(0.92); }
+  50%      { filter: brightness(1.87); }
+}
+@keyframes element-pulse-alert {
+  0%, 100% { filter: brightness(0.65); }
+  50%      { filter: brightness(2.30); }
+}
 
-/* ── Low-contrast complementary palettes ────────────────────── */
-/* All ten share a desaturated, near-equal-luminance approach so the HUD
-   feels calm. Each pairs two complementary hues plus a soft "ok" tint
-   that's neither — keeping the cool/warm/hot cascade legible without
-   shouting. */
+/* ── Low-contrast complementary palettes — desaturated pairs ─── */
 
 [data-theme="dust"] {           /* sandy beige + dusty rose */
   --accent: #c9a880;
@@ -217,14 +333,11 @@
   --dim:    #364038;
 }
 
-/* Invert toggle — flips light/dark via CSS filter on the app root.
-   hue-rotate(180deg) preserves color identity (blue stays blue-ish). */
+/* Invert + dim toggles. hue-rotate keeps color identity through invert
+   (blue stays blue-ish); the combined rule composes both filters. */
 body.theme-invert #app {
   filter: invert(1) hue-rotate(180deg);
 }
-/* Dim toggle — applies a 50% brightness filter to the entire app. Stacks
-   with invert (declared after so it composes on top of any invert filter
-   already present). */
 body.theme-dim #app {
   filter: brightness(0.5);
 }
@@ -247,15 +360,17 @@ body.theme-invert.theme-dim #app {
   z-index: 50;
   opacity: 0;
   transform: translateY(-2vh);
-  transition: opacity 700ms ease 350ms, transform 700ms ease 350ms;
+  /* 550ms delay = the moment black hits its peak in zen-black-peak; the
+     overlay then fades up over the second half of the entering window so
+     it emerges out of black rather than appearing under it. */
+  transition: opacity 550ms ease 550ms, transform 550ms ease 550ms;
   color: var(--text);
 }
 body.is-zen .zen-overlay {
   opacity: 1;
   transform: translateY(0);
 }
-/* Focal trio = clock, date, weather. Every other zen element (network rows,
-   CPU cores, RAM, GPU) and the bottom audio meters render 60% darker. */
+/* Non-focal zen elements render 60% darker than the clock/date/weather/power. */
 body.is-zen .zen-overlay > *:not(.zen-clock):not(.zen-date):not(.zen-weather):not(.zen-power),
 body.is-zen .audio-grid {
   opacity: 0.4;
@@ -528,23 +643,62 @@ body.is-zen .audio-grid {
 .topbar-controls {
   transition: transform 800ms cubic-bezier(0.5, 0, 0.2, 1), opacity 800ms ease;
 }
-body.is-zen .hud .panel,
-body.is-zen .hud .panel-stack {
-  opacity: 0;
-  pointer-events: none;
-}
 body.is-zen .topbar-controls {
   opacity: 0;
   transform: translate(-50%, -120%); /* up off-screen, preserving the centering */
   pointer-events: none;
 }
-/* Top row → push up. Bottom row → push down. */
-body.is-zen .hud-row-top    .panel { transform: translateY(-110vh); }
-body.is-zen .hud-row-bottom .panel { transform: translateY( 110vh); }
-/* Mid row: left panel goes left, right stack goes right, middle goes up. */
-body.is-zen .hud-row-mid > .panel:first-child  { transform: translateX(-110vw); }
-body.is-zen .hud-row-mid > .panel:nth-child(2) { transform: translateY(-110vh); }
-body.is-zen .hud-row-mid > .panel-stack        { transform: translateX( 110vw); }
+
+/* ── Zen entry/exit transition ────────────────────────────────────
+   Plain opacity crossfade: cards fade to 0 over a black backdrop and
+   back in on exit. A fixed full-screen black layer (body::after) is
+   driven by the same is-zen-entering / is-zen / is-zen-leaving body
+   classes so the dashboard reads as fading to black between states.
+   No transforms — the cards stay anchored and just dissolve. */
+body.is-zen-entering .hud .panel,
+body.is-zen-entering .hud .panel-stack {
+  /* Hidden by black peak (550ms); fading in 500ms keeps cards invisible
+     well before the black starts dissipating. */
+  opacity: 0;
+  transition: opacity 500ms ease;
+  pointer-events: none;
+}
+body.is-zen .hud .panel,
+body.is-zen .hud .panel-stack {
+  opacity: 0;
+  pointer-events: none;
+}
+body.is-zen-leaving .hud .panel,
+body.is-zen-leaving .hud .panel-stack {
+  /* On exit: wait until black is past its peak (475ms in 950ms), then
+     fade cards back in over the second half. */
+  opacity: 1;
+  transition: opacity 475ms ease 475ms;
+  pointer-events: none;
+}
+
+/* Crossfade-through-black backdrop. Black peaks halfway through the
+   entering/leaving transition then dissipates, so the dashboard fades
+   *to* black on entry and the zen UI emerges *from* black after the
+   peak. Steady is-zen state has the backdrop at 0 opacity — the zen
+   overlay sits on the dashboard's normal dark background, not on a
+   black wash. Lives between the cards (z<50) and the zen overlay
+   (z=50). */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+body.is-zen-entering::after { animation: zen-black-peak 1100ms ease forwards; }
+body.is-zen-leaving::after  { animation: zen-black-peak  950ms ease forwards; }
+@keyframes zen-black-peak {
+  0%, 100% { opacity: 0; }
+  50%      { opacity: 1; }
+}
 
 /* In zen mode, the two audio meters stop being chunky bottom corners and
    become a full-width pair across the bottom — short, wide, and out of the
@@ -635,6 +789,66 @@ html, body {
   text-transform: uppercase;
   color: var(--muted);
 }
+/* Whole meta-row is the device picker hit target. Cursor + subtle hover
+   tint advertises it as clickable so users don't have to hunt for the
+   tiny text element. The mute button (own listener) keeps its own cursor. */
+.audio-grid .audio-meta-row.is-clickable {
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background 0.12s, color 0.12s;
+}
+.audio-grid .audio-meta-row.is-clickable:hover {
+  background: color-mix(in srgb, var(--audio-color) 14%, transparent);
+  color: var(--audio-color);
+}
+.audio-grid .audio-meta-row.is-clickable:hover .audio-device-name {
+  color: var(--audio-color);
+}
+.audio-grid .audio-meta-row.is-clickable .audio-mute-btn {
+  /* The mute button keeps its own cursor, not pointer-from-row. */
+  cursor: pointer;
+}
+
+/* Per-visualizer gain triangles (stacked ▲/▼ on the right of the meta row).
+   Each click bumps the bar-height multiplier by ~15%. They sit outside the
+   row's clickable picker area thanks to mousedown stopPropagation in JS. */
+.audio-grid .audio-gain-controls {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+}
+.audio-grid .audio-gain-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  width: 14px;
+  height: 7px;
+  padding: 0;
+  font-family: var(--font-tech);
+  font-size: 6px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.audio-grid .audio-gain-btn:hover {
+  border-color: var(--audio-color);
+  color: var(--audio-color);
+  background: color-mix(in srgb, var(--audio-color) 14%, transparent);
+}
+.audio-grid .audio-meta-row.is-clickable .audio-gain-btn {
+  /* override: hover row tint shouldn't apply to gain buttons */
+  cursor: pointer;
+}
+.audio-grid .audio-meta-row.is-clickable:hover .audio-gain-btn {
+  color: var(--muted);
+}
 .audio-grid .audio-mute-btn {
   background: transparent;
   border: 1px solid var(--rule-dim);
@@ -664,13 +878,15 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Hardcoded red on the muted state — themes can override --red but mute
+   is a hard "off" signal that should read the same on every theme. */
 .audio-grid.is-muted .audio-mute-btn {
-  border-color: var(--red);
-  color: var(--red);
-  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-color: #ff3b30;
+  color: #ff3b30;
+  background: rgba(255, 59, 48, 0.12);
 }
 .audio-grid.is-muted .audio-bars-row { opacity: 0.25; }
-.audio-grid.is-muted .audio-device-name { color: var(--red); }
+.audio-grid.is-muted .audio-device-name { color: #ff3b30; }
 
 .audio-device-menu {
   position: fixed;
@@ -707,74 +923,19 @@ html, body {
 }
 .audio-device-menu-item:last-child { border-bottom: 0; }
 
-.audio-grid .audio-bar {
-  flex: 1;
-  position: relative;
-  min-width: 0;
-  background:
-    repeating-linear-gradient(0deg,
-      color-mix(in srgb, var(--audio-color) 10%, transparent) 0,
-      color-mix(in srgb, var(--audio-color) 10%, transparent) 3px,
-      transparent 3px,
-      transparent 5px);
+/* Bar grid is rendered into a single <canvas> per visualizer for
+   performance. Per-bar DOM elements (one fill div + one peak div per
+   bar, ×96 bars × 60 Hz updates) used to thrash flex reflow on every
+   audio frame. Canvas is GPU-composited as one texture; smile curve,
+   gradient, peak markers all live in JS now (createAudioVisualizer
+   .render). */
+.audio-grid .audio-bars-row { overflow: hidden; }
+.audio-grid .audio-bars-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
   border-top: 1px solid var(--rule-dim);
   border-bottom: 1px solid var(--rule-dim);
-  overflow: hidden;
-  /* Smile curve: bars near each edge grow taller. --edge-dist is set per
-     bar by JS (0 at center, 1 at either end). Boosts scaleY by up to 35%. */
-  transform: scaleY(calc(1 + var(--edge-dist, 0) * 0.35));
-  transform-origin: bottom;
-}
-.audio-grid .audio-bars-row { overflow: visible; }
-.audio-grid .audio-bar-fill {
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  height: 0%;
-  /* Two layered backgrounds:
-     1) horizontal "gap" stripes (creates the segmented LED look)
-     2) vertical 3-zone color gradient anchored to the FULL bar height (not
-        the fill height) via the --bar-h custom property set by JS. As the
-        fill grows, more of the cool→warm→hot gradient is revealed. */
-  background:
-    repeating-linear-gradient(0deg,
-      transparent 0,
-      transparent 3px,
-      rgba(0, 0, 0, 0.65) 3px,
-      rgba(0, 0, 0, 0.65) 5px),
-    linear-gradient(0deg,
-      var(--audio-color) 0%,
-      var(--audio-color) 50%,
-      var(--amber) 62%,
-      var(--amber) 78%,
-      var(--red) 90%,
-      var(--red) 100%);
-  background-size: 100% 100%, 100% var(--bar-h, 60px);
-  background-position: 0 0, 0 bottom;
-  background-repeat: repeat, no-repeat;
-  transition: height 30ms linear;
-}
-.audio-grid .audio-bar-peak {
-  position: absolute;
-  left: 0; right: 0;
-  bottom: 0%;
-  height: 3px;
-  /* Peak marker color mirrors which zone the peak is in via the same gradient
-     trick — fixed to the bar's full height, sampled at the peak's bottom. */
-  background:
-    linear-gradient(0deg,
-      color-mix(in srgb, var(--audio-color) 30%, white) 0%,
-      color-mix(in srgb, var(--audio-color) 30%, white) 50%,
-      color-mix(in srgb, var(--amber) 30%, white) 62%,
-      color-mix(in srgb, var(--amber) 30%, white) 78%,
-      color-mix(in srgb, var(--red)   30%, white) 90%,
-      color-mix(in srgb, var(--red)   30%, white) 100%);
-  background-size: 100% var(--bar-h, 60px);
-  background-position: 0 bottom;
-  background-repeat: no-repeat;
-  box-shadow: 0 0 6px currentColor;
-  color: color-mix(in srgb, var(--audio-color) 60%, white);
-  pointer-events: none;
-  transition: bottom 30ms linear;
 }
 .audio-grid.is-dragging,
 .audio-grid.is-resizing {
@@ -782,18 +943,16 @@ html, body {
   filter: brightness(1.2);
 }
 
-/* Resize handles in 4 corners — invisible click targets, cursor hints only */
+/* Resize handles on the 4 edges — invisible click strips along the borders */
 .audio-grid .audio-resize-handle {
   position: absolute;
-  width: 12px;
-  height: 12px;
   z-index: 70;
   pointer-events: auto;
 }
-.audio-grid .audio-resize-se { bottom: 0; right: 0; cursor: nwse-resize; }
-.audio-grid .audio-resize-sw { bottom: 0; left: 0;  cursor: nesw-resize; }
-.audio-grid .audio-resize-ne { top: 0;    right: 0; cursor: nesw-resize; }
-.audio-grid .audio-resize-nw { top: 0;    left: 0;  cursor: nwse-resize; }
+.audio-grid .audio-resize-n { top: 0;    left: 6px; right: 6px; height: 6px; cursor: ns-resize; }
+.audio-grid .audio-resize-s { bottom: 0; left: 6px; right: 6px; height: 6px; cursor: ns-resize; }
+.audio-grid .audio-resize-e { right: 0;  top: 6px;  bottom: 6px; width: 6px; cursor: ew-resize; }
+.audio-grid .audio-resize-w { left: 0;   top: 6px;  bottom: 6px; width: 6px; cursor: ew-resize; }
 
 /* Flat background grid + tick dots, with a slow brightness pulse */
 .bg-grid {
@@ -929,6 +1088,39 @@ html, body {
   gap: 6px;
   pointer-events: none; /* container is just layout */
 }
+/* Reorder feedback: dragged item fades to half-opacity while others stay
+   visible so the user can see the slot they're dropping into. The browser
+   draws the standard ghost preview at the cursor automatically. */
+.topbar-controls > [draggable="true"].is-topbar-dragging {
+  opacity: 0.35;
+}
+
+/* Group dividers — thin vertical lines users can drag between buttons to
+   carve the topbar into visual groups. Slightly wider hit area than the
+   visible line so they're easy to grab. */
+.topbar-divider {
+  /* The bar itself is rendered with a centered linear gradient inside a
+     wider transparent box so the click target is comfortable to grab. */
+  width: 8px;
+  height: 22px;
+  align-self: center;
+  pointer-events: auto;
+  cursor: grab;
+  background:
+    linear-gradient(to right, transparent 0, transparent 3px,
+                    color-mix(in srgb, var(--accent) 55%, transparent) 3px,
+                    color-mix(in srgb, var(--accent) 55%, transparent) 5px,
+                    transparent 5px, transparent 100%);
+  transition: background 0.12s;
+}
+.topbar-divider:hover {
+  background:
+    linear-gradient(to right, transparent 0, transparent 3px,
+                    var(--accent) 3px,
+                    var(--accent) 5px,
+                    transparent 5px, transparent 100%);
+}
+.topbar-divider:active { cursor: grabbing; }
 .topbar-btn {
   width: 30px;
   height: 30px;
@@ -1463,16 +1655,21 @@ body.is-zen .terminal-panel:not([hidden]) {
   position: relative;
 }
 
+/* Container queries: every .panel becomes its own sizing context so its
+   header/footer/body text can scale with the panel's actual width.
+   `cqi` = container query inline (1cqi = 1% of container width). */
+.panel { container-type: inline-size; }
+
 /* ── Panel header row ────────────────────────────────────────── */
 .panel-header {
   display: grid;
   grid-template-columns: 1fr auto auto auto;
   align-items: center;
-  gap: 14px;
-  padding: 8px 14px;
+  gap: clamp(6px, 2cqi, 14px);
+  padding: clamp(4px, 1.5cqi, 10px) clamp(8px, 2.6cqi, 16px);
   border-bottom: 1px solid var(--rule-dim);
   font-family: var(--font-tech);
-  font-size: 10px;
+  font-size: clamp(8px, 2.4cqi, 12px);
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1497,9 +1694,53 @@ body.is-zen .terminal-panel:not([hidden]) {
   transition: transform 0.2s, border-color 0.15s, color 0.15s;
 }
 .panel-collapse-btn:hover { border-color: var(--accent); color: var(--accent); }
-.panel.is-collapsed .panel-collapse-btn { transform: rotate(180deg); }
+.panel-collapse-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.panel-fold-btn { font-size: 9px; }
+/* Full-down ● glyph runs visually small at 9px; bump it up but keep the
+   button box the same so the three controls stay aligned. */
+.panel-fold-btn-full { font-size: 14px; }
+.panel-fold-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+
+/* When the combo panel is folded full-down, dim everything else. The
+   backdrop is a fixed full-screen overlay at z-index 49; the combo panel
+   sits at z-index 50 (set above) so it stays at full brightness. */
+body.is-combo-fold-full::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 49;
+  pointer-events: none;
+}
+.panel.is-collapsed .panel-collapse-btn:not(.panel-fold-btn) { transform: rotate(180deg); }
 .panel.is-collapsed .panel-body,
 .panel.is-collapsed .panel-footer { display: none; }
+
+/* Combo panel fold-down states. The panel becomes a fixed overlay anchored
+   at its current grid-column (via --fold-top / --fold-left / --fold-width
+   set from JS at fold time), and extends downward 50% (half) or to near the
+   bottom of the viewport (full). */
+.panel-combo.is-fold-half,
+.panel-combo.is-fold-full {
+  position: fixed !important;
+  top: var(--fold-top, 0) !important;
+  left: var(--fold-left, 0) !important;
+  width: var(--fold-width, auto) !important;
+  z-index: 50;
+  align-self: auto !important;
+}
+.panel-combo.is-fold-half { height: 50vh !important; max-height: 50vh !important; }
+.panel-combo.is-fold-full { bottom: 12px !important; height: auto !important; max-height: none !important; }
+
 .panel.is-collapsed {
   /* Force header-only size regardless of any inline width/height saved by
      drag-resize. !important beats the inline style. */
@@ -1530,7 +1771,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 .panel-id    {
   color: var(--amber);
   font-family: var(--font-display);
-  font-size: 14px;
+  font-size: clamp(10px, 3.2cqi, 18px);
   letter-spacing: 0.12em;
   font-weight: 500;
 }
@@ -1540,11 +1781,11 @@ body.is-zen .terminal-panel:not([hidden]) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 6px 14px;
+  gap: clamp(6px, 2cqi, 14px);
+  padding: clamp(3px, 1.2cqi, 8px) clamp(8px, 2.6cqi, 16px);
   border-top: 1px solid var(--rule-dim);
   font-family: var(--font-tech);
-  font-size: 10px;
+  font-size: clamp(8px, 2.2cqi, 11px);
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1561,12 +1802,12 @@ body.is-zen .terminal-panel:not([hidden]) {
 .footer-readout em {
   color: var(--muted);
   font-style: normal;
-  font-size: 9px;
+  font-size: clamp(8px, 2cqi, 11px);
   letter-spacing: 0.14em;
 }
 .footer-readout strong {
   font-family: var(--font-display);
-  font-size: 14px;
+  font-size: clamp(10px, 3cqi, 16px);
   font-weight: 500;
   letter-spacing: 0.12em;
   color: var(--text);
@@ -1578,10 +1819,10 @@ body.is-zen .terminal-panel:not([hidden]) {
 
 /* ── Panel body ──────────────────────────────────────────────── */
 .panel-body {
-  padding: 12px 14px;
+  padding: clamp(6px, 2cqi, 14px) clamp(8px, 2.6cqi, 16px);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: clamp(4px, 1.6cqi, 12px);
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -1605,21 +1846,21 @@ body.is-zen .terminal-panel:not([hidden]) {
 .bigvalue .caret {
   font-family: var(--font-tech);
   color: var(--red);
-  font-size: 16px;
+  font-size: clamp(10px, 3cqi, 18px);
   align-self: center;
   line-height: 1;
 }
 .bigvalue-num {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: 56px;
+  font-size: clamp(22px, 9cqi, 56px);
   letter-spacing: 0.04em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .bigvalue-unit {
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: clamp(10px, 3.4cqi, 22px);
   color: var(--muted);
   letter-spacing: 0.05em;
 }
@@ -1642,7 +1883,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 }
 .micro-cell-wide { grid-column: span 2; }
 .micro-label {
-  font-size: 9px;
+  font-size: clamp(7px, 1.9cqi, 11px);
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1650,7 +1891,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 .micro-val {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: 16px;
+  font-size: clamp(11px, 3.4cqi, 18px);
   letter-spacing: 0.05em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -1672,14 +1913,14 @@ body.is-zen .terminal-panel:not([hidden]) {
 }
 .meter-label {
   font-family: var(--font-tech);
-  font-size: 9px;
+  font-size: clamp(7px, 1.9cqi, 11px);
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--muted);
 }
 .meter-value {
   font-family: var(--font-display);
-  font-size: 14px;
+  font-size: clamp(10px, 3cqi, 17px);
   font-weight: 500;
   letter-spacing: 0.06em;
   color: var(--text);
@@ -1740,7 +1981,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 
 .time-row {
   display: grid;
-  grid-template-columns: 110px 1fr;
+  grid-template-columns: clamp(80px, 26cqi, 130px) 1fr;
   gap: 14px;
   align-items: center;
   border-bottom: 1px dashed var(--rule-dim);
@@ -1755,15 +1996,40 @@ body.is-zen .terminal-panel:not([hidden]) {
 }
 .time-meta .micro-val {
   white-space: normal;
-  font-size: 14px;
+  font-size: clamp(10px, 3cqi, 16px);
 }
 
 /* Make the secondary readout a touch smaller */
-.bigvalue-primary   .bigvalue-num { font-size: 48px; }
-.bigvalue-primary   .bigvalue-unit { font-size: 18px; }
-.bigvalue-secondary .bigvalue-num { font-size: 36px; color: var(--text); }
-.bigvalue-secondary .bigvalue-unit { font-size: 14px; }
-.bigvalue-secondary .caret { font-size: 12px; color: var(--amber); }
+/* Big readouts scale with the panel's width via container queries.
+   Min/max keep them readable in tiny panels and from looking absurd in
+   huge ones — clamps stay close to the original fixed pixel sizes. */
+.bigvalue-primary   .bigvalue-num  { font-size: clamp(22px, 9cqi, 56px); }
+.bigvalue-primary   .bigvalue-unit { font-size: clamp(10px, 3.4cqi, 22px); }
+.bigvalue-secondary .bigvalue-num  { font-size: clamp(18px, 7cqi, 44px); color: var(--text); }
+.bigvalue-secondary .bigvalue-unit { font-size: clamp(8px,  2.6cqi, 16px); }
+.bigvalue-secondary .caret         { font-size: clamp(8px,  2.2cqi, 14px); color: var(--amber); }
+
+/* Time-zone visual hierarchy. The top row (local) reads brightest with the
+   accent-colored caret; alt zones progressively dim toward the background
+   so the user's eye locks onto local time first. Each row also gets a
+   distinct caret hue for quick at-a-glance identification (accent → amber
+   → muted). */
+.clock-body .time-row:nth-of-type(1) .bigvalue-num  { color: var(--text);  opacity: 1; }
+.clock-body .time-row:nth-of-type(1) .bigvalue-unit { color: var(--muted); opacity: 1; }
+.clock-body .time-row:nth-of-type(1) .caret         { color: var(--accent); }
+.clock-body .time-row:nth-of-type(1) .micro-val.accent { color: var(--accent); }
+
+.clock-body .time-row:nth-of-type(2) .bigvalue-num  { color: color-mix(in srgb, var(--text) 78%, var(--bg)); }
+.clock-body .time-row:nth-of-type(2) .bigvalue-unit { color: color-mix(in srgb, var(--muted) 78%, var(--bg)); }
+.clock-body .time-row:nth-of-type(2) .caret         { color: var(--amber); }
+.clock-body .time-row:nth-of-type(2) .micro-val.accent { color: color-mix(in srgb, var(--accent) 80%, var(--bg)); }
+.clock-body .time-row:nth-of-type(2) .micro-label   { color: color-mix(in srgb, var(--muted) 80%, var(--bg)); }
+
+.clock-body .time-row:nth-of-type(3) .bigvalue-num  { color: color-mix(in srgb, var(--text) 58%, var(--bg)); }
+.clock-body .time-row:nth-of-type(3) .bigvalue-unit { color: color-mix(in srgb, var(--muted) 60%, var(--bg)); }
+.clock-body .time-row:nth-of-type(3) .caret         { color: var(--muted); }
+.clock-body .time-row:nth-of-type(3) .micro-val.accent { color: color-mix(in srgb, var(--accent) 60%, var(--bg)); }
+.clock-body .time-row:nth-of-type(3) .micro-label   { color: color-mix(in srgb, var(--muted) 60%, var(--bg)); }
 
 .alt-city-row {
   display: grid;
@@ -1784,6 +2050,19 @@ body.is-zen .terminal-panel:not([hidden]) {
   border-bottom: 1px dashed var(--rule-dim);
   padding-bottom: 6px;
 }
+/* "UPDATED YYYY-MM-DD HH:MM" chip in the top-right of the tabs row.
+   margin-left: auto pushes it past the +tab button to the far right. */
+.note-updated {
+  margin-left: auto;
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 1.9cqi, 10px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  padding-left: 8px;
+}
 .note-tab {
   display: inline-flex;
   align-items: center;
@@ -1792,7 +2071,7 @@ body.is-zen .terminal-panel:not([hidden]) {
   border: 1px solid var(--rule-dim);
   color: var(--muted);
   font-family: var(--font-tech);
-  font-size: 10px;
+  font-size: clamp(8px, 2.4cqi, 12px);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 4px 8px;
@@ -1834,7 +2113,7 @@ body.is-zen .terminal-panel:not([hidden]) {
   border: 1px solid var(--rule-dim);
   color: var(--text);
   font-family: var(--font-tech);
-  font-size: 12px;
+  font-size: clamp(10px, 2.8cqi, 15px);
   letter-spacing: 0.04em;
   line-height: 1.55;
   padding: 10px;
@@ -1866,13 +2145,13 @@ body.is-zen .terminal-panel:not([hidden]) {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: 150px;
+  min-width: clamp(110px, 36cqi, 200px);
   border-right: 1px solid var(--rule-dim);
   padding-right: 18px;
 }
 .weather-cond {
   font-family: var(--font-tech);
-  font-size: 11px;
+  font-size: clamp(8px, 2.5cqi, 13px);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--accent);
@@ -1889,7 +2168,7 @@ body.is-zen .terminal-panel:not([hidden]) {
   border: 1px solid var(--rule-dim);
   color: var(--text);
   font-family: var(--font-tech);
-  font-size: 12px;
+  font-size: clamp(9px, 2.6cqi, 14px);
   letter-spacing: 0.08em;
   padding: 6px 10px;
   outline: none;
@@ -1903,8 +2182,6 @@ body.is-zen .terminal-panel:not([hidden]) {
 }
 
 /* ── System specifics ────────────────────────────────────────── */
-.panel-system {}
-
 /* Per-logical-processor vertical bar grid */
 .core-grid {
   display: grid;
@@ -1983,7 +2260,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 .core-bar-fill.high { background: inherit; }
 .core-bar-label {
   font-family: var(--font-tech);
-  font-size: 8px;
+  font-size: clamp(6px, 1.6cqi, 10px);
   letter-spacing: 0.06em;
   color: var(--muted);
   text-align: center;
@@ -2000,7 +2277,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 .scratch-grid .core-bar { flex: 1; min-width: 0; }
 .scratch-grid .core-bar-track { height: 36px; }
 .scratch-grid .core-bar-label {
-  font-size: 10px;
+  font-size: clamp(7px, 2.2cqi, 13px);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2083,7 +2360,7 @@ body.is-zen .terminal-panel:not([hidden]) {
   justify-content: space-between;
   align-items: baseline;
   font-family: var(--font-tech);
-  font-size: 9px;
+  font-size: clamp(7px, 2.2cqi, 12px);
   letter-spacing: 0.06em;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -2114,7 +2391,7 @@ body.is-zen .terminal-panel:not([hidden]) {
   justify-content: space-between;
   align-items: baseline;
   font-family: var(--font-tech);
-  font-size: 10px;
+  font-size: clamp(7px, 2.4cqi, 13px);
   letter-spacing: 0.08em;
   color: var(--muted);
 }
@@ -2147,7 +2424,7 @@ body.is-zen .terminal-panel:not([hidden]) {
 .temp-name {
   color: var(--muted);
   font-family: var(--font-tech);
-  font-size: 9px;
+  font-size: clamp(7px, 2.2cqi, 12px);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -2164,14 +2441,14 @@ body.is-zen .terminal-panel:not([hidden]) {
 .temp-readout .bigvalue-num {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: 25px;
+  font-size: clamp(15px, 6cqi, 32px);
   letter-spacing: 0.04em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .temp-readout .bigvalue-unit {
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: clamp(8px, 2.6cqi, 14px);
   color: var(--muted);
 }
 /* Power-draw chip: pushed to the right of the temp readout, slightly
@@ -2185,10 +2462,10 @@ body.is-zen .terminal-panel:not([hidden]) {
   border-left: 1px dashed var(--rule-dim);
 }
 .temp-power .bigvalue-num {
-  font-size: 20px;
+  font-size: clamp(12px, 4.5cqi, 24px);
   color: var(--accent);
 }
-.temp-power .bigvalue-unit { font-size: 10px; }
+.temp-power .bigvalue-unit { font-size: clamp(7px, 2.2cqi, 12px); }
 
 /* Temp segment bar — color reflects severity */
 .seg-temp {
@@ -2209,107 +2486,58 @@ body.is-zen .terminal-panel:not([hidden]) {
 .panel-driveio  {}
 .net-body { gap: 14px; }
 
+/* The two rows split the panel's vertical space equally so the sparklines
+   actually grow when the panel is dragged taller. align-items: stretch on
+   the grid lets the spark-bars cell fill the row height; .net-col centers
+   its text inside its cell to keep the original visual balance. */
 .net-row {
   display: grid;
-  grid-template-columns: 150px 1fr;
+  grid-template-columns: clamp(110px, 38cqi, 200px) 1fr;
   gap: 12px;
-  align-items: center;
+  align-items: stretch;
   padding-bottom: 10px;
   border-bottom: 1px dashed var(--rule-dim);
+  flex: 1 1 0;
+  min-height: 0;
 }
 .net-row:nth-of-type(2) { padding-bottom: 14px; }
 .net-col {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 3px;
   min-width: 0;
 }
 .bigvalue-net .bigvalue-num {
-  font-size: 32px;
+  font-size: clamp(16px, 6cqi, 38px);
 }
 .bigvalue-net .bigvalue-unit {
-  font-size: 13px;
+  font-size: clamp(8px, 2.4cqi, 15px);
 }
 
-/* Bar-grid sparkline replacement: same visual language as the audio bars
-   (cascade gradient + floating peak markers). Used for net/disk traffic. */
+/* Bar-grid sparkline (canvas-backed, same visual language as audio bars).
+   Used for net/disk traffic + CPU/GPU/RAM history. The container holds a
+   single <canvas> filled to its size; bars + peaks are drawn in JS
+   (renderSpark in app.js). */
 .spark-bars {
+  /* Fills whichever cell it's placed in (.net-row grid cell, zen overlay,
+     etc.). min-height keeps the bars readable on tiny panels; we let the
+     parent's stretch / flex sizing drive the height upward. */
   width: 100%;
-  height: 44px;
-  display: flex;
-  gap: 1px;
-  align-items: stretch;
+  height: 100%;
+  min-height: 32px;
   border-top: 1px solid var(--rule-dim);
   border-bottom: 1px solid var(--rule-dim);
-  padding: 2px 0;
   --spark-color: var(--accent);
-}
-.spark-bars.spark-bars-tx { --spark-color: var(--amber); }
-.spark-bar {
-  flex: 1;
   position: relative;
-  min-width: 0;
-  background:
-    repeating-linear-gradient(0deg,
-      color-mix(in srgb, var(--spark-color) 10%, transparent) 0,
-      color-mix(in srgb, var(--spark-color) 10%, transparent) 3px,
-      transparent 3px,
-      transparent 5px);
   overflow: hidden;
 }
-.spark-bar-fill {
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  height: 0%;
-  background:
-    repeating-linear-gradient(0deg,
-      transparent 0,
-      transparent 3px,
-      rgba(0, 0, 0, 0.65) 3px,
-      rgba(0, 0, 0, 0.65) 5px),
-    linear-gradient(0deg,
-      var(--spark-color) 0%,
-      var(--spark-color) 50%,
-      var(--amber) 62%,
-      var(--amber) 78%,
-      var(--red) 90%,
-      var(--red) 100%);
-  background-size: 100% 100%, 100% var(--bar-h, 40px);
-  background-position: 0 0, 0 bottom;
-  background-repeat: repeat, no-repeat;
-}
-.spark-bar-peak {
-  position: absolute;
-  left: 0; right: 0;
-  bottom: 0%;
-  height: 2px;
-  background: color-mix(in srgb, var(--spark-color) 30%, white);
-  box-shadow: 0 0 5px color-mix(in srgb, var(--spark-color) 50%, white);
-  pointer-events: none;
-  /* Smooth slide between sparse data updates (1 Hz net, 0.5 Hz disk). */
-  transition: bottom 0.9s ease-out;
-}
-
-.sparkline {
+.spark-bars.spark-bars-tx { --spark-color: var(--amber); }
+.spark-bars-canvas {
+  display: block;
   width: 100%;
-  height: 44px;
-  background:
-    repeating-linear-gradient(0deg,
-      color-mix(in srgb, var(--accent) 6%, transparent) 0,
-      color-mix(in srgb, var(--accent) 6%, transparent) 1px,
-      transparent 1px,
-      transparent 11px);
-  border-top: 1px solid var(--rule-dim);
-  border-bottom: 1px solid var(--rule-dim);
+  height: 100%;
 }
-.sparkline polyline {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 1.25;
-  vector-effect: non-scaling-stroke;
-  opacity: 0.92;
-}
-.sparkline-tx polyline { stroke: var(--amber); }
 
 /* ── Chat (Ollama) specifics ─────────────────────────────────── */
 .panel-chat {}
@@ -2515,19 +2743,19 @@ body.is-zen .terminal-panel:not([hidden]) {
   justify-content: space-between;
   align-items: baseline;
   font-family: var(--font-tech);
-  font-size: 11px;
+  font-size: clamp(8px, 2.4cqi, 13px);
 }
 .storage-mount {
   color: var(--text);
   font-family: var(--font-display);
-  font-size: 16px;
+  font-size: clamp(11px, 3.5cqi, 19px);
   font-weight: 500;
   letter-spacing: 0.08em;
 }
 .storage-mount em {
   color: var(--muted);
   font-style: normal;
-  font-size: 10px;
+  font-size: clamp(7px, 2.2cqi, 12px);
   font-family: var(--font-tech);
   margin-left: 8px;
   letter-spacing: 0.15em;
@@ -2537,12 +2765,12 @@ body.is-zen .terminal-panel:not([hidden]) {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
-  font-size: 10px;
+  font-size: clamp(7px, 2.2cqi, 12px);
   text-transform: uppercase;
 }
 .storage-empty {
   color: var(--muted);
-  font-size: 10px;
+  font-size: clamp(7px, 2.2cqi, 12px);
   letter-spacing: 0.18em;
   text-transform: uppercase;
 }
@@ -2562,7 +2790,7 @@ body.is-zen .terminal-panel:not([hidden]) {
   border-bottom: 2px solid transparent;
   color: var(--muted);
   font-family: var(--font-tech);
-  font-size: 11px;
+  font-size: clamp(8px, 2.6cqi, 13px);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   padding: 8px 14px;
@@ -2598,4 +2826,304 @@ body.is-zen .terminal-panel:not([hidden]) {
 /* Footer status: show the readout that matches the active mode. */
 .panel-combo[data-mode="notes"] .combo-footer-chat  { display: none; }
 .panel-combo[data-mode="chat"]  .combo-footer-notes { display: none; }
+.panel-combo[data-mode="paper"] .combo-footer-chat,
+.panel-combo[data-mode="paper"] .combo-footer-notes { display: none; }
+.panel-combo[data-mode="web"] .combo-footer-chat,
+.panel-combo[data-mode="web"] .combo-footer-notes { display: none; }
 
+/* ── Web browser pane ─────────────────────────────────────────── */
+.combo-pane-web { gap: 6px; }
+
+.web-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+}
+.web-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2.2cqi, 11px);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  max-width: 160px;
+  min-width: 60px;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.web-tab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.web-tab.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.web-tab.is-private {
+  border-style: dashed;
+}
+.web-tab-icon {
+  font-size: 1.05em;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.web-tab-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.web-tab-close {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 1.1em;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.web-tab-close:hover { opacity: 1; color: var(--accent); }
+.web-tab-add {
+  appearance: none;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(11px, 3cqi, 16px);
+  width: 26px;
+  padding: 0;
+  cursor: pointer;
+  line-height: 1;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.web-tab-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.web-tab-private-add { border-style: dashed; }
+
+.web-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--rule-dim);
+}
+.web-btn {
+  appearance: none;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(11px, 3cqi, 16px);
+  width: 26px;
+  padding: 0;
+  cursor: pointer;
+  line-height: 1;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.web-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.web-url {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.6cqi, 13px);
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  outline: none;
+  text-transform: lowercase;
+  caret-color: var(--accent);
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 0;
+}
+.web-url:focus {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.web-url::placeholder {
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+.web-blocked {
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 2cqi, 11px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  align-self: center;
+  padding-left: 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Wrapper around the <webview>(s). One webview per tab is appended here
+   and only the active tab's webview is shown via inline display style.
+   Dark mode + theme tint are injected from inside the webview's document
+   (see app.js applyWebTint + Chromium auto-dark via CDP). */
+.web-view-wrap {
+  flex: 1 1 auto;
+  min-height: 200px;
+  display: flex;
+  position: relative;
+  border: 1px solid var(--rule-dim);
+  background: var(--bg);
+}
+.web-view {
+  flex: 1 1 auto;
+  display: flex;
+  border: none;
+  width: 100%;
+  background: var(--bg);
+}
+
+
+/* ── Paper (basic word processor) ─────────────────────────────── */
+.combo-pane-paper { gap: 8px; }
+
+.paper-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--rule-dim);
+}
+.paper-tool {
+  appearance: none;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2.4cqi, 12px);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  min-width: 22px;
+  cursor: pointer;
+  line-height: 1;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.paper-tool:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.paper-tool b { font-weight: 700; }
+.paper-tool i { font-style: italic; }
+.paper-tool u { text-decoration: underline; }
+.paper-tool-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0 4px;
+  background: var(--rule-dim);
+}
+/* Font picker — same look as the toolbar buttons so it sits flush. */
+.paper-tool-select {
+  appearance: none;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2.4cqi, 12px);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 22px 3px 7px;
+  line-height: 1;
+  cursor: pointer;
+  outline: none;
+  /* Inline SVG caret arrow on the right edge. */
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 11px) 50%, calc(100% - 6px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: border-color 0.12s, color 0.12s, background-color 0.12s;
+}
+.paper-tool-select:hover,
+.paper-tool-select:focus {
+  border-color: var(--accent);
+  color: var(--accent);
+  background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+/* Native option styling can't be themed in most browsers — just give the
+   dropdown list a dark surface. */
+.paper-tool-select option {
+  background: #0a0a0a;
+  color: var(--text);
+}
+.paper-tool-stats {
+  margin-left: auto;
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 2cqi, 11px);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-left: 8px;
+}
+
+.paper-editor {
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--rule-dim);
+  /* Body text picks up the active theme's accent so the paper inherits the
+     dashboard's identity per theme cycle (orange/cyan/green/etc.). */
+  color: var(--accent);
+  font-family: var(--font-tech);
+  font-size: clamp(11px, 2.9cqi, 16px);
+  letter-spacing: 0.02em;
+  line-height: 1.6;
+  padding: 14px 16px;
+  outline: none;
+  flex: 1 1 auto;
+  min-height: 140px;
+  overflow-y: auto;
+  caret-color: var(--accent);
+  transition: border-color 0.15s, background 0.15s;
+}
+.paper-editor:focus {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.paper-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--dim);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+/* Headings + paragraph styles inside the editor — plain HTML produced by
+   execCommand('formatBlock'), styled to feel paper-document-y. */
+.paper-editor h1 { font-family: var(--font-display); font-size: 1.9em; margin: 0.6em 0 0.4em; color: var(--accent); letter-spacing: 0.02em; }
+.paper-editor h2 { font-family: var(--font-display); font-size: 1.5em; margin: 0.6em 0 0.3em; color: var(--text);   letter-spacing: 0.02em; }
+.paper-editor h3 { font-family: var(--font-display); font-size: 1.2em; margin: 0.5em 0 0.3em; color: var(--text);   letter-spacing: 0.02em; }
+.paper-editor p  { margin: 0 0 0.6em; }
+.paper-editor ul, .paper-editor ol { margin: 0 0 0.6em; padding-left: 1.6em; }
+.paper-editor li { margin: 0.15em 0; }
+.paper-editor blockquote {
+  margin: 0.4em 0 0.7em;
+  padding: 0.2em 0 0.2em 12px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  font-style: italic;
+}
+.paper-editor a { color: var(--accent); }

@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.5.0] — 2026-05-10
+
+### Audio overhaul
+- **Real OS-level mute** for both input and output — Core Audio `IAudioEndpointVolume` calls via PowerShell + inline C# COM glue; mute persists across volume-key auto-unmutes via 1.5 s polling
+- **OS default endpoint switching** — `IPolicyConfigVista` (registry-friendly substring match) lets the in/out device pickers switch the system default device, not just route capture
+- **Edge resize handles** on both audio visualizers (was: SE-corner only); **dynamic snap-to-grid** with hold-Alt bypass
+- **Per-visualizer gain ▲/▼** triangles next to the device picker; the in+out visualizers stay sized identically (linked dimensions saved under `audioVizSize`)
+- **Canvas rendering** replaces the per-bar DOM — was ~14 k DOM style writes/sec at 96 bars × 2 visualizers, now one `ctx.fillRect` loop per draw. Linear gradient + CSS-var lookups cached by a `_themeVersion` counter
+- **Sample rate halved** — output FFT cadence ~47 Hz → ~23 Hz (`frameCount & 3` in audify-worker), input mic poll ~30 Hz → ~15 Hz (rAF skip every 4th frame). The meters don't need realtime; halving cuts IPC + canvas work in half
+- **Mic floor + smile curve** tuned so the output stops clipping at the top with the canvas pre-divided by 0.70 (middle bars max at 70 % of canvas, edges scale up to ~95 %)
+
+### Snap grid + collision
+- **Dynamic grid** sized to viewport (~40 px target cell), used for both drag-snap and resize-snap on panels and audio visualizers; hold **Alt** to bypass
+- **Collision detection** — panels can't overlap while dragging or resizing; auto-snap to neighbor edges so adjacent panels stay flush instead of stacking
+
+### Container-query scaling
+- Every `.panel` becomes its own `container-type: inline-size`; bigvalue / micro-label / meter-value / time-row / weather / thermal / storage / tab labels all use `clamp(min, Ncqi, max)` so text and graph scale smoothly with the panel's actual width
+- Network and disk sparklines fixed to fill their grid cell (was stuck at 32 px because `.net-row` was a CSS grid with `align-items: center` — flipped to `align-items: stretch` + `flex: 1 1 0`)
+
+### Notes / Paper / UI fonts
+- **Per-line `[HH:MM]` timestamps** in notes — Enter prefixes a fresh timestamp on the new line. Top-right `UPDATED` chip per tab refreshed each save
+- **PAPER tab** — basic contenteditable word processor with rich-text toolbar (B/I/U/lists/etc.) and a font picker that only affects the editor. Persists `paperContent` + `paperFont`
+- **Bundled writing fonts** (woff2, hashed by Vite) — JetBrains Mono, Inter, Source Serif, Lora, IBM Plex Mono/Sans, Space Grotesk
+- **UI font cycle button** in the topbar — toggles `body.font-tech / clean / classic / mono / mixed / writing` to swap `--font-display` + `--font-tech` across the entire dashboard. Persisted under `uiFont`
+
+### Topbar reorder + new buttons
+- Each direct child of `.topbar-controls` is HTML5-draggable side-to-side; drop position computed against sibling midpoints. Order saved under `topbarOrder`
+- **Three thin dividers** (`#topbar-div-1/2/3`) participate in the same drag system so the user can group buttons visually
+- **Restart button** — `app.relaunch(); app.exit(0)` for changes that only take effect at process start
+- **Close button** — hard-quit via `app.exit(0)`
+- **Airplane mode button** — disables every `Status -eq 'Up'` network adapter via elevated PowerShell (`Start-Process -Verb RunAs`, one UAC per toggle). Saves the names to `userData/airplane-state.txt` so re-enable still works after an app restart. State persists in `airplaneMode`
+
+### WEB tab (in-panel browser)
+- Fourth combo-panel tab housing an Electron `<webview>` with multi-tab support, persistent + private partitions, adblock, CSP stripping, dark-mode override, and themed tint
+- **Tabs** — `＋` opens a normal tab on `persist:dashboard-browser`; `⊘` opens a private tab on a fresh in-memory `web-private-{id}` partition. Normal tabs persist via `webTabs`; private tabs never touch config and clear on close
+- **Adblock** — `session.webRequest.onBeforeRequest` cancels matched hosts (Google Ads, DoubleClick, Taboola, Outbrain, etc.); blocked count chip in the toolbar
+- **Dark mode** — Chromium's CDP `Emulation.setAutoDarkModeOverride` engaged via `webContents.debugger.attach('1.3')` after each tab's dom-ready (handled in main, exposed as `forceWebDark(contentsId)`). CSP headers stripped per partition so the dark-mode + tint stylesheets actually apply on locked-down sites like Google
+- **Theme tint** — `insertCSS` overlay on each webview: `body::after { mix-blend-mode: screen; opacity: 0.16 }` set to `--accent`. Re-applied on every theme change via a single `MutationObserver` on `data-theme`
+- **Toolbar** — back/forward/reload/home + URL/search input. Bare hostnames upgrade to `https://`, anything else routes to a Google query
+
+### Combo panel fold buttons
+- Three controls grouped at the right of the combo header: **▾ collapse** (existing chevron), **◐ half-down**, **● full-down**
+- ◐ pins the panel to its column and stretches it to 50 vh; ● stretches to 12 px from the bottom of the viewport. Re-pins on window resize. Mutually exclusive
+- ● mode also draws an 80 %-opacity black backdrop over the rest of the dashboard (`body::before`, z-index 49 < panel z-index 50) so the expanded panel reads as the focal element
+
+### Alert theme (auto-engage)
+- Brand-new `[data-theme="alert"]` palette — pure red (`--accent: #ff1010`), near-black background (`--bg: #050000`), dim panel-bg `rgba(12,0,0,0.72)`. No blue tint anywhere
+- **Auto-engages** on any of: `navigator.onLine === false`, sustained CPU load ≥ 90 %, peak GPU load ≥ 90 % across all GPUs, or exceptions in `refreshSystem` / `refreshTemps` / `refreshNet`. Reasons tracked in a `Set`; theme switches when set non-empty / empty
+- The user's chosen theme is preserved as `_userTheme` and restored when all alert reasons clear; `'alert'` itself is never persisted to config
+- **70 %-brighter strobe** via swapped keyframes (`panel-pulse-alert` / `element-pulse-alert`) — same 8 s/7 s cadence as every other theme, peak brightness lifted from 1.10/1.35 to 1.87/2.30
+
+### Zen mode redesign
+- Old stack-then-explode animation removed; replaced by a **fade-through-black** transition driven entirely by CSS
+- A fixed full-viewport `body::after` peaks to `opacity: 1` halfway through the entering window (`@keyframes zen-black-peak`) and dissipates over the second half. Cards fade out before the peak, the zen overlay fades in (550 ms delay) as black dissipates → "fade *to* black, then fade *out* of black into the zen UI"
+- Steady `is-zen` state has the backdrop at 0 opacity so the zen content sits on the dashboard's normal dark background
+
+### LibreHardwareMonitor patch + bundle
+- Bundled patched LHM (`tools/LibreHardwareMonitor/`) auto-launches at app start (UAC for MSR access). Patch: `MainForm.cs` now explicitly fires `Server.StartHttpListener()` when `runWebServerMenuItem` is true at startup (the upstream `UserOption` ctor reads the persisted setting but doesn't fire `Changed`, so the listener never started)
+- Bonus: `PersistentSettings` `bool` compare was case-sensitive (`str == "true"`) — config now writes lowercase `value="true"` so the listener flag actually round-trips
+
 ## [0.4.0] — 2026-05-09
 
 ### Zen idle mode
