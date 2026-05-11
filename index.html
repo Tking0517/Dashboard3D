@@ -701,6 +701,7 @@
                 <div class="explore-tabs">
                   <button type="button" class="explore-tab is-active" data-explore-tab-btn="gallery">GALLERY</button>
                   <button type="button" class="explore-tab" data-explore-tab-btn="docs">DOCS</button>
+                  <button type="button" class="explore-tab" data-explore-tab-btn="downloads">DOWNLOADS</button>
                 </div>
                 <div class="explore-section" data-explore="gallery">
                   <header class="explore-section-head">
@@ -725,6 +726,18 @@
                     <button type="button" class="explore-action" data-explore-refresh="docs"    title="Refresh">↻</button>
                   </header>
                   <ul class="explore-list" id="explore-docs-list"></ul>
+                </div>
+                <div class="explore-section" data-explore="downloads">
+                  <header class="explore-section-head">
+                    <span class="explore-section-title">DOWNLOADS</span>
+                    <button type="button" class="explore-action" data-explore-up="downloads"      title="Up">↑</button>
+                    <span class="explore-section-path" id="explore-downloads-path">—</span>
+                    <button type="button" class="explore-action" data-explore-mkdir="downloads"   title="New folder">+</button>
+                    <button type="button" class="explore-action" data-explore-delete="downloads"  title="Delete selected (→ Recycle Bin)">🗑</button>
+                    <button type="button" class="explore-action" data-explore-open="downloads"    title="Open in Explorer">⌂</button>
+                    <button type="button" class="explore-action" data-explore-refresh="downloads" title="Refresh">↻</button>
+                  </header>
+                  <ul class="explore-list" id="explore-downloads-list"></ul>
                 </div>
               </div>
 
@@ -775,6 +788,11 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12 L12 4 L20 12"/><path d="M6 11 V20 H18 V11"/></svg>
                   </button>
                   <input id="browser-url" class="browser-url" type="text" placeholder="Search or type a URL…" spellcheck="false" autocomplete="off" />
+                  <button type="button" class="browser-navbtn" id="browser-reader-btn" title="Reader mode (block images)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <path d="M4 5 H20 M4 10 H17 M4 15 H20 M4 20 H14"/>
+                    </svg>
+                  </button>
                   <button type="button" class="browser-navbtn" id="browser-bookmark-btn" title="Bookmark this page">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 4 H18 V21 L12 16 L6 21 Z"/></svg>
                   </button>
@@ -808,6 +826,10 @@
                       <div class="browser-splash-stat">
                         <div class="browser-splash-stat-num" id="browser-stat-popups">0</div>
                         <div class="browser-splash-stat-label">POPUPS BLOCKED</div>
+                      </div>
+                      <div class="browser-splash-stat">
+                        <div class="browser-splash-stat-num" id="browser-stat-images">0</div>
+                        <div class="browser-splash-stat-label">IMAGES BLOCKED</div>
                       </div>
                     </div>
                   </div>

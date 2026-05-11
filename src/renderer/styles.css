@@ -3021,8 +3021,12 @@ body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
-.combo-pane-explore[data-explore-tab="gallery"] .explore-section[data-explore="docs"]    { display: none; }
-.combo-pane-explore[data-explore-tab="docs"]    .explore-section[data-explore="gallery"] { display: none; }
+.combo-pane-explore[data-explore-tab="gallery"]   .explore-section[data-explore="docs"]      { display: none; }
+.combo-pane-explore[data-explore-tab="gallery"]   .explore-section[data-explore="downloads"] { display: none; }
+.combo-pane-explore[data-explore-tab="docs"]      .explore-section[data-explore="gallery"]   { display: none; }
+.combo-pane-explore[data-explore-tab="docs"]      .explore-section[data-explore="downloads"] { display: none; }
+.combo-pane-explore[data-explore-tab="downloads"] .explore-section[data-explore="gallery"]   { display: none; }
+.combo-pane-explore[data-explore-tab="downloads"] .explore-section[data-explore="docs"]      { display: none; }
 .explore-section {
   display: flex;
   flex-direction: column;
@@ -3675,6 +3679,7 @@ body.is-eco-mode .audio-grid {
 .browser-navbtn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .browser-navbtn:disabled { opacity: 0.3; cursor: not-allowed; }
 .browser-navbtn.is-bookmarked { color: var(--accent); border-color: var(--accent); }
+.browser-navbtn.is-active { color: var(--accent); border-color: var(--accent); }
 .browser-url {
   flex: 1 1 auto;
   font-family: var(--font-tech);

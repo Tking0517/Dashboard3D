@@ -6,6 +6,14 @@ const http = require('http');
 const { execFile, spawn, exec } = require('child_process');
 const si = require('systeminformation');
 
+// Platform-specific services. Each module re-exports either ./win or
+// ./linux based on process.platform. Phase 1 starting with `power`;
+// audio + sensors will follow under the same pattern.
+const powerService   = require('./services/power');
+const systemService  = require('./services/system');
+const sensorsService = require('./services/sensors');
+const audioService   = require('./services/audio');
+
 const HTTP_PORT = 7373;
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 
@@ -15,55 +23,18 @@ let _mainWin = null;
 
 // ─── SHARED UTILITIES ──────────────────────────────────────────────
 
-// Run a one-off PowerShell command, parse its stdout as JSON. Resolves
-// to null on spawn error, non-zero exit, or invalid JSON. Used by disk,
-// thermal, and storage probes that all share the same shape.
-function runPowerShell(script, { timeout = 5000 } = {}) {
-  return new Promise((resolve) => {
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      { timeout, windowsHide: true },
-      (err, stdout) => {
-        if (err) { resolve(null); return; }
-        try { resolve(JSON.parse(stdout || 'null')); }
-        catch { resolve(null); }
-      },
-    );
-  });
-}
+// Shared PowerShell runner moved to services/_util/powershell.js so every
+// Windows-side service backend (audio, sensors, system, …) uses the same
+// spawn shape. Re-imported here because the rest of main.js still has
+// inline PowerShell probes that haven't been migrated to services yet.
+const { runPowerShell } = require('./services/_util/powershell');
 
 // Primary display's work area = screen bounds minus taskbar reserve.
 function getWorkArea() {
   return screen.getPrimaryDisplay().workArea;
 }
 
-// Locate bundled LibreHardwareMonitor.exe. Production: tools\ next to
-// Dashboard3D.exe. Dev: tools\ inside the win32-x64 bundle in the repo.
-function findBundledLhm() {
-  const candidates = [
-    path.join(path.dirname(app.getPath('exe')), 'tools', 'LibreHardwareMonitor', 'LibreHardwareMonitor.exe'),
-    path.join(__dirname, '..', '..', 'Dashboard3D-win32-x64', 'tools', 'LibreHardwareMonitor', 'LibreHardwareMonitor.exe'),
-  ];
-  return candidates.find((p) => fs.existsSync(p)) || null;
-}
-
-// Auto-start the patched LHM once on dashboard launch. Skips if already
-// running (tasklist check) since LHM happily allows duplicate instances.
-// Start-Process -Verb RunAs triggers the one UAC prompt LHM needs to
-// read CPU MSRs.
-function autoLaunchSensors() {
-  const exe = findBundledLhm();
-  if (!exe) return;
-  execFile('tasklist', ['/FI', 'IMAGENAME eq LibreHardwareMonitor.exe', '/NH'],
-    { windowsHide: true }, (err, stdout) => {
-      if (!err && stdout && /LibreHardwareMonitor\.exe/i.test(stdout)) return;
-      execFile('powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command',
-          `Start-Process -FilePath '${exe.replace(/'/g, "''")}' -Verb RunAs -WindowStyle Minimized`],
-        { windowsHide: true }, () => {});
-    });
-}
+// LHM launching + native fallback moved to services/sensors.
 
 // ─── MAIN HUD WINDOW ───────────────────────────────────────────────
 
@@ -139,9 +110,11 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => win.webContents.setZoomFactor(1.2));
 
   // Native WASAPI loopback for the default output device. Pushes per-frame
-  // RMS levels to the renderer over IPC ('audio-out-level').
-  win.webContents.once('did-finish-load', () => startWasapiLoopback(win));
-  win.on('closed', stopWasapiLoopback);
+  // RMS levels to the renderer over IPC ('audio-out-level'). readConfig is
+  // passed in so the service can honor the persisted audioDeviceId without
+  // taking a direct dependency on our config module.
+  win.webContents.once('did-finish-load', () => audioService.startLoopback(win, null, readConfig));
+  win.on('closed', () => audioService.stopLoopback());
 }
 
 // ─── YOUTUBE POPOUT ────────────────────────────────────────────────
@@ -309,255 +282,14 @@ function applyYoutubeZenMode(on) {
   return true;
 }
 
-// ─── AUDIO LOOPBACK WORKER (audify) ────────────────────────────────
-// Loaded in a utilityProcess child so a native crash in the binding
-// can't take down the main process. Set DASH3D_DISABLE_AUDIFY=1 to
-// skip starting the worker entirely.
-let _audioProc = null;
-let _audioWin = null;
-function startWasapiLoopback(win, deviceId = null) {
-  if (process.platform !== 'win32') return;
-  if (process.env.DASH3D_DISABLE_AUDIFY) return;
-  if (_audioProc) return;
-  _audioWin = win;
+// Audio (WASAPI loopback worker + system mute + default endpoint
+// switching) lives in services/audio. Windows backend wraps audify +
+// inline C# COM via PowerShell; Linux backend stubs out for Phase 3
+// (PipeWire). Below this comment used to be: _audioProc/_audioWin
+// globals, startWasapiLoopback / stopWasapiLoopback /
+// restartWasapiLoopback, _SYSTEM_AUDIO_CS, setSystemMute,
+// setDefaultEndpoint, getSystemMuteStates. ~245 lines moved.
 
-  const workerPath = path.join(__dirname, 'audify-worker.js');
-  if (!fs.existsSync(workerPath)) {
-    console.warn('audify worker missing at', workerPath);
-    return;
-  }
-
-  // Persisted config takes precedence over the env-var override only if the
-  // env var isn't set, so DASH3D_AUDIO_DEVICE_ID is still an escape hatch.
-  let chosenId = deviceId;
-  if (chosenId == null && !process.env.DASH3D_AUDIO_DEVICE_ID) {
-    try { chosenId = readConfig()?.audioDeviceId ?? null; } catch {}
-  }
-
-  const env = { ...process.env };
-  if (chosenId != null) env.DASH3D_AUDIO_DEVICE_ID = String(chosenId);
-
-  try {
-    _audioProc = utilityProcess.fork(workerPath, [], {
-      stdio: 'pipe',
-      serviceName: 'dash3d-audify',
-      env,
-    });
-  } catch (err) {
-    console.error('utilityProcess.fork failed:', err.message);
-    _audioProc = null;
-    return;
-  }
-
-  _audioProc.stdout?.on('data', (b) => process.stdout.write(`[audify] ${b}`));
-  _audioProc.stderr?.on('data', (b) => process.stderr.write(`[audify] ${b}`));
-
-  _audioProc.on('message', (data) => {
-    if (data?.status === 'started') {
-      console.log(`WASAPI loopback started on "${data.deviceName}" (${data.sampleRate}Hz, ${data.channels}ch)`);
-    }
-    if (_audioWin && !_audioWin.isDestroyed()) {
-      _audioWin.webContents.send('audio-out-level', data);
-    }
-  });
-
-  _audioProc.on('exit', (code) => {
-    console.log('audify worker exited code', code);
-    if (_audioWin && !_audioWin.isDestroyed()) {
-      _audioWin.webContents.send('audio-out-level', { error: `worker exit ${code}` });
-    }
-    _audioProc = null;
-  });
-}
-
-function stopWasapiLoopback() {
-  if (!_audioProc) return;
-  try { _audioProc.postMessage('stop'); } catch {}
-  const p = _audioProc;
-  setTimeout(() => { try { p.kill(); } catch {} }, 200);
-  _audioProc = null;
-}
-
-function restartWasapiLoopback(win, deviceId) {
-  stopWasapiLoopback();
-  // Small gap so WASAPI fully releases the prior endpoint.
-  setTimeout(() => startWasapiLoopback(win, deviceId), 350);
-}
-
-// System-level mute via Windows Core Audio (IAudioEndpointVolume). Lets the
-// dashboard mute buttons silence the OS device, not just our analyser.
-// dataFlow: 0 = render (speakers), 1 = capture (mic). Compiles the C# COM
-// wrapper once per PowerShell session via Add-Type — `if ('DashAudio.Endpoint'
-// -as [type])` skips the recompile after the first call in a session.
-// Inline C# COM wrapper for IAudioEndpointVolume. Compiled once per
-// PowerShell session via `if (-not ... -as [type])`. Used by both
-// setSystemMute and getSystemMuteStates so they share the same code.
-const _SYSTEM_AUDIO_CS = `
-$ErrorActionPreference = 'Stop'
-if (-not ('DashAudio.Endpoint' -as [type])) {
-  Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-namespace DashAudio {
-  [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-  internal class MMDeviceEnumeratorComObject {}
-  [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  internal interface IMMDeviceEnumerator {
-    [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr ppDevices);
-    [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice ppEndpoint);
-  }
-  [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  internal interface IMMDevice {
-    [PreserveSig] int Activate(ref Guid iid, int ctx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o);
-  }
-  [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  internal interface IAEV {
-    [PreserveSig] int RegisterControlChangeNotify(IntPtr p);
-    [PreserveSig] int UnregisterControlChangeNotify(IntPtr p);
-    [PreserveSig] int GetChannelCount(out uint c);
-    [PreserveSig] int SetMasterVolumeLevel(float l, ref Guid g);
-    [PreserveSig] int SetMasterVolumeLevelScalar(float l, ref Guid g);
-    [PreserveSig] int GetMasterVolumeLevel(out float l);
-    [PreserveSig] int GetMasterVolumeLevelScalar(out float l);
-    [PreserveSig] int SetChannelVolumeLevel(uint c, float l, ref Guid g);
-    [PreserveSig] int SetChannelVolumeLevelScalar(uint c, float l, ref Guid g);
-    [PreserveSig] int GetChannelVolumeLevel(uint c, out float l);
-    [PreserveSig] int GetChannelVolumeLevelScalar(uint c, out float l);
-    [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid g);
-    [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
-  }
-  public static class Endpoint {
-    static IAEV Get(int dataFlow) {
-      var enu = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject() as object);
-      IMMDevice dev; enu.GetDefaultAudioEndpoint(dataFlow, 1, out dev);
-      Guid iid = typeof(IAEV).GUID; object o;
-      dev.Activate(ref iid, 0x17, IntPtr.Zero, out o);
-      return (IAEV)o;
-    }
-    public static void SetMute(int dataFlow, bool mute) {
-      Guid g = Guid.Empty; Get(dataFlow).SetMute(mute, ref g);
-    }
-    public static bool GetMute(int dataFlow) {
-      bool m; Get(dataFlow).GetMute(out m); return m;
-    }
-  }
-}
-"@
-}
-`.trim();
-
-function setSystemMute(dataFlow, mute) {
-  const ps = `
-${_SYSTEM_AUDIO_CS}
-try {
-  [DashAudio.Endpoint]::SetMute(${dataFlow}, $${mute ? 'true' : 'false'})
-  $m = [DashAudio.Endpoint]::GetMute(${dataFlow})
-  ConvertTo-Json -Compress @{ ok = $true; muted = $m }
-} catch {
-  ConvertTo-Json -Compress @{ ok = $false; error = $_.Exception.Message }
-}
-  `.trim();
-  return runPowerShell(ps, { timeout: 8000 });
-}
-
-// Read both mute states in a single PowerShell spawn so the renderer can
-// poll cheaply and notice if the user toggled mute via keyboard / volume
-// mixer / etc — keeps our button state in sync with reality.
-// Switch the OS default audio endpoint via IPolicyConfig (the same COM
-// path Windows' own Sound control panel uses). Looks up the active endpoint
-// by friendly-name match against the registry's MMDevices store — avoids
-// the PROPVARIANT marshaling that direct IMMDevice property reads need.
-// dataFlow: 0 = render (speakers), 1 = capture (mic). Sets all three roles
-// (eConsole/eMultimedia/eCommunications) so apps that pin to Communications
-// also follow.
-function setDefaultEndpoint(dataFlow, namePattern) {
-  const psPattern = `'${String(namePattern || '').replace(/'/g, "''")}'`;
-  const subkey   = dataFlow === 1 ? "'Capture'" : "'Render'";
-  const idPrefix = dataFlow === 1 ? "'{0.0.1.00000000}.'" : "'{0.0.0.00000000}.'";
-  const ps = `
-$ErrorActionPreference = 'Stop'
-if (-not ('DashAudio.PolicyConfig' -as [type])) {
-  Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-namespace DashAudio {
-  [Guid("568b9108-44bf-40b4-9006-86afe5b5a620"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  internal interface IPolicyConfigVista {
-    [PreserveSig] int _0(IntPtr a, IntPtr b);
-    [PreserveSig] int _1(IntPtr a, int b, IntPtr c);
-    [PreserveSig] int _2(IntPtr a);
-    [PreserveSig] int _3(IntPtr a, IntPtr b, IntPtr c);
-    [PreserveSig] int _4(IntPtr a, int b, IntPtr c, IntPtr d);
-    [PreserveSig] int _5(IntPtr a, IntPtr b);
-    [PreserveSig] int _6(IntPtr a, IntPtr b);
-    [PreserveSig] int _7(IntPtr a, IntPtr b);
-    [PreserveSig] int _8(IntPtr a, IntPtr b, IntPtr c);
-    [PreserveSig] int _9(IntPtr a, IntPtr b, IntPtr c);
-    [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string deviceId, uint role);
-    [PreserveSig] int _11(IntPtr a, bool b);
-  }
-  [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
-  internal class PolicyConfigClient {}
-  public static class PolicyConfig {
-    public static int SetDefault(string deviceId) {
-      var pc = (IPolicyConfigVista)(new PolicyConfigClient() as object);
-      int hr0 = pc.SetDefaultEndpoint(deviceId, 0);
-      int hr1 = pc.SetDefaultEndpoint(deviceId, 1);
-      int hr2 = pc.SetDefaultEndpoint(deviceId, 2);
-      return hr0 | hr1 | hr2;
-    }
-  }
-}
-"@
-}
-$base = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\${subkey.replace(/'/g, '')}"
-$prefix = ${idPrefix}
-$pattern = ${psPattern}
-$endpoints = @()
-try {
-  $endpoints = Get-ChildItem $base -ErrorAction Stop | ForEach-Object {
-    $state = (Get-ItemProperty -Path $_.PSPath -Name DeviceState -ErrorAction SilentlyContinue).DeviceState
-    if ($state -eq 1) {
-      $props = Get-ItemProperty -Path "$($_.PSPath)\\Properties" -ErrorAction SilentlyContinue
-      if ($props) {
-        $name = $props.'{a45c254e-df1c-4efd-8020-67d146a850e0},14'
-        [PSCustomObject]@{ Id = "$prefix{$($_.PSChildName)}"; Name = $name }
-      }
-    }
-  } | Where-Object { $_ -ne $null }
-} catch {
-  ConvertTo-Json -Compress @{ ok = $false; error = "registry: $($_.Exception.Message)" }
-  exit 0
-}
-$dev = $endpoints | Where-Object { $_.Name -and ($_.Name -like "*$pattern*" -or "*$pattern*" -like "*$($_.Name)*") } | Select-Object -First 1
-if (-not $dev) {
-  ConvertTo-Json -Compress @{ ok = $false; error = "no match"; pattern = $pattern; available = @($endpoints | ForEach-Object { $_.Name }) }
-  exit 0
-}
-try {
-  $hr = [DashAudio.PolicyConfig]::SetDefault($dev.Id)
-  if ($hr -ne 0) { throw "SetDefaultEndpoint hr=0x$('{0:x}' -f $hr)" }
-  ConvertTo-Json -Compress @{ ok = $true; name = $dev.Name; id = $dev.Id }
-} catch {
-  ConvertTo-Json -Compress @{ ok = $false; error = $_.Exception.Message }
-}
-  `.trim();
-  return runPowerShell(ps, { timeout: 8000 });
-}
-
-function getSystemMuteStates() {
-  const ps = `
-${_SYSTEM_AUDIO_CS}
-try {
-  $o = [DashAudio.Endpoint]::GetMute(0)
-  $i = [DashAudio.Endpoint]::GetMute(1)
-  ConvertTo-Json -Compress @{ ok = $true; out = $o; in = $i }
-} catch {
-  ConvertTo-Json -Compress @{ ok = $false; error = $_.Exception.Message }
-}
-  `.trim();
-  return runPowerShell(ps, { timeout: 8000 });
-}
 
 // ─── WINDOWS Z-ORDER (HWND_BOTTOM) ─────────────────────────────────
 // Persistent PowerShell process so every SetWindowPos call is ~10 ms
@@ -603,7 +335,7 @@ function sendToBottom(win) {
 }
 
 app.on('before-quit', () => {
-  stopWasapiLoopback();
+  audioService.stopLoopback();
   if (_psBg && !_psBg.killed) {
     try { _psBg.stdin.end(); } catch {}
     try { _psBg.kill(); } catch {}
@@ -622,22 +354,25 @@ function userFoldersBase() {
     ? path.dirname(app.getPath('exe'))
     : path.resolve(__dirname, '..', '..');
 }
-function galleryFolderPath() { return path.join(userFoldersBase(), 'gallery'); }
-function docsFolderPath()    { return path.join(userFoldersBase(), 'docs');    }
+function galleryFolderPath()   { return path.join(userFoldersBase(), 'gallery');   }
+function docsFolderPath()      { return path.join(userFoldersBase(), 'docs');      }
+function downloadsFolderPath() { return path.join(userFoldersBase(), 'downloads'); }
 function ensureUserFolders() {
-  for (const p of [galleryFolderPath(), docsFolderPath()]) {
+  for (const p of [galleryFolderPath(), docsFolderPath(), downloadsFolderPath()]) {
     try { fs.mkdirSync(p, { recursive: true }); }
     catch (err) { console.warn(`could not create ${p}:`, err.message); }
   }
 }
-// Return the managed root (gallery/ or docs/) that contains `abs`, or
-// null if `abs` lives outside both. Used by the explore IPC handlers
-// to gate any path the renderer hands us.
+// Return the managed root (gallery/ docs/ downloads/) that contains `abs`,
+// or null if `abs` lives outside all of them. Used by the explore IPC
+// handlers to gate any path the renderer hands us.
 function _managedRootFor(abs) {
   const g = galleryFolderPath();
   const d = docsFolderPath();
-  if (abs === g || abs.startsWith(g + path.sep)) return g;
-  if (abs === d || abs.startsWith(d + path.sep)) return d;
+  const dl = downloadsFolderPath();
+  if (abs === g  || abs.startsWith(g  + path.sep)) return g;
+  if (abs === d  || abs.startsWith(d  + path.sep)) return d;
+  if (abs === dl || abs.startsWith(dl + path.sep)) return dl;
   return null;
 }
 function _pathInsideManagedRoot(abs) { return _managedRootFor(abs) !== null; }
@@ -658,6 +393,14 @@ protocol.registerSchemesAsPrivileged([
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
+// Block all media autoplay across every renderer. Hero videos that loop
+// behind a page's first viewport are a major contributor to "open the
+// browser → fans rev" — autoplay-policy stops them until the user clicks.
+// The user can still tap play on any video they want to watch.
+app.commandLine.appendSwitch('autoplay-policy', 'document-user-activation-required');
+// Smooth scrolling is GPU-accelerated and runs an animation curve on every
+// scroll. We don't want any of it in this pane — instant scroll is fine.
+app.commandLine.appendSwitch('disable-smooth-scrolling');
 
 // Force the renderer to a 1× device scale factor regardless of the OS
 // display scaling. On a HiDPI / 200%-scaled monitor this drops the GPU
@@ -725,6 +468,32 @@ app.whenReady().then(() => {
     'bing.com/bat', 'clarity.ms',
     'snowplowanalytics.com', 'newrelic.com/marketing',
     'sentry-cdn.com/marketing', 'cloudflareinsights.com',
+    // Web fonts — pure decoration, fall back to system fonts (which
+    // matches the dashboard's mono aesthetic anyway). Saves hundreds of
+    // KB per page + the CPU cost of font shaping.
+    'fonts.googleapis.com', 'fonts.gstatic.com',
+    'use.typekit.net', 'use.fontawesome.com',
+    'fonts.shopifycdn.com', 'fast.fonts.net',
+    // Cookie consent banners — heavy scripts, modal overlays, focus traps.
+    // We use a non-persistent session anyway so consent is moot.
+    'cookielaw.org', 'onetrust.com', 'cookieyes.com', 'didomi.io',
+    'quantcast.mgr.consensu.org', 'cookiebot.com',
+    // Live chat widgets — open a real-time WebSocket and keep it alive.
+    'intercom.io', 'intercomcdn.com', 'widget.intercom.io',
+    'drift.com', 'js.driftt.com',
+    'zopim.com', 'tawk.to', 'livechatinc.com',
+    'crisp.chat', 'helpscout.net/beacon',
+    // A/B testing + experiment flicker-control scripts run mutation
+    // observers across the whole DOM on every page.
+    'optimizely.com', 'optimizelyedge.com',
+    'vwo.com', 'visualwebsiteoptimizer.com',
+    // Push-notification SDKs — register service workers, drain battery.
+    'onesignal.com', 'pushwoosh.com', 'pushcrew.com',
+    // Marketing automation + customer-data SDKs (tracking-grade payload
+    // bigger than the actual page on many sites).
+    'hs-scripts.com', 'hs-analytics.net', 'hsforms.net',
+    'mktoresp.com', 'mc.yandex.ru',
+    'segmentapi.', 'mparticle.com',
   ];
   const browserSession = session.fromPartition(_BROWSER_PARTITION);
   // Light UA touch only: strip the Electron/Dashboard3D substrings from
@@ -747,6 +516,7 @@ app.whenReady().then(() => {
   // is throttled to 250 ms so a heavy ad-laden page doesn't flood IPC
   // during its initial load.
   let _adsBlocked = 0;
+  let _imagesBlocked = 0;
   let _statsDirty = false;
   let _statsTimer = null;
   function _broadcastBrowserStats() {
@@ -756,11 +526,25 @@ app.whenReady().then(() => {
       if (!_statsDirty) return;
       _statsDirty = false;
       for (const w of BrowserWindow.getAllWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('browser-stats', { adsBlocked: _adsBlocked });
+        if (!w.isDestroyed()) w.webContents.send('browser-stats', {
+          adsBlocked: _adsBlocked,
+          imagesBlocked: _imagesBlocked,
+        });
       }
     }, 250);
   }
+  // Reader mode: when on, the webRequest handler below cancels every
+  // image request. Toggled from the renderer's reader button; persisted
+  // by the renderer to config, set here on init.
+  let _readerMode = false;
   browserSession.webRequest.onBeforeRequest((details, callback) => {
+    if (_readerMode && details.resourceType === 'image') {
+      _imagesBlocked++;
+      _statsDirty = true;
+      _broadcastBrowserStats();
+      callback({ cancel: true });
+      return;
+    }
     const u = (details.url || '').toLowerCase();
     for (const term of _BROWSER_BLOCKLIST) {
       if (u.includes(term)) {
@@ -773,8 +557,33 @@ app.whenReady().then(() => {
     }
     callback({});
   });
-  ipcMain.handle('browser-get-stats', () => ({ adsBlocked: _adsBlocked }));
-  ipcMain.handle('browser-reset-stats', () => { _adsBlocked = 0; _statsDirty = true; _broadcastBrowserStats(); return { adsBlocked: 0 }; });
+  ipcMain.handle('browser-get-stats', () => ({ adsBlocked: _adsBlocked, imagesBlocked: _imagesBlocked }));
+  ipcMain.handle('browser-reset-stats', () => {
+    _adsBlocked = 0;
+    _imagesBlocked = 0;
+    _statsDirty = true;
+    _broadcastBrowserStats();
+    return { adsBlocked: 0, imagesBlocked: 0 };
+  });
+  ipcMain.handle('browser-set-reader-mode', (_e, on) => { _readerMode = !!on; return { ok: true, readerMode: _readerMode }; });
+
+  // Route every download initiated from a BrowserView into the dashboard's
+  // own downloads/ folder so the Explore pane can list it like gallery/docs
+  // files. If a file with the target name already exists, append (1), (2),
+  // … until we find a free slot — same convention Chrome uses.
+  browserSession.on('will-download', (_event, item) => {
+    try { fs.mkdirSync(downloadsFolderPath(), { recursive: true }); } catch {}
+    const original = item.getFilename() || 'download';
+    const ext  = path.extname(original);
+    const base = path.basename(original, ext);
+    let candidate = path.join(downloadsFolderPath(), original);
+    let n = 1;
+    while (fs.existsSync(candidate)) {
+      candidate = path.join(downloadsFolderPath(), `${base} (${n})${ext}`);
+      n++;
+    }
+    item.setSavePath(candidate);
+  });
 
   // ── BrowserView tab manager ──────────────────────────────────
   // We previously used the <webview> tag for embedded pages, but its
@@ -836,8 +645,69 @@ app.whenReady().then(() => {
     });
   });
 
+  // Page styling pass — three jobs in one CSS injection:
+  //
+  // 1. Defensive UA stylesheet enforcement. Some sites (Dribbble,
+  //    Framer-built pages) ship CSS that overrides the browser default
+  //    of `display: none` on <style>/<script>/<template>/<noscript>/
+  //    <head>, or include malformed markup that leaks <head> children
+  //    into <body>. Either way the result is raw CSS/JS source
+  //    rendering as visible text above the page.
+  //
+  // 2. Strip motion. Animations, transitions, and smooth scrolling are
+  //    pure overhead on a lightweight pane that's only here to read
+  //    text and render images. Setting all three to 0s !important
+  //    cancels them at the cascade root.
+  //
+  // 3. Strip background imagery + force a dark surface. The dashboard
+  //    is a dark, tech-themed HUD; bright photo hero backgrounds clash.
+  //    We knock out background-image globally (gradients, patterns,
+  //    hero photos), advertise color-scheme: dark so sites with a dark
+  //    theme adopt it, and fall back to a flat dark body for sites
+  //    that don't. Inline <img>/<video>/<canvas> content is untouched
+  //    so the page is still usable.
+  // We deliberately do NOT set background-image: none. YouTube + most
+  // modern grids use background-image with a CDN URL to render video
+  // thumbnails — stripping it killed the thumbnails. Users who want a
+  // fully image-free page hit the reader-mode button, which blocks all
+  // image requests at the webRequest layer (covers both <img> and
+  // background-image url()). We also don't flatten background-color
+  // globally any more — that broke modal layering on Discord
+  // (verification modal was transparent, so the previous step's form
+  // bled through underneath). color-scheme: dark gets sites with a
+  // prefers-color-scheme branch to take their dark theme; the rest fall
+  // back to our html/body override below.
+  const _PAGE_STYLE_CSS = `
+    head, head *,
+    style, script, template, noscript, link, meta, title {
+      display: none !important;
+    }
+    *, *::before, *::after {
+      animation-duration: 0s !important;
+      animation-delay: 0s !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      scroll-behavior: auto !important;
+    }
+    :root, html { color-scheme: dark !important; }
+    html, body {
+      background-color: #0a0a0a !important;
+      color: #c8b890 !important;
+    }
+    a, a:visited { color: #d4a849 !important; }
+  `;
   function _wireBvEvents(id, view) {
     const wc = view.webContents;
+    // Halve the compositor's frame budget for embedded pages. With every
+    // animation/transition stripped by CSS injection, 60 fps would just be
+    // re-compositing the same pixels — 30 fps stays smooth for scroll and
+    // saves real GPU time. The YouTube popout's webContents uses its own
+    // setFrameRate(60), unaffected.
+    try { wc.setFrameRate(30); } catch {}
+    wc.on('dom-ready', () => {
+      try { wc.insertCSS(_PAGE_STYLE_CSS); } catch {}
+    });
     wc.on('did-start-loading', () => {
       const t = _bvTabs.get(id); if (!t) return;
       t.loading = true;
@@ -895,15 +765,18 @@ app.whenReady().then(() => {
   function _showBv(id) {
     if (!_mainWin || _mainWin.isDestroyed()) return;
     // Remove every other BrowserView from the host window, attach only
-    // the requested one.
+    // the requested one. Mute the inactive ones so background audio
+    // doesn't keep playing (and decoding) on detached tabs.
     for (const [tid, t] of _bvTabs.entries()) {
       if (tid !== id) {
         try { _mainWin.removeBrowserView(t.view); } catch {}
+        try { t.view.webContents.setAudioMuted(true); } catch {}
       }
     }
     const t = _bvTabs.get(id);
     if (!t) return;
     try { _mainWin.setBrowserView(t.view); } catch {}
+    try { t.view.webContents.setAudioMuted(false); } catch {}
     _applyBvBounds(t.view);
     _bvActiveId = id;
   }
@@ -911,6 +784,7 @@ app.whenReady().then(() => {
     if (!_mainWin || _mainWin.isDestroyed()) return;
     for (const t of _bvTabs.values()) {
       try { _mainWin.removeBrowserView(t.view); } catch {}
+      try { t.view.webContents.setAudioMuted(true); } catch {}
     }
     _bvActiveId = null;
   }
@@ -929,6 +803,14 @@ app.whenReady().then(() => {
         // depends on something the sandbox restricts.
         javascript: true,
         webSecurity: true,
+        // Lightweight pane — turn off the things we don't need.
+        // spellcheck spawns a per-tab background worker; webSQL is dead
+        // tech that maintains a SQLite handle; backgroundThrottling
+        // (default true, explicit here) puts the tab to sleep when it's
+        // detached from the window or our window is minimized.
+        spellcheck: false,
+        enableWebSQL: false,
+        backgroundThrottling: true,
       },
     });
     view.setBackgroundColor('#0a0a0a');
@@ -971,6 +853,14 @@ app.whenReady().then(() => {
   ipcMain.handle('browser-tab-back',    (_e, id) => { try { _bvTabs.get(id)?.view.webContents.goBack(); }    catch {} return { ok: true }; });
   ipcMain.handle('browser-tab-forward', (_e, id) => { try { _bvTabs.get(id)?.view.webContents.goForward(); } catch {} return { ok: true }; });
   ipcMain.handle('browser-tab-reload',  (_e, id) => { try { _bvTabs.get(id)?.view.webContents.reload(); }    catch {} return { ok: true }; });
+  ipcMain.handle('browser-tab-reload-fresh', (_e, id) => {
+    // reloadIgnoringCache makes sure the webRequest filter sees every
+    // resource fetch — used after toggling reader mode so the image
+    // block actually takes effect instead of pulling the same images
+    // back from the memory cache.
+    try { _bvTabs.get(id)?.view.webContents.reloadIgnoringCache(); } catch {}
+    return { ok: true };
+  });
   ipcMain.handle('browser-tab-activate', (_e, id) => {
     if (id == null) { _hideAllBv(); return { ok: true }; }
     _showBv(id);
@@ -1142,8 +1032,9 @@ app.whenReady().then(() => {
     try {
       const u = new URL(request.url);
       const which = (u.hostname || '').toLowerCase();
-      root = which === 'gallery' ? galleryFolderPath()
-           : which === 'docs'    ? docsFolderPath()
+      root = which === 'gallery'   ? galleryFolderPath()
+           : which === 'docs'      ? docsFolderPath()
+           : which === 'downloads' ? downloadsFolderPath()
            : null;
       if (!root) {
         console.warn('[dash3d-file] bad host:', u.hostname, 'in', request.url);
@@ -1173,7 +1064,13 @@ app.whenReady().then(() => {
   registerIpc();
   startHttpServer();
   createWindow();
-  autoLaunchSensors();
+  // Defer LHM auto-launch by ~4 s past window-show. LHM enumerates every
+  // hardware sensor on startup — including the GPU driver, which is the
+  // single biggest contributor to the cold-start GPU spike that flips the
+  // dashboard's emergency-UI red. The renderer doesn't need sensor data
+  // for its first paint; sensors populate as soon as LHM is up, the same
+  // way they did before.
+  setTimeout(() => sensorsService.launchSensorBackend(), 4000);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1252,17 +1149,17 @@ function registerIpc() {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win) return false;
     try { writeConfig({ audioDeviceId: deviceId }); } catch {}
-    restartWasapiLoopback(win, deviceId);
+    audioService.restartLoopback(win, deviceId, readConfig);
     return true;
   });
 
   // System-level mute for the default render/capture endpoints. dataFlow
   // 0 = render (speakers), 1 = capture (mic). Result: { ok, muted } or
   // { ok:false, error } so the renderer can roll back its UI on failure.
-  ipcMain.handle('audio-set-out-mute', (_e, mute) => setSystemMute(0, !!mute));
-  ipcMain.handle('audio-set-in-mute',  (_e, mute) => setSystemMute(1, !!mute));
-  ipcMain.handle('audio-get-mute-states', () => getSystemMuteStates());
-  ipcMain.handle('audio-set-default-endpoint', (_e, { dataFlow, name }) => setDefaultEndpoint(dataFlow | 0, name));
+  ipcMain.handle('audio-set-out-mute', (_e, mute) => audioService.setSystemMute(0, !!mute));
+  ipcMain.handle('audio-set-in-mute',  (_e, mute) => audioService.setSystemMute(1, !!mute));
+  ipcMain.handle('audio-get-mute-states', () => audioService.getSystemMuteStates());
+  ipcMain.handle('audio-set-default-endpoint', (_e, { dataFlow, name }) => audioService.setDefaultEndpoint(dataFlow | 0, name));
 
   // Full app restart — relaunches the Electron process (main + renderer).
   // Used by the topbar restart button when something in main needs to come
@@ -1284,18 +1181,7 @@ function registerIpc() {
   // Active-vs-standby pressure RAMMap-style. No elevation required for
   // user-owned processes; system-protected ones quietly fail and get
   // counted as 'failed'.
-  ipcMain.handle('flush-ram', async () => {
-    const ps =
-      'Add-Type -MemberDefinition \'[DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(IntPtr h);\' ' +
-      '-Name MM -Namespace W -ErrorAction SilentlyContinue; ' +
-      '$f = 0; $x = 0; ' +
-      'Get-Process | ForEach-Object { ' +
-        'try { if ([W.MM]::EmptyWorkingSet($_.Handle)) { $f++ } else { $x++ } } catch { $x++ } ' +
-      '}; ' +
-      'ConvertTo-Json @{ flushed = $f; failed = $x }';
-    const r = await runPowerShell(ps, { timeout: 30000 });
-    return r || { ok: false, error: 'powershell failed' };
-  });
+  ipcMain.handle('flush-ram', () => systemService.flushRam());
 
   // App version — pulled from package.json by Electron at app start, so the
   // topbar chip stays in sync with the manifest without a renderer rebuild.
@@ -1320,8 +1206,9 @@ function registerIpc() {
   // User-folder paths. Renderer calls these when it needs to write a screenshot
   // / saved doc / generated image into the on-disk folders that ensureUserFolders
   // creates next to the .exe at app start.
-  ipcMain.handle('gallery-path', () => galleryFolderPath());
-  ipcMain.handle('docs-path',    () => docsFolderPath());
+  ipcMain.handle('gallery-path',   () => galleryFolderPath());
+  ipcMain.handle('docs-path',      () => docsFolderPath());
+  ipcMain.handle('downloads-path', () => downloadsFolderPath());
 
   // Folder browsing — recursive listing scoped to the gallery / docs roots
   // so the EXPLORE pane can render a flat-but-grouped file list with sizes
@@ -1355,8 +1242,9 @@ function registerIpc() {
       }
     };
   }
-  ipcMain.handle('gallery-list', listFolder(galleryFolderPath));
-  ipcMain.handle('docs-list',    listFolder(docsFolderPath));
+  ipcMain.handle('gallery-list',   listFolder(galleryFolderPath));
+  ipcMain.handle('docs-list',      listFolder(docsFolderPath));
+  ipcMain.handle('downloads-list', listFolder(downloadsFolderPath));
 
   // Write a doc file (notes / paper auto-export). `rel` is a relative path
   // under the docs root; any traversal outside is rejected. Parents are
@@ -1379,20 +1267,13 @@ function registerIpc() {
   // a normal Ctrl+C from Explorer would. Uses PowerShell Set-Clipboard
   // -Path which writes the proper shell-clipboard format.
   ipcMain.handle('clipboard-copy-files', (_e, paths) => {
+    // Filter to paths inside our managed roots before letting the
+    // service touch them — sandbox the OS clipboard write to the
+    // gallery/docs/downloads area only.
     const arr = (Array.isArray(paths) ? paths : [])
       .map((p) => path.resolve(String(p || '')))
       .filter((p) => _pathInsideManagedRoot(p));
-    if (!arr.length) return Promise.resolve({ ok: false, error: 'no valid paths' });
-    const escaped = arr.map((p) => `'${p.replace(/'/g, "''")}'`).join(',');
-    return new Promise((resolve) => {
-      execFile('powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', `Set-Clipboard -Path ${escaped}`],
-        { timeout: 6000, windowsHide: true },
-        (err) => resolve(err
-          ? { ok: false, error: err.message }
-          : { ok: true, count: arr.length }),
-      );
-    });
+    return systemService.copyFilesToClipboard(arr);
   });
 
   // Fullscreen contact-sheet — grid of selected images, useful when the
@@ -1406,7 +1287,9 @@ function registerIpc() {
       const abs = path.resolve(String(raw || ''));
       const root = _managedRootFor(abs);
       if (!root) continue;
-      const which = root === galleryFolderPath() ? 'gallery' : 'docs';
+      const which = root === galleryFolderPath()   ? 'gallery'
+                  : root === downloadsFolderPath() ? 'downloads'
+                  :                                  'docs';
       const rel = path.relative(root, abs).replace(/\\/g, '/');
       tiles.push({
         url:  `dash3d-file://${which}/${encodeURI(rel)}`,
@@ -1497,7 +1380,9 @@ function registerIpc() {
     const p = path.resolve(String(abs || ''));
     const root = _managedRootFor(p);
     if (!root) return { ok: false, error: 'path outside managed roots' };
-    const which = root === galleryFolderPath() ? 'gallery' : 'docs';
+    const which = root === galleryFolderPath()   ? 'gallery'
+                : root === downloadsFolderPath() ? 'downloads'
+                :                                  'docs';
     const rel   = path.relative(root, p).replace(/\\/g, '/');
     if (_imageViewerWin && !_imageViewerWin.isDestroyed()) {
       try { _imageViewerWin.close(); } catch {}
@@ -1545,9 +1430,12 @@ function registerIpc() {
   });
 
   // Create a new folder under one of the managed roots. `which` is
-  // 'gallery' or 'docs', `rel` is the relative path of the new folder.
+  // 'gallery', 'docs', or 'downloads', `rel` is the relative path of
+  // the new folder.
   ipcMain.handle('explore-mkdir', (_e, which, rel) => {
-    const root = which === 'gallery' ? galleryFolderPath() : docsFolderPath();
+    const root = which === 'gallery'   ? galleryFolderPath()
+               : which === 'downloads' ? downloadsFolderPath()
+               :                         docsFolderPath();
     const target = path.resolve(root, String(rel || ''));
     if (!target.startsWith(root) || target === root) return { ok: false, error: 'invalid path' };
     try {
@@ -1595,7 +1483,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('set-power-profile', async (_e, opts) => {
-    return await setPowerProfile(opts || {});
+    return await powerService.setProfile(opts || {});
   });
 
   ipcMain.handle('open-youtube', () => openYouTubeWindow());
@@ -1639,41 +1527,7 @@ async function getDiskIo() {
   };
 }
 
-// ─── POWER PROFILE ─────────────────────────────────────────────────
-// Adjust the active Windows power scheme's processor min/max via
-// powercfg.exe. AC + DC are both updated so the change applies on
-// battery and wall power.
-async function setPowerProfile({ maxCpu, minCpu } = {}) {
-  if (process.platform !== 'win32') {
-    return { ok: false, error: 'powercfg only on win32' };
-  }
-  const max = Math.max(0, Math.min(100, Math.round(Number(maxCpu))));
-  const min = Math.max(0, Math.min(100, Math.round(Number(minCpu))));
-  if (!Number.isFinite(max) || !Number.isFinite(min)) {
-    return { ok: false, error: 'invalid maxCpu/minCpu' };
-  }
-  const settings = [
-    ['SUB_PROCESSOR', 'PROCTHROTTLEMAX', max],
-    ['SUB_PROCESSOR', 'PROCTHROTTLEMIN', min],
-  ];
-  const run = (args) => new Promise((resolve, reject) => {
-    execFile('powercfg.exe', args, { timeout: 5000, windowsHide: true }, (err, stdout, stderr) => {
-      if (err) { reject(new Error(stderr?.trim() || err.message)); return; }
-      resolve(stdout);
-    });
-  });
-  try {
-    for (const [sub, setting, val] of settings) {
-      await run(['/setacvalueindex', 'SCHEME_CURRENT', sub, setting, String(val)]);
-      await run(['/setdcvalueindex', 'SCHEME_CURRENT', sub, setting, String(val)]);
-    }
-    // Re-apply the active scheme so the new values actually take effect.
-    await run(['/setactive', 'SCHEME_CURRENT']);
-    return { ok: true, max, min };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
+// Power profile lives in services/power now (Windows + Linux backends).
 
 // ─── AZURE OPENAI AUTO-CONFIG ──────────────────────────────────────
 // Auto-discover Azure OpenAI config from the user's `az` CLI login.
@@ -1992,7 +1846,7 @@ async function getTempsInfo() {
   // WMI), then OHM via WMI for older systems still on OHM. HTTP first
   // skips the slow PowerShell WMI query when the patched LHM is up.
   if (result.cpu == null || result.cpuPower == null || result.gpus.some(g => g.temp == null || g.power == null)) {
-    const lhm = (await tryLhmHttp()) || (await tryLhmWmi());
+    const lhm = await sensorsService.getNativeFallback();
     if (lhm) {
       if (result.cpu == null && lhm.cpu != null) {
         result.cpu = lhm.cpu;
@@ -2050,126 +1904,7 @@ function tryNvidiaSmi() {
   });
 }
 
-async function tryLhmWmi() {
-  const ps = `
-$ns = 'root/LibreHardwareMonitor'
-$sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Ignore
-if (-not $sensors) {
-  $ns = 'root/OpenHardwareMonitor'
-  $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Ignore
-}
-if (-not $sensors) { ConvertTo-Json -Compress @{ available = $false }; exit 0 }
-$temps = $sensors | Where-Object { $_.SensorType -eq 'Temperature' }
-$powers = $sensors | Where-Object { $_.SensorType -eq 'Power' }
-$cpuPkg = $temps | Where-Object { $_.Identifier -match '/cpu/.*/temperature/0$' -or $_.Name -match 'CPU Package|CPU Total' } | Select-Object -First 1
-$cpuPower = $powers | Where-Object { $_.Name -match 'CPU Package|Package Power' -and $_.Identifier -match '/cpu/' } | Select-Object -First 1
-$gpuTempMap = @{}
-foreach ($g in $temps) {
-  if ($g.Identifier -match '/gpu-[a-z]+/(\\d+)/temperature/0') {
-    $idx = [int]$Matches[1]
-    if (-not $gpuTempMap.ContainsKey($idx)) { $gpuTempMap[$idx] = [double]$g.Value }
-  }
-}
-$gpuPowerMap = @{}
-foreach ($p in $powers) {
-  if ($p.Identifier -match '/gpu-[a-z]+/(\\d+)/power/0') {
-    $idx = [int]$Matches[1]
-    if (-not $gpuPowerMap.ContainsKey($idx)) { $gpuPowerMap[$idx] = [double]$p.Value }
-  }
-}
-$gpuArr = @()
-$gpuPwr = @()
-if ($gpuTempMap.Keys.Count -gt 0) {
-  $maxIdx = ($gpuTempMap.Keys | Measure-Object -Maximum).Maximum
-  for ($i = 0; $i -le $maxIdx; $i++) {
-    $gpuArr += $gpuTempMap[$i]
-    $gpuPwr += $gpuPowerMap[$i]
-  }
-}
-ConvertTo-Json -Compress @{
-  available = $true
-  cpu = $cpuPkg.Value
-  cpuPower = $cpuPower.Value
-  gpus = $gpuArr
-  gpusPower = $gpuPwr
-}
-  `.trim();
-  const obj = await runPowerShell(ps, { timeout: 5000 });
-  if (!obj?.available) return null;
-  return {
-    cpu:       Number.isFinite(obj.cpu)      ? obj.cpu      : null,
-    cpuPower:  Number.isFinite(obj.cpuPower) ? obj.cpuPower : null,
-    gpus:      Array.isArray(obj.gpus)      ? obj.gpus.map(v => Number.isFinite(v) ? v : null)      : [],
-    gpusPower: Array.isArray(obj.gpusPower) ? obj.gpusPower.map(v => Number.isFinite(v) ? v : null) : [],
-  };
-}
-
-// LHM v0.9.x dropped the WMI provider and exposes sensors via a built-in
-// HTTP server on localhost:8085 instead. /data.json returns a recursive
-// tree we walk for CPU package temperature/power and per-GPU values.
-// Returns same shape as tryLhmWmi or null if the server isn't reachable.
-function httpGetJson(url, timeoutMs = 1500) {
-  return new Promise((resolve) => {
-    let done = false;
-    const req = http.get(url, (res) => {
-      if (res.statusCode !== 200) { done = true; res.resume(); resolve(null); return; }
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => { body += chunk; });
-      res.on('end', () => { if (done) return; done = true; try { resolve(JSON.parse(body)); } catch { resolve(null); } });
-    });
-    req.on('error', () => { if (!done) { done = true; resolve(null); } });
-    req.setTimeout(timeoutMs, () => { if (!done) { done = true; req.destroy(); resolve(null); } });
-  });
-}
-
-// Pull a numeric value out of LHM's "53.0 °C" / "42.0 W" string format.
-function lhmNum(s) {
-  if (typeof s !== 'string') return null;
-  const m = s.match(/-?\d+(?:\.\d+)?/);
-  return m ? Number(m[0]) : null;
-}
-
-async function tryLhmHttp() {
-  const root = await httpGetJson('http://127.0.0.1:8085/data.json');
-  if (!root) return null;
-  const out = { cpu: null, cpuPower: null, gpus: [], gpusPower: [] };
-  // Walk: root → MyComputer → [hardware nodes] → [Temperatures|Powers]
-  //                                            → [sensor nodes]
-  const machine = root.Children?.[0];
-  if (!machine?.Children) return null;
-  let gpuIdx = -1;
-  for (const hw of machine.Children) {
-    const text = (hw.Text || '').toLowerCase();
-    const isCpu = /cpu|ryzen|intel|amd/.test(text) && !/chipset|gpu/.test(text);
-    const isGpu = /gpu|geforce|radeon|nvidia|graphics/.test(text);
-    if (!isCpu && !isGpu) continue;
-    if (isGpu) gpuIdx++;
-    for (const group of hw.Children || []) {
-      const gtext = (group.Text || '').toLowerCase();
-      const isTempGroup  = /temp/.test(gtext);
-      const isPowerGroup = /power/.test(gtext);
-      if (!isTempGroup && !isPowerGroup) continue;
-      for (const sensor of group.Children || []) {
-        const name = (sensor.Text || '').toLowerCase();
-        const val = lhmNum(sensor.Value);
-        if (val == null) continue;
-        if (isCpu && isTempGroup && /package|tctl|tdie/.test(name) && out.cpu == null) {
-          out.cpu = val;
-        } else if (isCpu && isPowerGroup && /package/.test(name) && out.cpuPower == null) {
-          out.cpuPower = val;
-        } else if (isGpu && isTempGroup && /core|gpu/.test(name)) {
-          if (out.gpus[gpuIdx] == null) out.gpus[gpuIdx] = val;
-        } else if (isGpu && isPowerGroup) {
-          if (out.gpusPower[gpuIdx] == null) out.gpusPower[gpuIdx] = val;
-        }
-      }
-    }
-  }
-  // Only consider this source useful if it produced at least one number.
-  if (out.cpu == null && out.cpuPower == null && out.gpus.length === 0) return null;
-  return out;
-}
+// LHM HTTP + WMI fallback moved to services/sensors/win.js.
 
 // ─── NETWORK STATS ─────────────────────────────────────────────────
 
@@ -2375,14 +2110,7 @@ async function getTransfersInfo() {
   // main-process work.
   try {
     const shouldRunBits = (++TRANSFER_BITS_TICK % TRANSFER_BITS_EVERY) === 1;
-    const arr = shouldRunBits ? await (async () => {
-      const bitsPs = `Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue |
-        Where-Object { $_.JobState -in 'Transferring','Connecting','Queued' } |
-        Select-Object @{n='id';e={[string]$_.JobId}}, DisplayName, BytesTotal, BytesTransferred, TransferType |
-        ConvertTo-Json -Compress -Depth 2`;
-      const r = await runPowerShell(bitsPs, { timeout: 2500 });
-      return r == null ? [] : (Array.isArray(r) ? r : [r]);
-    })() : [];
+    const arr = shouldRunBits ? await systemService.getActiveBitsTransfers() : [];
     for (const j of arr) {
       const tot = Number(j.BytesTotal) || 0;
       const cur = Number(j.BytesTransferred) || 0;

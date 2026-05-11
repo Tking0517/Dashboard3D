@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.6.1] — 2026-05-11
+
+### Platform abstraction (Phase 1 of Linux kiosk build-out)
+- New `src/main/services/` directory holding platform adapters. `main.js` no longer calls Windows-specific APIs directly — every WASAPI / LHM / PowerShell / COM call goes through a thin adapter that picks `./win.js` or `./linux.js` based on `process.platform`. Cleaner code for Windows, unblocks the Linux kiosk build.
+- Services: `audio` (WASAPI loopback worker, IAudioEndpointVolume mute, IPolicyConfigVista default-endpoint switching), `sensors` (LHM HTTP + WMI fallback, bundled LHM launcher), `power` (powercfg processor min/max), `system` (psapi flush-RAM, Set-Clipboard files, BITS transfer query). Linux side stubs out cleanly; Phase 2 wires hwmon + sysfs + smartctl, Phase 3 wires PipeWire.
+- Shared `services/_util/powershell.js` runner used by every Windows adapter — collapses what was an inline `runPowerShell` in `main.js`.
+
+### Browser pane: reader mode + lighter pages
+- **Reader Mode toggle** in the browser nav row (document icon, between URL and bookmark). When on, every image request gets cancelled at the webRequest layer — pages render text-only. State persists in config; force-reload bypasses cache so the filter actually takes effect.
+- **IMAGES BLOCKED** counter on the splash next to ADS BLOCKED and POPUPS BLOCKED. Lets you verify reader mode is firing.
+- **`reloadIgnoringCache` path** added — plain reload was happily serving cached images even after toggling reader mode on.
+- Defensive CSS injection on every `dom-ready` re-asserts `display: none !important` on `<head>` / `<style>` / `<script>` / `<template>` / `<noscript>` / `<link>` / `<meta>` / `<title>` so source-text-leak pages (Dribbble, Framer) render cleanly. Animation/transition/scroll-behavior all forced to 0s; `color-scheme: dark` advertised to the page so dark-themed sites pick their dark palette.
+
+### Lighter browser pane (CPU/GPU)
+- Global `autoplay-policy=document-user-activation-required` — hero videos, looping backgrounds, autoplay carousels don't start until the user clicks. Single biggest contributor to "open a heavy page → fans rev."
+- Web fonts in the blocklist (Google Fonts, Typekit, FontAwesome, Shopify, fast.fonts.net) — system fonts only, saves hundreds of KB + font-shaping CPU per page.
+- BrowserView framerate capped at 30 fps via `setFrameRate(30)`; YouTube popout keeps its 60 fps via per-window override.
+- `--disable-smooth-scrolling` — GPU-accelerated scroll curves replaced with instant scroll.
+- Per-tab `spellcheck: false` and `enableWebSQL: false` — kills the per-tab spellcheck worker and the dead WebSQL handle.
+- BV audio explicitly muted on detach via `setAudioMuted(true)`; unmuted on reattach. Stops decoded audio from chewing CPU when a tab is swapped out.
+- 50+ new tracker / consent / chat-widget / A/B-testing / push-SDK / marketing-automation domains added to the blocklist.
+- Bounds-update IPC deduped — heartbeat doesn't fire setBounds when the rect didn't move.
+
+### Browser pane fixes
+- Modal layering on Discord (and any site with stacked dialogs) restored — backed off the aggressive `background-color: transparent` rule that was making modal cards see-through and bleeding the previous step's form through underneath.
+- YouTube + Dribbble thumbnails come back — `background-image: none` was killing CDN-URL backgrounds modern grids use for thumbnails. Now only blocked when reader mode is explicitly on (via the image-MIME webRequest filter).
+
+### Downloads folder + Explore integration
+- `downloads/` directory created next to `gallery/` and `docs/` at app launch.
+- `browserSession.on('will-download')` redirects every download from the BROWSER pane into that folder. Chrome-style name collision: `file.ext`, `file (1).ext`, `file (2).ext`.
+- **DOWNLOADS** tab in the Explore pane — full parity with Gallery and Docs (up, mkdir, rename, delete, open-in-explorer, refresh, multi-select).
+
+### Misc
+- LHM auto-launch deferred 4 s past window-show. Sensor enumeration was the biggest contributor to the cold-start GPU spike that flipped the dashboard's emergency-temperature UI red.
+- BrowserView allocation now lazy — created on first navigation, not when entering the BROWSER pane. Cuts another chunk off cold-start GPU.
+- BrowserView bounds use **fractional rects** instead of CSS px, resolved against `BrowserWindow.getContentBounds()` at apply time. Walks ancestor CSS `zoom` so the view matches the visual stage size, not the pre-zoom layout box. Eliminated the modal/positioning bugs the earlier zoom-multiplication attempts caused.
+
 ## [0.6.0] — 2026-05-11
 
 ### In-pane web browser

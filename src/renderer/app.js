@@ -3891,7 +3891,7 @@ if (comboPanel) {
   // and docs. Persists under config.exploreTab so the same view is
   // restored next launch.
   function setExploreTab(which, persist = true) {
-    if (which !== 'gallery' && which !== 'docs') which = 'gallery';
+    if (which !== 'gallery' && which !== 'docs' && which !== 'downloads') which = 'gallery';
     if (!explorePane) return;
     explorePane.dataset.exploreTab = which;
     explorePane.querySelectorAll('.explore-tab').forEach((btn) => {
@@ -3909,18 +3909,33 @@ if (comboPanel) {
   // row to select; double-click a folder to navigate into it; double-click
   // a file to open in the OS default app. F2 renames, Del → trash. The
   // ＋ button creates a folder in the current view; ↑ goes up one level.
-  const exploreGalleryListEl = document.getElementById('explore-gallery-list');
-  const exploreDocsListEl    = document.getElementById('explore-docs-list');
-  const exploreGalleryPathEl = document.getElementById('explore-gallery-path');
-  const exploreDocsPathEl    = document.getElementById('explore-docs-path');
-  const _exploreSubdir   = { gallery: '', docs: '' };
+  const exploreGalleryListEl   = document.getElementById('explore-gallery-list');
+  const exploreDocsListEl      = document.getElementById('explore-docs-list');
+  const exploreDownloadsListEl = document.getElementById('explore-downloads-list');
+  const exploreGalleryPathEl   = document.getElementById('explore-gallery-path');
+  const exploreDocsPathEl      = document.getElementById('explore-docs-path');
+  const exploreDownloadsPathEl = document.getElementById('explore-downloads-path');
+  // Per-section lookups — adding a new managed root (downloads/) only
+  // needs entries here plus an IPC bridge in preload + main, instead of
+  // updating every which==='gallery'?a:b ternary in the file.
+  const _exploreListEls = {
+    gallery:   exploreGalleryListEl,
+    docs:      exploreDocsListEl,
+    downloads: exploreDownloadsListEl,
+  };
+  const _explorePathEls = {
+    gallery:   exploreGalleryPathEl,
+    docs:      exploreDocsPathEl,
+    downloads: exploreDownloadsPathEl,
+  };
+  const _exploreSubdir   = { gallery: '', docs: '', downloads: '' };
   // Multi-select state: a Set of absolute paths per section, plus an
   // anchor row for shift-click range selection. Anchor is the row that
   // last received a non-shift click.
-  const _exploreSelected = { gallery: new Set(), docs: new Set() };
-  const _exploreAnchor   = { gallery: null, docs: null };
-  const _exploreEntries  = { gallery: [], docs: [] };
-  const _exploreRoots    = { gallery: '',  docs: ''  };
+  const _exploreSelected = { gallery: new Set(), docs: new Set(), downloads: new Set() };
+  const _exploreAnchor   = { gallery: null, docs: null, downloads: null };
+  const _exploreEntries  = { gallery: [], docs: [], downloads: [] };
+  const _exploreRoots    = { gallery: '',  docs: '',  downloads: '' };
 
   function fmtFileTime(ms) {
     if (!Number.isFinite(ms)) return '—';
@@ -3945,7 +3960,7 @@ if (comboPanel) {
   const _VIDEO_KNOWN_RE  = /\.(mp4|webm|m4v|ogv|ogg|mov|avi|mkv|wmv|flv|3gp|3g2|asf)$/i;
 
   function renderExploreList(which, result) {
-    const listEl = which === 'gallery' ? exploreGalleryListEl : exploreDocsListEl;
+    const listEl = _exploreListEls[which];
     if (!listEl) return;
     listEl.classList.toggle('is-thumbnails', which === 'gallery');
     listEl.innerHTML = '';
@@ -4020,14 +4035,20 @@ if (comboPanel) {
   function exploreDisplayPath(which) {
     const root = _exploreRoots[which] || '';
     const sub = _exploreSubdir[which] || '';
-    const pathEl = which === 'gallery' ? exploreGalleryPathEl : exploreDocsPathEl;
+    const pathEl = _explorePathEls[which];
     if (!pathEl) return;
     pathEl.textContent = sub ? `${root}/${sub}`.replace(/\\/g, '/') : root;
   }
 
+  // IPC list bridges keyed by section — add an entry per managed root.
+  const _exploreListBridges = {
+    gallery:   () => window.dash?.galleryList,
+    docs:      () => window.dash?.docsList,
+    downloads: () => window.dash?.downloadsList,
+  };
   async function refreshExploreSection(which) {
     if (!window.dash) return;
-    const list = which === 'gallery' ? window.dash.galleryList : window.dash.docsList;
+    const list = _exploreListBridges[which]?.();
     const result = await list?.(_exploreSubdir[which]) ?? null;
     if (result?.root) _exploreRoots[which] = result.root;
     exploreDisplayPath(which);
@@ -4038,11 +4059,12 @@ if (comboPanel) {
     await Promise.all([
       refreshExploreSection('gallery'),
       refreshExploreSection('docs'),
+      refreshExploreSection('downloads'),
     ]);
   }
 
   function applyExploreSelection(which) {
-    const listEl = which === 'gallery' ? exploreGalleryListEl : exploreDocsListEl;
+    const listEl = _exploreListEls[which];
     const set = _exploreSelected[which];
     listEl?.querySelectorAll('.explore-row').forEach((r) => {
       r.classList.toggle('is-selected', set.has(r.dataset.path));
@@ -4136,7 +4158,7 @@ if (comboPanel) {
   // Electron's renderer returns null from prompt() by default (no host
   // dialog handler), which silently swallowed clicks before.
   function startNewFolder(which) {
-    const listEl = which === 'gallery' ? exploreGalleryListEl : exploreDocsListEl;
+    const listEl = _exploreListEls[which];
     if (!listEl) return;
     // Drop any existing placeholder so successive clicks don't stack rows.
     listEl.querySelector('.explore-row.is-creating')?.remove();
@@ -4230,7 +4252,7 @@ if (comboPanel) {
     if (ev.key === 'F2') {
       if (sel.length !== 1) return;
       ev.preventDefault();
-      const listEl = w === 'gallery' ? exploreGalleryListEl : exploreDocsListEl;
+      const listEl = _exploreListEls[w];
       const row = listEl?.querySelector(`.explore-row[data-path="${CSS.escape(sel[0])}"]`);
       startRename(row);
     } else if (ev.key === 'Delete') {
@@ -4342,7 +4364,7 @@ if (comboPanel) {
     if (ev.key === 'Escape' && _exploreCtxMenu) hideExploreCtxMenu();
   });
 
-  for (const listEl of [exploreGalleryListEl, exploreDocsListEl]) {
+  for (const listEl of Object.values(_exploreListEls)) {
     if (!listEl) continue;
     listEl.addEventListener('click',       handleExploreRowClick);
     listEl.addEventListener('dblclick',    handleExploreRowDblClick);
@@ -4364,10 +4386,15 @@ if (comboPanel) {
   // Header delete button — multi-aware; trashes everything in the
   // selection set. Discoverable equivalent of the Del key.
   bindExploreActionButtons('data-explore-delete', (which) => deleteSelectedAll(which));
+  // Same shape as _exploreListBridges — IPC bridges for root-path lookup.
+  const _explorePathBridges = {
+    gallery:   () => window.dash?.galleryPath,
+    docs:      () => window.dash?.docsPath,
+    downloads: () => window.dash?.downloadsPath,
+  };
   bindExploreActionButtons('data-explore-open', async (which) => {
-    const root = which === 'gallery'
-      ? await window.dash?.galleryPath?.()
-      : await window.dash?.docsPath?.();
+    const pathFn = _explorePathBridges[which]?.();
+    const root = await pathFn?.();
     const sub = _exploreSubdir[which] || '';
     const target = sub ? `${root}\\${sub.replace(/\//g, '\\')}` : root;
     if (target) window.dash?.shellOpenPath?.(target).catch(() => {});
@@ -4548,6 +4575,7 @@ if (comboPanel) {
   const browserHomeBtn    = document.getElementById('browser-home-btn');
   const browserUrlEl      = document.getElementById('browser-url');
   const browserBookmarkBtn= document.getElementById('browser-bookmark-btn');
+  const browserReaderBtn  = document.getElementById('browser-reader-btn');
   const browserBookmarksEl= document.getElementById('browser-bookmarks');
   const browserBookmarksEmptyEl = document.getElementById('browser-bookmarks-empty');
   const browserStageEl    = document.getElementById('browser-stage');
@@ -4559,6 +4587,7 @@ if (comboPanel) {
   const browserSplashSearchEl     = document.getElementById('browser-splash-search');
   const browserStatAdsEl    = document.getElementById('browser-stat-ads');
   const browserStatPopupsEl = document.getElementById('browser-stat-popups');
+  const browserStatImagesEl = document.getElementById('browser-stat-images');
   const browserResultsEl     = document.getElementById('browser-results');
   const browserResultsListEl = document.getElementById('browser-results-list');
   const browserResultsGridEl = document.getElementById('browser-results-grid');
@@ -4568,8 +4597,10 @@ if (comboPanel) {
   const browserResultsLoadMoreEl = document.getElementById('browser-results-loadmore');
 
   const _browserState = { tabs: [], activeId: null, inited: false,
-                          adsBlocked: 0, popupsBlocked: 0, bookmarks: [],
-                          searchKind: 'web', inBrowserMode: false };
+                          adsBlocked: 0, popupsBlocked: 0, imagesBlocked: 0,
+                          bookmarks: [],
+                          searchKind: 'web', inBrowserMode: false,
+                          readerMode: false };
   window._browserState = _browserState; // for paintComboHeader's tab count
 
   function _browserNormalizeUrl(input) {
@@ -4584,6 +4615,7 @@ if (comboPanel) {
   function _browserRenderSplashStats() {
     if (browserStatAdsEl)    browserStatAdsEl.textContent    = String(_browserState.adsBlocked || 0);
     if (browserStatPopupsEl) browserStatPopupsEl.textContent = String(_browserState.popupsBlocked || 0);
+    if (browserStatImagesEl) browserStatImagesEl.textContent = String(_browserState.imagesBlocked || 0);
   }
 
   function _browserActiveTab() {
@@ -5163,6 +5195,7 @@ if (comboPanel) {
   // time the layout shifts. ResizeObserver covers panel-resize drags;
   // window 'resize' covers viewport / DPI changes.
   let _bvBoundsTimer = null;
+  let _bvLastSent = null;
   function _browserSendBounds() {
     if (_bvBoundsTimer) return;
     _bvBoundsTimer = setTimeout(() => {
@@ -5170,7 +5203,20 @@ if (comboPanel) {
       if (!_browserState.inBrowserMode) return;
       const t = _browserActiveTab();
       if (!t || t.mode !== 'page') return;
-      try { window.dash?.browserTabBounds?.(_browserStageRectFraction()); } catch {}
+      // Dedup: the 500 ms heartbeat fires whether or not anything moved.
+      // Comparing to the last-sent rect (with a half-pixel tolerance to
+      // ignore subpixel jitter from layout flushes) skips the IPC ping +
+      // native setBounds call when the page is just sitting still.
+      const r = _browserStageRectFraction();
+      if (_bvLastSent
+        && Math.abs(r.x      - _bvLastSent.x)      < 0.0005
+        && Math.abs(r.y      - _bvLastSent.y)      < 0.0005
+        && Math.abs(r.width  - _bvLastSent.width)  < 0.0005
+        && Math.abs(r.height - _bvLastSent.height) < 0.0005) {
+        return;
+      }
+      _bvLastSent = r;
+      try { window.dash?.browserTabBounds?.(r); } catch {}
     }, 16);
   }
   try {
@@ -5216,10 +5262,16 @@ if (comboPanel) {
     _browserState.inited = true;
     const cfg = await window.dash?.getConfig?.() || {};
     _browserState.bookmarks = Array.isArray(cfg.browserBookmarks) ? cfg.browserBookmarks : [];
+    _browserState.readerMode = !!cfg.browserReaderMode;
     _browserRenderBookmarks();
+    // Sync reader-mode to main so the webRequest handler matches the
+    // persisted state from the moment the user enters the BROWSER pane.
+    try { window.dash?.browserSetReaderMode?.(_browserState.readerMode); } catch {}
+    browserReaderBtn?.classList.toggle('is-active', _browserState.readerMode);
     try {
       const stats = await window.dash?.browserGetStats?.();
-      if (stats && typeof stats.adsBlocked === 'number') _browserState.adsBlocked = stats.adsBlocked;
+      if (stats && typeof stats.adsBlocked    === 'number') _browserState.adsBlocked    = stats.adsBlocked;
+      if (stats && typeof stats.imagesBlocked === 'number') _browserState.imagesBlocked = stats.imagesBlocked;
     } catch {}
     _browserRenderSplashStats();
     // Lazy BrowserView allocation: we used to call _browserNewTab() here,
@@ -5294,6 +5346,23 @@ if (comboPanel) {
     else if (t.mode === 'results' && t.query) _browserSearchActive(t.query, t.results?.kind || 'web');
   });
   browserHomeBtn?.addEventListener('click', _browserGoHome);
+  // Reader mode — image blocking on/off. We persist the choice and tell
+  // main to update its webRequest filter. Reload the current page so the
+  // new policy actually takes effect on this view (already-loaded images
+  // stay cached; blocking only applies to fresh requests).
+  browserReaderBtn?.addEventListener('click', () => {
+    _browserState.readerMode = !_browserState.readerMode;
+    browserReaderBtn.classList.toggle('is-active', _browserState.readerMode);
+    window.dash?.setConfig?.({ browserReaderMode: _browserState.readerMode });
+    window.dash?.browserSetReaderMode?.(_browserState.readerMode);
+    const t = _browserActiveTab();
+    if (t && t.mode === 'page') {
+      // Force a fresh load — plain reload() would happily serve the same
+      // images from the memory cache, which means the new image-block
+      // filter would never see those requests.
+      try { window.dash?.browserTabReloadFresh?.(t.id); } catch {}
+    }
+  });
   browserUrlEl?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     const url = _browserNormalizeUrl(browserUrlEl.value);
@@ -5338,10 +5407,14 @@ if (comboPanel) {
     });
   }
 
-  // Live ad-block count from main process. Throttled to 4 Hz over IPC.
+  // Live ad-block + image-block counts from main process. Throttled to
+  // 4 Hz over IPC. The image counter exists so reader-mode users can
+  // verify the filter is actually firing — if the number goes up after
+  // toggling on, the block is working.
   try {
     window.dash?.onBrowserStats?.((data) => {
-      if (data && typeof data.adsBlocked === 'number') _browserState.adsBlocked = data.adsBlocked;
+      if (data && typeof data.adsBlocked    === 'number') _browserState.adsBlocked    = data.adsBlocked;
+      if (data && typeof data.imagesBlocked === 'number') _browserState.imagesBlocked = data.imagesBlocked;
       _browserRenderSplashStats();
     });
   } catch {}

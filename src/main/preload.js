@@ -37,8 +37,10 @@ contextBridge.exposeInMainWorld('dash', {
   processStats:   () => ipcRenderer.invoke('process-stats'),
   galleryPath:    () => ipcRenderer.invoke('gallery-path'),
   docsPath:       () => ipcRenderer.invoke('docs-path'),
-  galleryList:    (subdir = '') => ipcRenderer.invoke('gallery-list', subdir),
-  docsList:       (subdir = '') => ipcRenderer.invoke('docs-list',    subdir),
+  downloadsPath:  () => ipcRenderer.invoke('downloads-path'),
+  galleryList:    (subdir = '') => ipcRenderer.invoke('gallery-list',   subdir),
+  docsList:       (subdir = '') => ipcRenderer.invoke('docs-list',      subdir),
+  downloadsList:  (subdir = '') => ipcRenderer.invoke('downloads-list', subdir),
   docsWrite:      (rel, content) => ipcRenderer.invoke('docs-write', rel, content),
   shellOpenPath:  (abs) => ipcRenderer.invoke('shell-open-path', abs),
   openImageViewer:    (abs)   => ipcRenderer.invoke('open-image-viewer', abs),
@@ -67,6 +69,7 @@ contextBridge.exposeInMainWorld('dash', {
   // fires whenever the main process tallies a new block (throttled to 4 Hz).
   browserGetStats:   () => ipcRenderer.invoke('browser-get-stats'),
   browserResetStats: () => ipcRenderer.invoke('browser-reset-stats'),
+  browserSetReaderMode: (on) => ipcRenderer.invoke('browser-set-reader-mode', on),
   onBrowserStats: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on('browser-stats', handler);
@@ -82,6 +85,7 @@ contextBridge.exposeInMainWorld('dash', {
   browserTabBack:     (id)         => ipcRenderer.invoke('browser-tab-back', id),
   browserTabForward:  (id)         => ipcRenderer.invoke('browser-tab-forward', id),
   browserTabReload:   (id)         => ipcRenderer.invoke('browser-tab-reload', id),
+  browserTabReloadFresh: (id)      => ipcRenderer.invoke('browser-tab-reload-fresh', id),
   browserTabActivate: (id)         => ipcRenderer.invoke('browser-tab-activate', id),
   browserTabBounds:   (rect)       => ipcRenderer.invoke('browser-tab-bounds', rect),
   onBrowserTabEvent: (callback) => {
