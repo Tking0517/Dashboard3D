@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.0-alpha.1] — 2026-05-11
+
+**Alpha milestone — Linux build runs on real hardware.**
+
+The cumulative result of Phase 1 → Phase 4b: the dashboard's main process is now genuinely cross-platform, and the Linux binary launches and renders on a Surface Book test machine running Debian Live XFCE from USB. CPU, RAM, storage, network, disk-I/O, CPU temp, fans — all populate from cross-platform paths. The platform-specific subsystems (audio, sensors, power, wm) sit behind adapters with matching real implementations on both sides.
+
+### Verified on the test machine (Skylake / Intel HD 520 / NVIDIA 940M)
+- ✓ Dashboard binary launches via `./dashboard3d --no-sandbox`
+- ✓ All telemetry panels populate
+- ✓ CPU temp from `/sys/class/hwmon/coretemp/*` via the Phase 2 hwmon walker
+- ✓ RAM usage matches the Windows baseline (~1.7 GB resident)
+
+### Known gaps for the next alpha (Phase 4c kiosk image)
+- NVIDIA GPU panel reads "none" — Debian Live doesn't ship the proprietary driver. Fix: add `nvidia-driver` + `nvidia-smi` to the kiosk image package list.
+- WiFi associates then drops on Surface Book hardware — needs `firmware-iwlwifi` + `firmware-misc-nonfree`.
+- No bootable kiosk ISO yet — currently the binary runs by copying the folder to a USB and executing manually from inside Debian Live.
+- Audio visualizer end-to-end on Linux not yet tested — the `parec` capture path is implemented but unverified on real hardware.
+
+### What this alpha can do today
+- Windows: same as `0.6.3` — full dashboard, no regressions from the refactor.
+- Linux: standalone binary that runs in any Wayland or X11 session on Debian 12+. Not yet a bootable kiosk; that's Phase 4c.
+
 ## [0.6.3] — 2026-05-11
 
 ### Phase 3c — Linux audio loopback (visualizer parity)

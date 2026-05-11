@@ -1,6 +1,6 @@
 {
   "name": "dashboard3d",
-  "version": "0.6.3",
+  "version": "0.7.0-alpha.1",
   "private": true,
   "description": "A 3D desktop dashboard with system info, storage, date/time, and weather (Open-Meteo).",
   "main": "src/main/main.js",
