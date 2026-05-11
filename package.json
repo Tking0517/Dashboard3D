@@ -9,13 +9,16 @@
     "start": "electron .",
     "build": "vite build",
     "package": "npm run build && electron-packager . \"Dashboard3D\" --platform=win32 --arch=x64 --out=. --overwrite --prune=true --asar=false",
+    "package:linux": "npm run build && electron-packager . \"dashboard3d\" --platform=linux --arch=x64 --out=. --overwrite --prune=true --asar=false",
     "preview": "vite preview --host 127.0.0.1",
     "postinstall": "node scripts/fix-audify-abi.js"
   },
   "dependencies": {
-    "audify": "^1.10.1",
     "systeminformation": "^5.31.6",
     "three": "^0.164.1"
+  },
+  "optionalDependencies": {
+    "audify": "^1.10.1"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
