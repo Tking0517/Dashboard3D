@@ -13,6 +13,7 @@ const powerService   = require('./services/power');
 const systemService  = require('./services/system');
 const sensorsService = require('./services/sensors');
 const audioService   = require('./services/audio');
+const wmService      = require('./services/wm');
 
 const HTTP_PORT = 7373;
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -291,56 +292,17 @@ function applyYoutubeZenMode(on) {
 // setDefaultEndpoint, getSystemMuteStates. ~245 lines moved.
 
 
-// ─── WINDOWS Z-ORDER (HWND_BOTTOM) ─────────────────────────────────
-// Persistent PowerShell process so every SetWindowPos call is ~10 ms
-// instead of ~300 ms (no cold-start per call). Spawned lazily.
-let _psBg = null;
-function getBgShell() {
-  if (_psBg && !_psBg.killed && _psBg.exitCode == null) return _psBg;
-  _psBg = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', '-'],
-    { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }
-  );
-  _psBg.on('error', () => { _psBg = null; });
-  _psBg.on('exit',  () => { _psBg = null; });
-  // Define the SetWindowPos P/Invoke once for the life of this process.
-  _psBg.stdin.write(
-    `Add-Type -ErrorAction SilentlyContinue -MemberDefinition '` +
-      `[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);` +
-    `' -Name N -Namespace W;\r\n`
-  );
-  return _psBg;
-}
+// Window z-order management moved to services/wm — Windows pins the
+// HWND to the bottom via a persistent PowerShell pipe + SetWindowPos;
+// Linux (cage kiosk) is a no-op.
 
 function sendToBottom(win) {
-  if (process.platform !== 'win32') return;
-  if (!win || win.isDestroyed()) return;
-  let hwnd;
-  try {
-    // HWND fits in 32 bits on Windows (even on x64).
-    hwnd = win.getNativeWindowHandle().readUInt32LE(0);
-  } catch {
-    return;
-  }
-  // SetWindowPos(hwnd, HWND_BOTTOM=1, 0, 0, 0, 0,
-  //              SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE = 0x0013)
-  const sh = getBgShell();
-  if (!sh || !sh.stdin || sh.stdin.destroyed) return;
-  try {
-    sh.stdin.write(
-      `[W.N]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]1, 0, 0, 0, 0, 0x13) | Out-Null\r\n`
-    );
-  } catch {}
+  wmService.sendToBottom(win);
 }
 
 app.on('before-quit', () => {
   audioService.stopLoopback();
-  if (_psBg && !_psBg.killed) {
-    try { _psBg.stdin.end(); } catch {}
-    try { _psBg.kill(); } catch {}
-    _psBg = null;
-  }
+  wmService.shutdown();
 });
 
 // ─── USER FOLDERS ──────────────────────────────────────────────────
@@ -2040,7 +2002,10 @@ const TRANSFER_BITS_EVERY  = 10;     // run Get-BitsTransfer once every N polls 
 let   TRANSFER_BITS_TICK   = 0;
 
 async function getTransfersInfo() {
-  if (process.platform !== 'win32') return [];
+  // Filesystem-poll path works on Linux too — the BITS-specific bit was
+  // already abstracted out via systemService.getActiveBitsTransfers(),
+  // which returns [] on non-Windows. Dropping the early-return guard
+  // lets the dashboard's downloads progress UI work on Linux too.
   const dir = path.join(os.homedir(), 'Downloads');
   let entries;
   try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }

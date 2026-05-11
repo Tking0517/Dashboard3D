@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.2] — 2026-05-11
+
+### Phase 2 — Linux sensors + window-manager abstraction
+- **`services/sensors/linux.js`** now walks `/sys/class/hwmon/*` for real readings instead of returning `null`. Picks well-known driver names (`coretemp`, `k10temp`, `zenpower`, `amdgpu`, `i915`, `nouveau`, `radeon`) and reads `tempN_input` / `powerN_input` files. Labelled "Package"/"Tctl"/"Tdie" preferred for CPU; "junction"/"hotspot" preferred for GPU. Failure-tolerant — any missing or permission-denied file just skips that sensor instead of bombing out. Same return shape as the Windows backend, so `main.js`'s `getTempsInfo()` consumes it transparently.
+- **`services/wm/`** new — abstracts the always-on-bottom z-order trick. Windows backend lifted the persistent PowerShell + SetWindowPos pipe from `main.js`; Linux backend no-ops (the cage kiosk compositor we target in Phase 4 is single-app, no stacking).
+- **`getTransfersInfo`** no longer guarded by `process.platform !== 'win32'`. The filesystem-walk portion of the Downloads-folder progress UI works on Linux too; the BITS-specific part already gated via `systemService.getActiveBitsTransfers()` which returns `[]` off Windows.
+
+### Phase 3a — Linux audio mute + endpoint switching
+- **`setSystemMute`** wired via `wpctl set-mute @DEFAULT_AUDIO_SINK@|@DEFAULT_AUDIO_SOURCE@ 0|1`, with read-back through `wpctl get-volume` to confirm the new state. Same `{ok, muted}` shape as Windows.
+- **`getSystemMuteStates`** parses `wpctl get-volume` output for the `[MUTED]` suffix on both default sink and source.
+- **`setDefaultEndpoint`** walks `wpctl status` output (Sinks/Sources section, friendly-name substring match), then `wpctl set-default <node-id>`. Same `{ok, name, id}` shape.
+- Loopback capture (Phase 3c) still stubbed — visualizer bars will sit at zero on Linux until pw-cat + a JS FFT worker land.
+
 ## [0.6.1] — 2026-05-11
 
 ### Platform abstraction (Phase 1 of Linux kiosk build-out)
