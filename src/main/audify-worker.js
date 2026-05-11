@@ -171,10 +171,13 @@ function start() {
               sum += Math.sqrt(re * re + im * im);
             }
             const avg = sum / (hi - lo);
-            // Compress dynamic range (audio is logarithmic). pow(.5)*76
-            // keeps quiet content visible without slamming most of the
-            // bars to 100% on normal listening volume.
-            bandsOut[b] = Math.min(100, Math.pow(avg, 0.5) * 76);
+            // Compress dynamic range (audio is logarithmic). Clamp at
+            // 250 — well above the 0–100 display scale — so loud content
+            // doesn't saturate to a flat ceiling before the renderer's
+            // AGC sees it. The renderer auto-normalizes so the loudest
+            // band always renders at 100; we just need to give it enough
+            // dynamic range to compare bands.
+            bandsOut[b] = Math.min(250, Math.pow(avg, 0.5) * 42);
           }
 
           process.parentPort.postMessage({

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer, utilityProcess, webContents } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, screen, session, desktopCapturer, utilityProcess, shell, protocol, net } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -8,6 +8,10 @@ const si = require('systeminformation');
 
 const HTTP_PORT = 7373;
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
+
+// Main HUD BrowserWindow. Captured in createWindow() so the embedded
+// BROWSER pane can attach/detach BrowserViews against it.
+let _mainWin = null;
 
 // ─── SHARED UTILITIES ──────────────────────────────────────────────
 
@@ -82,9 +86,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: true, // enables the <webview> used by the in-panel browser
     },
   });
+
+  _mainWin = win;
+  win.on('closed', () => { _mainWin = null; });
 
   win.removeMenu();
 
@@ -126,6 +132,11 @@ function createWindow() {
     if (win.isDestroyed()) { clearInterval(_bottomInterval); return; }
     sendToBottom(win);
   }, 1000);
+
+  // Bump the renderer zoom 20% to compensate for force-device-scale-factor=1
+  // making everything render at native pixel sizes (which is too small on a
+  // HiDPI display). Set on every load so it survives renderer reloads.
+  win.webContents.on('did-finish-load', () => win.webContents.setZoomFactor(1.2));
 
   // Native WASAPI loopback for the default output device. Pushes per-frame
   // RMS levels to the renderer over IPC ('audio-out-level').
@@ -548,74 +559,6 @@ try {
   return runPowerShell(ps, { timeout: 8000 });
 }
 
-// ─── IN-PANEL WEB BROWSER (adblock) ─────────────────────────────────
-// Curated hostname blocklist applied to the in-panel browser's session via
-// session.webRequest.onBeforeRequest. Targets the dominant ad/analytics/
-// fingerprinting networks; not as exhaustive as EasyList but covers the
-// majority of trackers without needing to bundle a large filter list.
-const WEB_BLOCK_HOSTS = new Set([
-  // Google ads + analytics
-  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
-  'google-analytics.com', 'googletagmanager.com', 'googletagservices.com',
-  'adservice.google.com',
-  // Facebook
-  'connect.facebook.net', 'graph.facebook.com',
-  // Major ad networks
-  'adnxs.com', 'criteo.com', 'criteo.net', 'rubiconproject.com',
-  'pubmatic.com', 'openx.net', 'taboola.com', 'outbrain.com',
-  'amazon-adsystem.com', 'adform.net', 'casalemedia.com', 'rlcdn.com',
-  'bidswitch.net', 'mathtag.com', 'demdex.net', 'everesttech.net',
-  'serving-sys.com', 'media.net', 'yieldmo.com', 'indexww.com',
-  // Analytics / tracking
-  'scorecardresearch.com', 'quantserve.com', 'hotjar.com', 'mixpanel.com',
-  'segment.io', 'segment.com', 'mouseflow.com', 'fullstory.com',
-  'bugsnag.com', 'newrelic.com', 'optimizely.com', 'kissmetrics.com',
-  'crazyegg.com', 'chartbeat.com', 'heap.io', 'mparticle.com',
-  // Common popup / consent annoyances often paired with trackers
-  'onetrust.com', 'cookielaw.org', 'truste.com', 'evidon.com',
-]);
-function _isBlockedHost(host) {
-  if (!host) return false;
-  if (WEB_BLOCK_HOSTS.has(host)) return true;
-  // Match subdomains: foo.bar.doubleclick.net → doubleclick.net is blocked.
-  for (let dot = host.indexOf('.'); dot >= 0; dot = host.indexOf('.', dot + 1)) {
-    if (WEB_BLOCK_HOSTS.has(host.slice(dot + 1))) return true;
-  }
-  return false;
-}
-const _webAdblockInstalled = new Set();
-function installWebAdblock(partition, win) {
-  if (!partition || _webAdblockInstalled.has(partition)) return;
-  let s;
-  try { s = session.fromPartition(partition); } catch { return; }
-  if (!s?.webRequest) return;
-  s.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, cb) => {
-    let host = '';
-    try { host = new URL(details.url).hostname.toLowerCase(); } catch {}
-    if (_isBlockedHost(host)) {
-      if (win && !win.isDestroyed()) win.webContents.send('web-request-blocked', host);
-      cb({ cancel: true });
-      return;
-    }
-    cb({});
-  });
-  // Strip Content-Security-Policy headers so our injected dark-mode <style>
-  // tags survive on sites with strict CSPs (Google et al.). The browser
-  // partition is isolated from the main app so this only loosens security
-  // for in-panel browsing — not the dashboard itself.
-  s.webRequest.onHeadersReceived((details, cb) => {
-    const h = { ...details.responseHeaders };
-    for (const k of Object.keys(h)) {
-      const lk = k.toLowerCase();
-      if (lk === 'content-security-policy' || lk === 'content-security-policy-report-only') {
-        delete h[k];
-      }
-    }
-    cb({ responseHeaders: h });
-  });
-  _webAdblockInstalled.add(partition);
-}
-
 // ─── WINDOWS Z-ORDER (HWND_BOTTOM) ─────────────────────────────────
 // Persistent PowerShell process so every SetWindowPos call is ~10 ms
 // instead of ~300 ms (no cold-start per call). Spawned lazily.
@@ -668,13 +611,67 @@ app.on('before-quit', () => {
   }
 });
 
+// ─── USER FOLDERS ──────────────────────────────────────────────────
+// Long-lived user content lives next to the app .exe so it stays with
+// the installation and is easy to browse in Explorer. In development
+// `app.getPath('exe')` resolves to the bundled electron binary inside
+// node_modules — drop those files at the project root instead so dev
+// runs don't litter node_modules/electron/dist with stray folders.
+function userFoldersBase() {
+  return app.isPackaged
+    ? path.dirname(app.getPath('exe'))
+    : path.resolve(__dirname, '..', '..');
+}
+function galleryFolderPath() { return path.join(userFoldersBase(), 'gallery'); }
+function docsFolderPath()    { return path.join(userFoldersBase(), 'docs');    }
+function ensureUserFolders() {
+  for (const p of [galleryFolderPath(), docsFolderPath()]) {
+    try { fs.mkdirSync(p, { recursive: true }); }
+    catch (err) { console.warn(`could not create ${p}:`, err.message); }
+  }
+}
+// Return the managed root (gallery/ or docs/) that contains `abs`, or
+// null if `abs` lives outside both. Used by the explore IPC handlers
+// to gate any path the renderer hands us.
+function _managedRootFor(abs) {
+  const g = galleryFolderPath();
+  const d = docsFolderPath();
+  if (abs === g || abs.startsWith(g + path.sep)) return g;
+  if (abs === d || abs.startsWith(d + path.sep)) return d;
+  return null;
+}
+function _pathInsideManagedRoot(abs) { return _managedRootFor(abs) !== null; }
+
 // ─── APP LIFECYCLE ─────────────────────────────────────────────────
+// Custom protocol — `dash3d-file://<absolute-path>` reads files only from
+// inside the managed gallery/docs roots. Used by the EXPLORE pane's
+// thumbnail grid so <img src> can preview gallery images without us
+// disabling webSecurity on the BrowserWindow. Scheme must be registered
+// here (before app.whenReady) so it's flagged secure + supports streams.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'dash3d-file', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
+]);
+
 // Stop Chromium from detecting "the YouTube window is occluded by the
 // dashboard" and pausing the renderer / freezing media. These need to
 // be set BEFORE app.whenReady fires.
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
+
+// Force the renderer to a 1× device scale factor regardless of the OS
+// display scaling. On a HiDPI / 200%-scaled monitor this drops the GPU
+// fill cost by ~4× (paints 2560×1440 instead of 5120×2880). UI looks
+// slightly softer than native @2x but the entire compositor — animations,
+// panel pulses, grid overlay, webview, audio canvases — gets cheaper.
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
+
+// Embedded BROWSER pane dark mode: nativeTheme.themeSource = 'dark' is
+// set in app.whenReady(). Sites that respect prefers-color-scheme go
+// dark. Sites that don't (legacy light-only) stay light — Chromium's
+// WebContentsForceDark feature flag mangles enough sites' stylesheet
+// rendering that we don't enable it. Per-webview CSS injection is the
+// safer future path if force-dark is required.
 
 app.whenReady().then(() => {
   // Auto-grant all media-related permissions so the renderer can call
@@ -703,6 +700,476 @@ app.whenReady().then(() => {
     });
   }
 
+  // Embedded browser tab — in-memory ("private") session with a hardcoded
+  // ad/tracker domain blocklist. Each BrowserView is created with
+  // partition="dash-browser" so this session is what services its
+  // requests. No persist: prefix → cookies, cache, and history die when
+  // the dashboard closes. The blocklist is a substring match against the
+  // request URL; it's not a full ABP engine but it cuts the obvious
+  // surveillance + ad networks.
+  const _BROWSER_PARTITION = 'dash-browser';
+  const _BROWSER_BLOCKLIST = [
+    'doubleclick.net', 'googlesyndication.com', 'googletagmanager.com',
+    'googletagservices.com', 'google-analytics.com', 'googleadservices.com',
+    'adservice.google.', 'pagead2.googlesyndication',
+    'facebook.com/tr', 'connect.facebook.net', 'fbcdn.net/signals',
+    'analytics.twitter.com', 'ads-twitter.com', 'static.ads-twitter.com',
+    'scorecardresearch.com', 'quantserve.com', 'quantcast.com',
+    'adsystem.', 'adsrvr.org', 'adnxs.com', 'rubiconproject.com',
+    'criteo.com', 'criteo.net', 'taboola.com', 'outbrain.com',
+    'hotjar.com', 'mouseflow.com', 'fullstory.com', 'mixpanel.com',
+    'segment.io', 'segment.com', 'amplitude.com', 'heap.io', 'heapanalytics.com',
+    'branch.io', 'appsflyer.com', 'adjust.com', 'kochava.com',
+    'mathtag.com', 'bidswitch.net', 'casalemedia.com', 'pubmatic.com',
+    'openx.net', 'yieldmo.com', 'moatads.com', 'serving-sys.com',
+    'bing.com/bat', 'clarity.ms',
+    'snowplowanalytics.com', 'newrelic.com/marketing',
+    'sentry-cdn.com/marketing', 'cloudflareinsights.com',
+  ];
+  const browserSession = session.fromPartition(_BROWSER_PARTITION);
+  // Light UA touch only: strip the Electron/Dashboard3D substrings from
+  // the default UA so a few WAFs don't serve a stripped fallback. Keep
+  // the Chromium version that Electron actually reports — overriding it
+  // (with a higher Chrome version) plus forcing matching Sec-CH-UA hints
+  // made Google's "Sign in with Google" widget render its CSS source as
+  // visible text on partner sites (dribbble, etc).
+  try {
+    browserSession.setUserAgent(
+      browserSession.getUserAgent()
+        .replace(/Electron\/[\d.]+\s*/i, '')
+        .replace(/Dashboard3D\/[\d.]+\s*/i, ''),
+    );
+  } catch {}
+  // Live counters surfaced on the browser splash screen. adsBlocked is
+  // bumped here every time a request matches the blocklist; popups is
+  // counted in the app-level web-contents-created handler below since
+  // BrowserView's window-open events live in the main process. Broadcast
+  // is throttled to 250 ms so a heavy ad-laden page doesn't flood IPC
+  // during its initial load.
+  let _adsBlocked = 0;
+  let _statsDirty = false;
+  let _statsTimer = null;
+  function _broadcastBrowserStats() {
+    if (_statsTimer) return;
+    _statsTimer = setTimeout(() => {
+      _statsTimer = null;
+      if (!_statsDirty) return;
+      _statsDirty = false;
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('browser-stats', { adsBlocked: _adsBlocked });
+      }
+    }, 250);
+  }
+  browserSession.webRequest.onBeforeRequest((details, callback) => {
+    const u = (details.url || '').toLowerCase();
+    for (const term of _BROWSER_BLOCKLIST) {
+      if (u.includes(term)) {
+        _adsBlocked++;
+        _statsDirty = true;
+        _broadcastBrowserStats();
+        callback({ cancel: true });
+        return;
+      }
+    }
+    callback({});
+  });
+  ipcMain.handle('browser-get-stats', () => ({ adsBlocked: _adsBlocked }));
+  ipcMain.handle('browser-reset-stats', () => { _adsBlocked = 0; _statsDirty = true; _broadcastBrowserStats(); return { adsBlocked: 0 }; });
+
+  // ── BrowserView tab manager ──────────────────────────────────
+  // We previously used the <webview> tag for embedded pages, but its
+  // shadow-DOM upgrade was failing in our combo-pane layout and dumping
+  // raw <style>/<script> source text into the page. BrowserView is the
+  // stable, well-supported alternative: a real native view attached to
+  // the BrowserWindow, positioned by setBounds, controlled entirely from
+  // the main process. Each "tab" the renderer creates maps to a
+  // BrowserView. The renderer sends a target rectangle and which tab is
+  // active; main handles the rest. Page-load events are forwarded back
+  // over the 'browser-tab-event' channel so the renderer can keep its
+  // chrome (URL bar, title, back/forward enable state) in sync.
+  const _bvTabs = new Map(); // id → { view, url, title, loading, canBack, canFwd }
+  let _bvNextId = 1;
+  let _bvActiveId = null;
+  let _bvBounds = { x: 0, y: 0, width: 0, height: 0 };
+  // (Earlier revisions injected a CLEAN_CSS rule that hid anything with
+  // "cookie" / "consent" / "gdpr" / "newsletter-modal" in its class or id.
+  // Those substrings turned out to be far too broad — frameworks like
+  // Liferay use class names like "cookie-policy-notice-cmp" on real
+  // structural elements, and hiding them broke the page. Trackers are
+  // already cut at the network layer; we no longer touch the DOM.)
+
+  function _sendTabEvent(payload) {
+    if (_mainWin && !_mainWin.isDestroyed()) {
+      _mainWin.webContents.send('browser-tab-event', payload);
+    }
+  }
+  // App-level catch-all for popup blocking. setWindowOpenHandler on the
+  // BrowserView's top webContents only covers same-frame window.open;
+  // iframes embedded inside the page (Google "Sign in with Google",
+  // YouTube embed widgets, social share buttons, etc) are SEPARATE
+  // webContents with their own popup paths. Without this, a click on a
+  // target=_blank link inside an iframe slips past per-view handlers and
+  // Electron spawns a fresh BrowserWindow. Filtering by session keeps the
+  // policy scoped to the embedded browser — the dashboard's own renderer
+  // (different session) is untouched.
+  // Popup policy: send the URL back to the renderer as a "new tab"
+  // request. Renderer spawns a fresh BrowserView tab so the original
+  // page stays put on its own tab — better UX than navigating in-place,
+  // which loses the context the user came from. Also catches popups
+  // from iframes (Google "Sign in with Google", embed widgets, social
+  // buttons) since those are separate webContents with their own
+  // window-open paths.
+  function _requestNewTab(url) {
+    if (!url) return;
+    if (!_mainWin || _mainWin.isDestroyed()) return;
+    try { _mainWin.webContents.send('browser-newtab-request', url); } catch {}
+  }
+  app.on('web-contents-created', (_event, contents) => {
+    if (contents.session !== browserSession) return;
+    contents.setWindowOpenHandler(({ url }) => {
+      _requestNewTab(url);
+      return { action: 'deny' };
+    });
+    contents.on('did-create-window', (newWin, details) => {
+      try { newWin.close(); } catch {}
+      _requestNewTab(details && details.url);
+    });
+  });
+
+  function _wireBvEvents(id, view) {
+    const wc = view.webContents;
+    wc.on('did-start-loading', () => {
+      const t = _bvTabs.get(id); if (!t) return;
+      t.loading = true;
+      _sendTabEvent({ id, type: 'loading', loading: true });
+    });
+    wc.on('did-stop-loading', () => {
+      const t = _bvTabs.get(id); if (!t) return;
+      t.loading = false;
+      t.canBack = wc.canGoBack();
+      t.canFwd  = wc.canGoForward();
+      _sendTabEvent({ id, type: 'loading', loading: false, canBack: t.canBack, canFwd: t.canFwd });
+    });
+    wc.on('did-navigate', (_e, url) => {
+      const t = _bvTabs.get(id); if (!t) return;
+      t.url = url;
+      _sendTabEvent({ id, type: 'navigate', url });
+    });
+    wc.on('did-navigate-in-page', (_e, url, isMain) => {
+      if (!isMain) return;
+      const t = _bvTabs.get(id); if (!t) return;
+      t.url = url;
+      _sendTabEvent({ id, type: 'navigate', url });
+    });
+    wc.on('page-title-updated', (_e, title) => {
+      const t = _bvTabs.get(id); if (!t) return;
+      t.title = title || t.url;
+      _sendTabEvent({ id, type: 'title', title: t.title });
+    });
+    wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+      if (!isMainFrame) return;
+      _sendTabEvent({ id, type: 'fail', url, code, desc });
+    });
+    // Popup blocking lives in the app-level web-contents-created
+    // handler above (covers both this top-level webContents and any
+    // iframes the page later loads). Per-view duplicates would just
+    // double-fire the new-tab request.
+  }
+  function _applyBvBounds(view) {
+    // _bvBounds is a fractional rect (x/y/width/height each 0..1 of the
+    // dashboard viewport, computed in the renderer with rect/innerWidth).
+    // Fractions are zoom-independent: zoomFactor scales CSS px and visual
+    // px proportionally, so the ratio stays the same. We convert to DIPs
+    // here by multiplying against the window's actual content area.
+    if (!_mainWin || _mainWin.isDestroyed()) return;
+    const cb = _mainWin.getContentBounds();
+    try {
+      view.setBounds({
+        x: Math.round(cb.width  * (_bvBounds.x      || 0)),
+        y: Math.round(cb.height * (_bvBounds.y      || 0)),
+        width:  Math.max(0, Math.round(cb.width  * (_bvBounds.width  || 0))),
+        height: Math.max(0, Math.round(cb.height * (_bvBounds.height || 0))),
+      });
+    } catch {}
+  }
+  function _showBv(id) {
+    if (!_mainWin || _mainWin.isDestroyed()) return;
+    // Remove every other BrowserView from the host window, attach only
+    // the requested one.
+    for (const [tid, t] of _bvTabs.entries()) {
+      if (tid !== id) {
+        try { _mainWin.removeBrowserView(t.view); } catch {}
+      }
+    }
+    const t = _bvTabs.get(id);
+    if (!t) return;
+    try { _mainWin.setBrowserView(t.view); } catch {}
+    _applyBvBounds(t.view);
+    _bvActiveId = id;
+  }
+  function _hideAllBv() {
+    if (!_mainWin || _mainWin.isDestroyed()) return;
+    for (const t of _bvTabs.values()) {
+      try { _mainWin.removeBrowserView(t.view); } catch {}
+    }
+    _bvActiveId = null;
+  }
+
+  ipcMain.handle('browser-tab-create', (_e, url) => {
+    const id = _bvNextId++;
+    const view = new BrowserView({
+      webPreferences: {
+        partition: _BROWSER_PARTITION,
+        contextIsolation: true,
+        nodeIntegration: false,
+        // Note: sandbox left as default (false). Setting sandbox:true
+        // here caused some sites (Framer-built, Liferay-built) to render
+        // their HTML source as visible text instead of executing — most
+        // likely a feature-detect path on the page's bootstrap that
+        // depends on something the sandbox restricts.
+        javascript: true,
+        webSecurity: true,
+      },
+    });
+    view.setBackgroundColor('#0a0a0a');
+    // Pre-size to the last known stage rect (or 0×0 if we have none yet)
+    // so the page lays out at the correct viewport from the first paint.
+    // Without this Electron defaults a fresh BrowserView to "fill the
+    // BrowserWindow", which paints over our chrome until bounds arrive.
+    _applyBvBounds(view);
+    const tab = { view, url: '', title: 'NEW TAB', loading: false, canBack: false, canFwd: false };
+    _bvTabs.set(id, tab);
+    _wireBvEvents(id, view);
+    if (url) {
+      tab.url = url; tab.loading = true;
+      view.webContents.loadURL(url).catch(() => {});
+    }
+    return { id };
+  });
+  ipcMain.handle('browser-tab-close', (_e, id) => {
+    const t = _bvTabs.get(id);
+    if (!t) return { ok: false };
+    if (_bvActiveId === id && _mainWin && !_mainWin.isDestroyed()) {
+      try { _mainWin.removeBrowserView(t.view); } catch {}
+      _bvActiveId = null;
+    }
+    try { t.view.webContents.destroy?.(); } catch {}
+    _bvTabs.delete(id);
+    return { ok: true };
+  });
+  ipcMain.handle('browser-tab-navigate', (_e, id, url) => {
+    const t = _bvTabs.get(id);
+    if (!t || !url) return { ok: false };
+    t.url = url;
+    t.loading = true;
+    // Re-apply bounds before loadURL so the new page lays out at the
+    // current stage rect, even if the view was created off-screen.
+    _applyBvBounds(t.view);
+    t.view.webContents.loadURL(url).catch(() => {});
+    return { ok: true };
+  });
+  ipcMain.handle('browser-tab-back',    (_e, id) => { try { _bvTabs.get(id)?.view.webContents.goBack(); }    catch {} return { ok: true }; });
+  ipcMain.handle('browser-tab-forward', (_e, id) => { try { _bvTabs.get(id)?.view.webContents.goForward(); } catch {} return { ok: true }; });
+  ipcMain.handle('browser-tab-reload',  (_e, id) => { try { _bvTabs.get(id)?.view.webContents.reload(); }    catch {} return { ok: true }; });
+  ipcMain.handle('browser-tab-activate', (_e, id) => {
+    if (id == null) { _hideAllBv(); return { ok: true }; }
+    _showBv(id);
+    return { ok: true };
+  });
+  ipcMain.handle('browser-tab-bounds', (_e, rect) => {
+    _bvBounds = rect || _bvBounds;
+    const t = _bvActiveId != null ? _bvTabs.get(_bvActiveId) : null;
+    if (t) _applyBvBounds(t.view);
+    return { ok: true };
+  });
+
+  // HTTP fetch helper for DDG scraping. Routes through the dash-browser
+  // session so adblock counters tick and cookies persist for the few
+  // seconds it takes to do a vqd → i.js handshake. Returns a string body.
+  function _browserFetch(url, extraHeaders = {}) {
+    return new Promise((resolve, reject) => {
+      const req = net.request({ url, session: browserSession, useSessionCookies: true });
+      req.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36');
+      req.setHeader('Accept', '*/*');
+      req.setHeader('Accept-Language', 'en-US,en;q=0.9');
+      for (const [k, v] of Object.entries(extraHeaders)) req.setHeader(k, v);
+      let body = '';
+      req.on('response', (res) => {
+        res.on('data', (chunk) => { body += chunk.toString('utf8'); });
+        res.on('end',  () => resolve(body));
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  // DuckDuckGo image search uses a two-step handshake: first hit the
+  // main HTML page to extract a "vqd" token, then call the hidden i.js
+  // JSON endpoint with that token to get the actual result list.
+  async function _browserSearchVideos(q, page) {
+    try {
+      const html = await _browserFetch(`https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=videos&ia=videos`);
+      const m = html.match(/vqd=(?:["']([\d-]+)["']|([\d-]+))/);
+      const vqd = m ? (m[1] || m[2]) : null;
+      if (!vqd) return { ok: false, kind: 'videos', error: 'NO VQD TOKEN' };
+      // v.js uses the same query-shape as i.js. Page size on DDG's video
+      // endpoint is roughly 60; offset = (page-1) * 60.
+      const start = (Math.max(1, page || 1) - 1) * 60;
+      const apiUrl = `https://duckduckgo.com/v.js?l=us-en&o=json&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}&f=,,,,,&p=1&s=${start}`;
+      const body = await _browserFetch(apiUrl, {
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://duckduckgo.com/',
+        'Accept': 'application/json',
+      });
+      let json;
+      try { json = JSON.parse(body); } catch { return { ok: false, kind: 'videos', error: 'BAD JSON' }; }
+      const items = (json.results || []).slice(0, 60).map((r) => ({
+        thumb:     r.images?.medium || r.images?.large || r.images?.small || r.images?.motion,
+        url:       r.content,                 // canonical video page (YouTube etc)
+        title:     r.title || '',
+        duration:  r.duration || '',
+        publisher: r.publisher || r.uploader || '',
+        published: r.published || '',
+      })).filter(it => it.thumb && it.url);
+      return { ok: true, kind: 'videos', page: page || 1, items };
+    } catch (err) {
+      return { ok: false, kind: 'videos', error: String(err && err.message || err) };
+    }
+  }
+
+  async function _browserSearchImages(q, page) {
+    try {
+      const html = await _browserFetch(`https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images`);
+      // Token formats DDG has shipped: vqd='3-1234-5678', vqd="3-1234",
+      // vqd=3-1234. Match the most common shape.
+      const m = html.match(/vqd=(?:["']([\d-]+)["']|([\d-]+))/);
+      const vqd = m ? (m[1] || m[2]) : null;
+      if (!vqd) return { ok: false, kind: 'images', error: 'NO VQD TOKEN' };
+      // DDG's i.js paginates with s=N (start index, 100 per page).
+      const start = (Math.max(1, page || 1) - 1) * 100;
+      const apiUrl = `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}&f=,,,,,&p=1&v7exp=a&s=${start}`;
+      const body = await _browserFetch(apiUrl, {
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://duckduckgo.com/',
+        'Accept': 'application/json',
+      });
+      let json;
+      try { json = JSON.parse(body); } catch { return { ok: false, kind: 'images', error: 'BAD JSON' }; }
+      const items = (json.results || []).slice(0, 80).map((r) => ({
+        thumb: r.thumbnail || r.image,
+        image: r.image,
+        url:   r.url,           // source page (where the image lives)
+        title: r.title || '',
+        width:  r.width,
+        height: r.height,
+      })).filter(it => it.thumb && it.url);
+      return { ok: true, kind: 'images', page: page || 1, items };
+    } catch (err) {
+      return { ok: false, kind: 'images', error: String(err && err.message || err) };
+    }
+  }
+
+  // Hybrid web search — fan out to multiple engines in parallel, merge
+  // their raw HTML payloads, and let the renderer parse + dedupe. Each
+  // engine has its own bot-detection landmines; we always run them with
+  // Promise.allSettled so one engine failing (CAPTCHA, blocked region,
+  // rate limit) doesn't sink the whole search. Renderer reports the
+  // engine breakdown to the user via a small chip on each result.
+  // Per-engine paginated URL builders. Page 1 is the entry point; later
+  // pages use each engine's native offset param (start= for Google, etc).
+  // DDG's html endpoint officially uses POST for paging but accepts GET
+  // with s=offset as an undocumented fallback.
+  const _WEB_ENGINES = {
+    ddg:    (q, p) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}` + (p > 1 ? `&s=${(p-1)*30}&dc=${(p-1)*30+1}` : ''),
+    bing:   (q, p) => `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=20&first=${(p-1)*20+1}&form=QBLH`,
+    brave:  (q, p) => `https://search.brave.com/search?q=${encodeURIComponent(q)}&source=web&offset=${p-1}`,
+    yahoo:  (q, p) => `https://search.yahoo.com/search?p=${encodeURIComponent(q)}&b=${(p-1)*10+1}&fr=yfp-t&fp=1`,
+    google: (q, p) => `https://www.google.com/search?q=${encodeURIComponent(q)}&num=20&start=${(p-1)*10}&hl=en`,
+  };
+  async function _browserSearchWebHybrid(q, page) {
+    const keys = Object.keys(_WEB_ENGINES);
+    const headers = { 'Accept': 'text/html,application/xhtml+xml' };
+    const settled = await Promise.allSettled(
+      keys.map(k => _browserFetch(_WEB_ENGINES[k](q, page), headers)),
+    );
+    const html = {};
+    const errors = {};
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (settled[i].status === 'fulfilled') html[k] = settled[i].value;
+      else errors[k] = String(settled[i].reason?.message || settled[i].reason);
+    }
+    return { ok: true, kind: 'web', page, html, errors };
+  }
+
+  ipcMain.handle('browser-search', async (_e, query, kind, page) => {
+    const q = String(query || '').trim();
+    if (!q) return { ok: false, error: 'empty query' };
+    const p = Math.max(1, Math.min(Number(page) || 1, 10));
+    if (kind === 'images') return await _browserSearchImages(q, p);
+    if (kind === 'videos') return await _browserSearchVideos(q, p);
+    try {
+      return await _browserSearchWebHybrid(q, p);
+    } catch (err) {
+      return { ok: false, kind: 'web', error: String(err && err.message || err) };
+    }
+  });
+
+  ensureUserFolders();
+
+  // Serve `dash3d-file://<absolute-path>` from disk, but only if the path
+  // resolves inside one of our managed roots. The renderer uses this
+  // scheme to load thumbnails in the EXPLORE pane and the fullscreen
+  // image viewer. We read with fs directly (rather than net.fetch
+  // 'file://') because that path was returning empty bodies on Windows
+  // — fs.readFileSync + an explicit Content-Type is reliable.
+  const _DASH_MIME = {
+    '.png':  'image/png',  '.jpg':  'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif':  'image/gif',  '.webp': 'image/webp', '.bmp':  'image/bmp',
+    '.svg':  'image/svg+xml', '.avif': 'image/avif', '.ico': 'image/x-icon',
+    '.txt':  'text/plain;charset=utf-8',
+    '.html': 'text/html;charset=utf-8',
+    '.json': 'application/json',
+  };
+  // URL shape: `dash3d-file://<root>/<rel-path>` where <root> is either
+  // 'gallery' or 'docs'. We use the host segment for the root rather than
+  // putting the absolute Windows path in the URL because URL parsers
+  // treat drive-letter colons (E:) as host:port separators on standard
+  // schemes — that was returning broken URLs and empty bodies.
+  protocol.handle('dash3d-file', (request) => {
+    let root, rel, abs;
+    try {
+      const u = new URL(request.url);
+      const which = (u.hostname || '').toLowerCase();
+      root = which === 'gallery' ? galleryFolderPath()
+           : which === 'docs'    ? docsFolderPath()
+           : null;
+      if (!root) {
+        console.warn('[dash3d-file] bad host:', u.hostname, 'in', request.url);
+        return new Response('bad host', { status: 400 });
+      }
+      rel = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
+      abs = path.resolve(root, rel);
+    } catch (err) {
+      console.warn('[dash3d-file] bad url:', request.url, err.message);
+      return new Response('bad url', { status: 400 });
+    }
+    if (!abs.startsWith(root)) {
+      console.warn('[dash3d-file] traversal blocked:', abs);
+      return new Response('forbidden', { status: 403 });
+    }
+    try {
+      const data = fs.readFileSync(abs);
+      const ext = path.extname(abs).toLowerCase();
+      const mime = _DASH_MIME[ext] || 'application/octet-stream';
+      return new Response(data, { headers: { 'Content-Type': mime } });
+    } catch (err) {
+      console.warn('[dash3d-file] read failed:', abs, err.message);
+      return new Response(`read failed: ${err.message}`, { status: 500 });
+    }
+  });
+
   registerIpc();
   startHttpServer();
   createWindow();
@@ -730,17 +1197,20 @@ app.on('window-all-closed', () => {
 //     audio-set-device  audio-set-out-mute  audio-set-in-mute
 //     audio-get-mute-states  audio-set-default-endpoint
 //
-//   Web pane (in-panel <webview>)
-//     web-install-adblock  web-force-dark   (CDP auto-dark via debugger)
-//
 //   Process / window
-//     toggle-fullscreen  app-relaunch  app-quit
+//     toggle-fullscreen  app-relaunch  app-quit  app-version
 //     get-screen-sources  set-power-profile
 //     open-youtube  set-youtube-zen-mode
-//     azure-auto-config  airplane-mode
+//     azure-auto-config
+//
+//   User folders (gallery + docs sit next to the .exe; created on launch)
+//     gallery-path  docs-path
+//     gallery-list  docs-list      (subdir → entries with size + mtime)
+//     docs-write    (rel, content) (notes + paper auto-export targets)
+//     shell-open-path                (open file in OS default app)
 //
 //   Push events (main → renderer; renderer subscribes via on*)
-//     audio-out-level  web-request-blocked  force-leave-zen
+//     audio-out-level  force-leave-zen
 //
 // Async handlers should resolve to either a value or a `{ ok, error }`
 // shape on failure — see runPowerShell + setSystemMute as examples.
@@ -762,6 +1232,10 @@ function registerIpc() {
 
   ipcMain.handle('disk-info', async () => {
     return await getDiskIo();
+  });
+
+  ipcMain.handle('transfers-info', async () => {
+    return await getTransfersInfo();
   });
 
   ipcMain.handle('config-get', () => readConfig());
@@ -790,36 +1264,6 @@ function registerIpc() {
   ipcMain.handle('audio-get-mute-states', () => getSystemMuteStates());
   ipcMain.handle('audio-set-default-endpoint', (_e, { dataFlow, name }) => setDefaultEndpoint(dataFlow | 0, name));
 
-  ipcMain.handle('web-install-adblock', (e, partition) => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    installWebAdblock(String(partition || ''), win);
-    return true;
-  });
-
-  // Force the embedded webview into dark mode using Chromium's official
-  // "Auto Dark Mode for Web Contents" via the DevTools Protocol. This is
-  // the same mechanism the chrome://flags toggle uses — Chromium swaps
-  // light backgrounds for dark and adjusts text contrast itself, so we
-  // don't need CSS injection that fights site CSPs.
-  ipcMain.handle('web-force-dark', (_e, contentsId) => {
-    try {
-      const wc = webContents.fromId(contentsId | 0);
-      if (!wc) return { ok: false, error: 'no webContents' };
-      if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
-      // Tell the embedded page that prefers-color-scheme is dark first so
-      // any site with native dark CSS uses it; then layer auto-dark on top
-      // for the rest.
-      return wc.debugger.sendCommand('Emulation.setEmulatedMedia', {
-        media: 'screen',
-        features: [{ name: 'prefers-color-scheme', value: 'dark' }],
-      }).then(() => wc.debugger.sendCommand('Emulation.setAutoDarkModeOverride', {
-        enabled: true,
-      })).then(() => ({ ok: true })).catch((err) => ({ ok: false, error: String(err) }));
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  });
-
   // Full app restart — relaunches the Electron process (main + renderer).
   // Used by the topbar restart button when something in main needs to come
   // back fresh (new IPC handlers, settings that take effect at window
@@ -832,41 +1276,322 @@ function registerIpc() {
   // Hard quit — used by the topbar close button.
   ipcMain.handle('app-quit', () => { app.exit(0); });
 
-  // Airplane mode — disables / re-enables every network adapter that was
-  // 'Up' at the moment the user toggled airplane on. Requires admin, so
-  // the actual Disable-NetAdapter / Enable-NetAdapter calls are run from
-  // an elevated child PowerShell launched via Start-Process -Verb RunAs
-  // (one UAC prompt per toggle). Names of disabled adapters are written
-  // to a state file in userData so a re-enable after an app restart still
-  // brings the same adapters back up.
-  ipcMain.handle('airplane-mode', async (_e, on) => {
-    const stateFile = path.join(app.getPath('userData'), 'airplane-state.txt');
-    const sf = stateFile.replace(/'/g, "''");
-    const inner = on
-      ? `$names = (Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object -ExpandProperty Name); ` +
-        `if ($names) { ` +
-          `$names | Set-Content -Path '${sf}' -Encoding UTF8; ` +
-          `$names | ForEach-Object { Disable-NetAdapter -Name $_ -Confirm:$false } ` +
-        `}`
-      : `if (Test-Path '${sf}') { ` +
-          `Get-Content '${sf}' | Where-Object { $_ } | ForEach-Object { Enable-NetAdapter -Name $_ -Confirm:$false }; ` +
-          `Remove-Item '${sf}' -ErrorAction SilentlyContinue ` +
-        `} else { ` +
-          `Get-NetAdapter | Where-Object Status -eq 'Disabled' | Enable-NetAdapter -Confirm:$false ` +
-        `}`;
-    // PowerShell -EncodedCommand expects UTF-16-LE base64 — pre-encode to
-    // avoid quoting nightmares with the elevated launcher.
-    const encoded = Buffer.from(inner, 'utf16le').toString('base64');
-    const launcher =
-      `Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden ` +
-      `-ArgumentList '-NoProfile','-EncodedCommand','${encoded}'`;
+  // RAM flush — calls psapi!EmptyWorkingSet on every accessible process so
+  // each one's resident pages get demoted to the standby list, where
+  // Windows' memory manager can reclaim them on demand. Doesn't free
+  // memory in the "available" column directly (Windows treats standby as
+  // available already), but it frees up working sets and removes the
+  // Active-vs-standby pressure RAMMap-style. No elevation required for
+  // user-owned processes; system-protected ones quietly fail and get
+  // counted as 'failed'.
+  ipcMain.handle('flush-ram', async () => {
+    const ps =
+      'Add-Type -MemberDefinition \'[DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(IntPtr h);\' ' +
+      '-Name MM -Namespace W -ErrorAction SilentlyContinue; ' +
+      '$f = 0; $x = 0; ' +
+      'Get-Process | ForEach-Object { ' +
+        'try { if ([W.MM]::EmptyWorkingSet($_.Handle)) { $f++ } else { $x++ } } catch { $x++ } ' +
+      '}; ' +
+      'ConvertTo-Json @{ flushed = $f; failed = $x }';
+    const r = await runPowerShell(ps, { timeout: 30000 });
+    return r || { ok: false, error: 'powershell failed' };
+  });
+
+  // App version — pulled from package.json by Electron at app start, so the
+  // topbar chip stays in sync with the manifest without a renderer rebuild.
+  ipcMain.handle('app-version', () => app.getVersion());
+
+  // Main-process telemetry for the diagnostics overlay. RSS = total
+  // resident memory of the main proc; heap = V8 heap; uptime = seconds
+  // since main spawned. The renderer polls this on the same interval
+  // as the rest of the diag block.
+  ipcMain.handle('process-stats', () => {
+    const m = process.memoryUsage();
+    return {
+      rss:       m.rss,
+      heapUsed:  m.heapUsed,
+      heapTotal: m.heapTotal,
+      external:  m.external,
+      uptimeSec: process.uptime(),
+      pid:       process.pid,
+    };
+  });
+
+  // User-folder paths. Renderer calls these when it needs to write a screenshot
+  // / saved doc / generated image into the on-disk folders that ensureUserFolders
+  // creates next to the .exe at app start.
+  ipcMain.handle('gallery-path', () => galleryFolderPath());
+  ipcMain.handle('docs-path',    () => docsFolderPath());
+
+  // Folder browsing — recursive listing scoped to the gallery / docs roots
+  // so the EXPLORE pane can render a flat-but-grouped file list with sizes
+  // and mtimes. `subdir` is treated as a relative path under the root and
+  // any traversal outside that root is rejected.
+  function listFolder(rootFn) {
+    return (_e, subdir = '') => {
+      const root = rootFn();
+      const target = path.resolve(root, String(subdir || ''));
+      if (!target.startsWith(root)) return { error: 'path outside root' };
+      try {
+        const entries = fs.readdirSync(target, { withFileTypes: true });
+        const out = entries.map((d) => {
+          const full = path.join(target, d.name);
+          let size = 0, mtime = 0;
+          try { const st = fs.statSync(full); size = st.size; mtime = st.mtimeMs; } catch {}
+          return {
+            name: d.name,
+            path: full,
+            rel:  path.relative(root, full).replace(/\\/g, '/'),
+            isDir: d.isDirectory(),
+            size,
+            mtime,
+          };
+        });
+        // Folders first, then files; within each group sort by mtime desc.
+        out.sort((a, b) => (Number(b.isDir) - Number(a.isDir)) || (b.mtime - a.mtime));
+        return { entries: out, root };
+      } catch (err) {
+        return { error: err.message };
+      }
+    };
+  }
+  ipcMain.handle('gallery-list', listFolder(galleryFolderPath));
+  ipcMain.handle('docs-list',    listFolder(docsFolderPath));
+
+  // Write a doc file (notes / paper auto-export). `rel` is a relative path
+  // under the docs root; any traversal outside is rejected. Parents are
+  // created on demand so callers can drop a `notes/<tab>.txt`.
+  ipcMain.handle('docs-write', (_e, rel, content) => {
+    const root = docsFolderPath();
+    const target = path.resolve(root, String(rel || ''));
+    if (!target.startsWith(root)) return { ok: false, error: 'path outside docs/' };
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, String(content ?? ''), 'utf8');
+      return { ok: true, path: target };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Copy selected files to the OS clipboard as Windows file objects
+  // (CF_HDROP). Paste them into Explorer / Photos / chat apps just like
+  // a normal Ctrl+C from Explorer would. Uses PowerShell Set-Clipboard
+  // -Path which writes the proper shell-clipboard format.
+  ipcMain.handle('clipboard-copy-files', (_e, paths) => {
+    const arr = (Array.isArray(paths) ? paths : [])
+      .map((p) => path.resolve(String(p || '')))
+      .filter((p) => _pathInsideManagedRoot(p));
+    if (!arr.length) return Promise.resolve({ ok: false, error: 'no valid paths' });
+    const escaped = arr.map((p) => `'${p.replace(/'/g, "''")}'`).join(',');
     return new Promise((resolve) => {
       execFile('powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', launcher],
-        { timeout: 15000, windowsHide: true },
-        (err) => resolve({ ok: !err, error: err ? String(err.message || err) : null }),
+        ['-NoProfile', '-NonInteractive', '-Command', `Set-Clipboard -Path ${escaped}`],
+        { timeout: 6000, windowsHide: true },
+        (err) => resolve(err
+          ? { ok: false, error: err.message }
+          : { ok: true, count: arr.length }),
       );
     });
+  });
+
+  // Fullscreen contact-sheet — grid of selected images, useful when the
+  // user wants to scan many gallery shots at once. Same frameless / FS /
+  // always-on-top window pattern as the single-image viewer; ESC, Space,
+  // or any non-image click closes it.
+  let _contactSheetWin = null;
+  ipcMain.handle('open-contact-sheet', (_e, paths) => {
+    const tiles = [];
+    for (const raw of (Array.isArray(paths) ? paths : [])) {
+      const abs = path.resolve(String(raw || ''));
+      const root = _managedRootFor(abs);
+      if (!root) continue;
+      const which = root === galleryFolderPath() ? 'gallery' : 'docs';
+      const rel = path.relative(root, abs).replace(/\\/g, '/');
+      tiles.push({
+        url:  `dash3d-file://${which}/${encodeURI(rel)}`,
+        name: path.basename(abs),
+      });
+    }
+    if (!tiles.length) return { ok: false, error: 'nothing valid to display' };
+    if (_contactSheetWin && !_contactSheetWin.isDestroyed()) {
+      try { _contactSheetWin.close(); } catch {}
+    }
+    const display = screen.getPrimaryDisplay();
+    const w = new BrowserWindow({
+      x: display.bounds.x, y: display.bounds.y,
+      width:  display.bounds.width,
+      height: display.bounds.height,
+      frame: false,
+      fullscreen: true,
+      alwaysOnTop: true,
+      backgroundColor: '#000000',
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+    _contactSheetWin = w;
+    const tilesHtml = tiles.map((t) =>
+      `<div class="t"><img src="${t.url}" alt=""><span>${t.name.replace(/[<>"&]/g, (c) => ({
+        '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;',
+      })[c])}</span></div>`).join('');
+    // Auto-fit: pick the column count that maximizes the per-tile size
+    // given the viewport's aspect ratio. When the last row is partial
+    // (N not a multiple of bestCols) we render on a 2x-dense grid
+    // (`repeat(bestCols * 2, 1fr)`, each tile spans 2 cells) and offset
+    // the first item of the last row by `bestCols - lastRowCount` dense
+    // columns so the leftover tiles read as centered instead of pinned
+    // to the left. Recomputes on resize.
+    const layoutJs =
+      `const N = ${tiles.length};\n` +
+      `function layout() {\n` +
+      `  const W = innerWidth, H = innerHeight;\n` +
+      `  let bestCols = 1, bestSize = 0;\n` +
+      `  for (let c = 1; c <= N; c++) {\n` +
+      `    const r = Math.ceil(N / c);\n` +
+      `    const s = Math.min(W / c, H / r);\n` +
+      `    if (s > bestSize) { bestSize = s; bestCols = c; }\n` +
+      `  }\n` +
+      `  const rows = Math.ceil(N / bestCols);\n` +
+      `  const lastRow = N - (rows - 1) * bestCols;\n` +
+      `  const partial = lastRow > 0 && lastRow < bestCols;\n` +
+      `  const g = document.querySelector('.g');\n` +
+      `  const ts = document.querySelectorAll('.t');\n` +
+      `  ts.forEach(t => { t.style.gridColumn = ''; t.style.gridColumnStart = ''; });\n` +
+      `  g.style.gridTemplateRows = 'repeat(' + rows + ', 1fr)';\n` +
+      `  if (partial) {\n` +
+      `    g.style.gridTemplateColumns = 'repeat(' + (bestCols * 2) + ', 1fr)';\n` +
+      `    ts.forEach(t => { t.style.gridColumn = 'span 2'; });\n` +
+      `    const firstLast = (rows - 1) * bestCols;\n` +
+      `    const offset = bestCols - lastRow;\n` +
+      `    if (ts[firstLast]) ts[firstLast].style.gridColumnStart = offset + 1;\n` +
+      `  } else {\n` +
+      `    g.style.gridTemplateColumns = 'repeat(' + bestCols + ', 1fr)';\n` +
+      `  }\n` +
+      `}\n` +
+      `layout();\n` +
+      `addEventListener('resize', layout);\n` +
+      `addEventListener('keydown', e => { if (e.key === 'Escape' || e.key === ' ') window.close(); });\n` +
+      `addEventListener('click',   e => { if (e.target.tagName !== 'IMG') window.close(); });\n`;
+    const html =
+      `<!doctype html><html><head><meta charset="utf-8"><style>` +
+      `html,body{margin:0;height:100%;background:#000;color:#cfe6f7;` +
+      `font:10px 'Share Tech Mono',monospace;overflow:hidden;cursor:zoom-out;}` +
+      `.g{display:grid;gap:2px;padding:0;width:100vw;height:100vh;}` +
+      `.t{display:flex;flex-direction:column;min-height:0;min-width:0;background:#0a0a0a;}` +
+      `.t img{flex:1 1 auto;min-height:0;min-width:0;width:100%;object-fit:contain;` +
+      `background:#000;cursor:zoom-in;}` +
+      `.t span{padding:2px 6px;letter-spacing:0.05em;color:#cfe6f7;opacity:0.7;` +
+      `white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;}` +
+      `</style></head><body><div class="g">${tilesHtml}</div>` +
+      `<script>${layoutJs}</script></body></html>`;
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.on('closed', () => { if (_contactSheetWin === w) _contactSheetWin = null; });
+    return { ok: true, count: tiles.length };
+  });
+
+  // Fullscreen image viewer — frameless always-on-top BrowserWindow
+  // showing one image from the gallery, fit-to-window. ESC or any click
+  // closes it. The image is loaded via the dash3d-file:// scheme so it
+  // benefits from the same managed-root path validation.
+  let _imageViewerWin = null;
+  ipcMain.handle('open-image-viewer', (_e, abs) => {
+    const p = path.resolve(String(abs || ''));
+    const root = _managedRootFor(p);
+    if (!root) return { ok: false, error: 'path outside managed roots' };
+    const which = root === galleryFolderPath() ? 'gallery' : 'docs';
+    const rel   = path.relative(root, p).replace(/\\/g, '/');
+    if (_imageViewerWin && !_imageViewerWin.isDestroyed()) {
+      try { _imageViewerWin.close(); } catch {}
+    }
+    const display = screen.getPrimaryDisplay();
+    const w = new BrowserWindow({
+      x: display.bounds.x, y: display.bounds.y,
+      width:  display.bounds.width,
+      height: display.bounds.height,
+      frame: false,
+      fullscreen: true,
+      alwaysOnTop: true,
+      backgroundColor: '#000000',
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+    _imageViewerWin = w;
+    // Use the host-as-root URL shape (matches the protocol handler);
+    // drive-letter paths in URL paths were getting mangled by the parser.
+    const url = `dash3d-file://${which}/${encodeURI(rel)}`;
+    const html =
+      `<!doctype html><html><head><meta charset="utf-8"><style>` +
+      `html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:zoom-out;}` +
+      `img{position:fixed;inset:0;margin:auto;max-width:100vw;max-height:100vh;display:block;}` +
+      `</style></head><body><img src="${url}" alt=""><script>` +
+      `addEventListener('keydown',e=>{if(e.key==='Escape')window.close();});` +
+      `addEventListener('click',()=>window.close());` +
+      `</script></body></html>`;
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.on('closed', () => { if (_imageViewerWin === w) _imageViewerWin = null; });
+    return { ok: true };
+  });
+
+  // Open an absolute path in the OS default app — used for clicking
+  // images in the gallery list. Path must resolve under one of our two
+  // managed roots so the renderer can't ask main to launch arbitrary files.
+  ipcMain.handle('shell-open-path', async (_e, abs) => {
+    const p = path.resolve(String(abs || ''));
+    if (!_pathInsideManagedRoot(p)) return { ok: false, error: 'path outside managed roots' };
+    try {
+      const err = await shell.openPath(p);
+      return err ? { ok: false, error: err } : { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Create a new folder under one of the managed roots. `which` is
+  // 'gallery' or 'docs', `rel` is the relative path of the new folder.
+  ipcMain.handle('explore-mkdir', (_e, which, rel) => {
+    const root = which === 'gallery' ? galleryFolderPath() : docsFolderPath();
+    const target = path.resolve(root, String(rel || ''));
+    if (!target.startsWith(root) || target === root) return { ok: false, error: 'invalid path' };
+    try {
+      fs.mkdirSync(target, { recursive: false });
+      return { ok: true, path: target };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Rename a file or folder. Both source and destination must resolve
+  // inside the same managed root so the renderer can't move files
+  // between gallery/docs or out into the rest of the filesystem.
+  ipcMain.handle('explore-rename', (_e, oldAbs, newName) => {
+    const oldP = path.resolve(String(oldAbs || ''));
+    const root = _managedRootFor(oldP);
+    if (!root) return { ok: false, error: 'path outside managed roots' };
+    const cleanName = String(newName || '').trim().replace(/[\\/]/g, '');
+    if (!cleanName || cleanName === '.' || cleanName === '..') return { ok: false, error: 'invalid name' };
+    const newP = path.resolve(path.dirname(oldP), cleanName);
+    if (!newP.startsWith(root)) return { ok: false, error: 'rename leaves managed root' };
+    try {
+      fs.renameSync(oldP, newP);
+      return { ok: true, path: newP };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Move a file or folder to the OS trash. We use shell.trashItem rather
+  // than fs.rmSync so the user can recover from a misclick from Explorer's
+  // Recycle Bin without us having to maintain our own undo state.
+  ipcMain.handle('explore-delete', async (_e, abs) => {
+    const p = path.resolve(String(abs || ''));
+    if (!_pathInsideManagedRoot(p)) return { ok: false, error: 'path outside managed roots' };
+    if (p === galleryFolderPath() || p === docsFolderPath()) {
+      return { ok: false, error: 'cannot delete the managed root itself' };
+    }
+    try {
+      await shell.trashItem(p);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 
   ipcMain.handle('set-power-profile', async (_e, opts) => {
@@ -894,6 +1619,7 @@ function registerIpc() {
     if (!next) win.setBounds(getWorkArea());
     return next;
   });
+
 }
 
 // ─── DISK I/O ──────────────────────────────────────────────────────
@@ -1146,12 +1872,21 @@ async function getScreenSources() {
 }
 
 // ─── CONFIG PERSISTENCE ────────────────────────────────────────────
-// User config lives in %APPDATA%\Dashboard3D\config.json. Bundled
-// defaults (next to main.js) are layered underneath so a fresh install
-// boots into a curated layout while user edits persist per-key.
+// Packaged builds keep config in a `userdata/` folder next to the .exe
+// so the whole app (incl. user prefs, gallery, docs) is portable — copy
+// the folder to a USB stick and it Just Works.
+// Dev mode keeps using %APPDATA% so the project tree stays clean.
+function portableDataDir() {
+  if (app.isPackaged) {
+    const dir = path.join(path.dirname(app.getPath('exe')), 'userdata');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    return dir;
+  }
+  return app.getPath('userData');
+}
 
 function configFilePath() {
-  return path.join(app.getPath('userData'), 'config.json');
+  return path.join(portableDataDir(), 'config.json');
 }
 
 // Bundled defaults (next to main.js). Loaded once and merged under each
@@ -1552,6 +2287,139 @@ function driveTypeName(t) {
     case 6: return 'RAM';
     default: return 'Unknown';
   }
+}
+
+// ─── TRANSFERS ─────────────────────────────────────────────────────
+// Active downloads / file transfers in the user's Downloads folder.
+// A file counts as "active" if it either has a partial-download
+// extension (browsers / torrent clients write to one of these while
+// the bytes are still streaming in) OR it grew between the previous
+// poll and this one. Per-file state is kept in TRANSFER_STATE so we
+// can compute bytes/sec across polls. Entries are pruned once they
+// stop growing for long enough that they're clearly done.
+const TRANSFER_STATE = new Map(); // path -> { size, mtimeMs, sampledAt, speed, firstSeen, peakSize }
+const TRANSFER_PARTIAL_EXT = /\.(crdownload|part|partial|download|opdownload|tmp|!ut|!qb|bc!|aria2)$/i;
+const TRANSFER_STALE_MS    = 8000;   // drop tracked file if untouched this long
+const TRANSFER_ACTIVE_MS   = 6000;   // mtime within this window counts as active
+const TRANSFER_BITS_EVERY  = 10;     // run Get-BitsTransfer once every N polls (PowerShell startup is slow)
+let   TRANSFER_BITS_TICK   = 0;
+
+async function getTransfersInfo() {
+  if (process.platform !== 'win32') return [];
+  const dir = path.join(os.homedir(), 'Downloads');
+  let entries;
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
+  catch { return []; }
+
+  const now = Date.now();
+  const out = [];
+  const seenPaths = new Set();
+
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    const full = path.join(dir, ent.name);
+    let st;
+    try { st = await fs.promises.stat(full); } catch { continue; }
+    if (st.size <= 0 && !TRANSFER_PARTIAL_EXT.test(ent.name)) continue;
+
+    seenPaths.add(full);
+    const prev = TRANSFER_STATE.get(full);
+    const partial = TRANSFER_PARTIAL_EXT.test(ent.name);
+    const recent  = (now - st.mtimeMs) < TRANSFER_ACTIVE_MS;
+    const grew    = prev ? st.size > prev.size : false;
+
+    // Update tracked state for every observed file so we have a
+    // baseline next poll even if it's not active yet.
+    let speed = 0;
+    if (prev) {
+      const dt = (now - prev.sampledAt) / 1000;
+      if (dt > 0 && st.size >= prev.size) speed = (st.size - prev.size) / dt;
+      // Smooth wildly bursty samples a bit (exp moving average).
+      if (prev.speed > 0) speed = prev.speed * 0.5 + speed * 0.5;
+    }
+    const firstSeen = prev?.firstSeen ?? now;
+    const peakSize  = Math.max(prev?.peakSize ?? 0, st.size);
+    TRANSFER_STATE.set(full, {
+      size: st.size, mtimeMs: st.mtimeMs, sampledAt: now,
+      speed, firstSeen, peakSize,
+    });
+
+    const isActive = partial || recent || grew || (prev && (now - prev.sampledAt) < TRANSFER_STALE_MS && speed > 0);
+    if (!isActive) continue;
+
+    // We have no authoritative "total size" from the filesystem alone
+    // (Chrome's .crdownload doesn't expose the Content-Length). We can
+    // estimate by holding the largest size seen, which makes the bar
+    // grow monotonically. For a true progress %, BITS jobs (below)
+    // override this with real BytesTotal.
+    const total    = peakSize > st.size ? peakSize : null;
+    const progress = total && total > 0 ? Math.min(1, st.size / total) : null;
+
+    out.push({
+      id: full,
+      name: ent.name,
+      kind: partial ? 'download' : 'copy',
+      size: st.size,
+      total,
+      progress,
+      speed,
+      source: 'Downloads',
+      isPartial: partial,
+    });
+  }
+
+  // Get-BitsTransfer: catches Windows Update + any app routing through
+  // BITS. These DO expose a real total → real %. Throttled to one call
+  // every TRANSFER_BITS_EVERY polls because PowerShell startup is
+  // ~500 ms — running it every poll pegs a CPU core and starves other
+  // main-process work.
+  try {
+    const shouldRunBits = (++TRANSFER_BITS_TICK % TRANSFER_BITS_EVERY) === 1;
+    const arr = shouldRunBits ? await (async () => {
+      const bitsPs = `Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue |
+        Where-Object { $_.JobState -in 'Transferring','Connecting','Queued' } |
+        Select-Object @{n='id';e={[string]$_.JobId}}, DisplayName, BytesTotal, BytesTransferred, TransferType |
+        ConvertTo-Json -Compress -Depth 2`;
+      const r = await runPowerShell(bitsPs, { timeout: 2500 });
+      return r == null ? [] : (Array.isArray(r) ? r : [r]);
+    })() : [];
+    for (const j of arr) {
+      const tot = Number(j.BytesTotal) || 0;
+      const cur = Number(j.BytesTransferred) || 0;
+      const prev = TRANSFER_STATE.get('bits:' + j.id);
+      let speed = 0;
+      if (prev) {
+        const dt = (now - prev.sampledAt) / 1000;
+        if (dt > 0 && cur >= prev.size) speed = (cur - prev.size) / dt;
+        if (prev.speed > 0) speed = prev.speed * 0.5 + speed * 0.5;
+      }
+      TRANSFER_STATE.set('bits:' + j.id, { size: cur, mtimeMs: now, sampledAt: now, speed, firstSeen: prev?.firstSeen ?? now, peakSize: tot });
+      seenPaths.add('bits:' + j.id);
+      out.push({
+        id: 'bits:' + j.id,
+        name: j.DisplayName || 'BITS Transfer',
+        kind: 'bits',
+        size: cur,
+        total: tot > 0 ? tot : null,
+        progress: tot > 0 ? Math.min(1, cur / tot) : null,
+        speed,
+        source: String(j.TransferType || 'BITS').toUpperCase(),
+        isPartial: false,
+      });
+    }
+  } catch {}
+
+  // Garbage-collect tracked entries that vanished or went quiet so
+  // the Map doesn't grow forever.
+  for (const [k, v] of TRANSFER_STATE) {
+    if (!seenPaths.has(k) && (now - v.sampledAt) > TRANSFER_STALE_MS) {
+      TRANSFER_STATE.delete(k);
+    }
+  }
+
+  // Active first, by speed.
+  out.sort((a, b) => (b.speed || 0) - (a.speed || 0));
+  return out;
 }
 
 async function getStoragePosix() {

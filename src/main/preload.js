@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('dash', {
   tempsInfo:   () => ipcRenderer.invoke('temps-info'),
   netInfo:     () => ipcRenderer.invoke('net-info'),
   diskInfo:    () => ipcRenderer.invoke('disk-info'),
+  transfersInfo: () => ipcRenderer.invoke('transfers-info'),
   getConfig:   () => ipcRenderer.invoke('config-get'),
   setConfig:   (partial) => ipcRenderer.invoke('config-set', partial),
   configPath:  () => ipcRenderer.invoke('config-path'),
@@ -28,22 +29,25 @@ contextBridge.exposeInMainWorld('dash', {
   // is matched against the registry's friendly-name (substring, both ways).
   setDefaultEndpoint: (dataFlow, name) => ipcRenderer.invoke('audio-set-default-endpoint', { dataFlow, name }),
 
-  // Web browser pane.
-  installWebAdblock: (partition) => ipcRenderer.invoke('web-install-adblock', partition),
-  // Use Chromium's auto-dark-mode emulation on the webview's embedded
-  // webContents (passed in by id from <webview>.getWebContentsId()).
-  forceWebDark: (contentsId) => ipcRenderer.invoke('web-force-dark', contentsId),
-  onWebRequestBlocked: (callback) => {
-    const handler = (_e, host) => callback(host);
-    ipcRenderer.on('web-request-blocked', handler);
-    return () => ipcRenderer.removeListener('web-request-blocked', handler);
-  },
-
   // Full app restart (relaunch main + renderer) — for changes that only
   // take effect at process start or at BrowserWindow creation.
   appRelaunch:    () => ipcRenderer.invoke('app-relaunch'),
   appQuit:        () => ipcRenderer.invoke('app-quit'),
-  setAirplaneMode: (on) => ipcRenderer.invoke('airplane-mode', !!on),
+  appVersion:     () => ipcRenderer.invoke('app-version'),
+  processStats:   () => ipcRenderer.invoke('process-stats'),
+  galleryPath:    () => ipcRenderer.invoke('gallery-path'),
+  docsPath:       () => ipcRenderer.invoke('docs-path'),
+  galleryList:    (subdir = '') => ipcRenderer.invoke('gallery-list', subdir),
+  docsList:       (subdir = '') => ipcRenderer.invoke('docs-list',    subdir),
+  docsWrite:      (rel, content) => ipcRenderer.invoke('docs-write', rel, content),
+  shellOpenPath:  (abs) => ipcRenderer.invoke('shell-open-path', abs),
+  openImageViewer:    (abs)   => ipcRenderer.invoke('open-image-viewer', abs),
+  openContactSheet:   (paths) => ipcRenderer.invoke('open-contact-sheet', paths),
+  clipboardCopyFiles: (paths) => ipcRenderer.invoke('clipboard-copy-files', paths),
+  exploreMkdir:   (which, rel)  => ipcRenderer.invoke('explore-mkdir',  which, rel),
+  exploreRename:  (oldAbs, newName) => ipcRenderer.invoke('explore-rename', oldAbs, newName),
+  exploreDelete:  (abs) => ipcRenderer.invoke('explore-delete', abs),
+  flushRam:        () => ipcRenderer.invoke('flush-ram'),
 
   // Set Windows power-scheme processor min/max state (used to throttle CPU
   // during zen mode and restore performance on resume).
@@ -51,9 +55,51 @@ contextBridge.exposeInMainWorld('dash', {
 
   openYoutube: () => ipcRenderer.invoke('open-youtube'),
   setYoutubeZenMode: (on) => ipcRenderer.invoke('set-youtube-zen-mode', on),
+
   onForceLeaveZen: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('force-leave-zen', handler);
     return () => ipcRenderer.removeListener('force-leave-zen', handler);
+  },
+
+  // Embedded BROWSER pane: live ad-block counter (popups are intercepted
+  // in main's app-level web-contents-created handler). Push subscription
+  // fires whenever the main process tallies a new block (throttled to 4 Hz).
+  browserGetStats:   () => ipcRenderer.invoke('browser-get-stats'),
+  browserResetStats: () => ipcRenderer.invoke('browser-reset-stats'),
+  onBrowserStats: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on('browser-stats', handler);
+    return () => ipcRenderer.removeListener('browser-stats', handler);
+  },
+
+  // BrowserView-backed tabs. Renderer drives state via these calls; main
+  // owns the native views. browserTabBounds is sent every time the host
+  // panel resizes so the view tracks our layout.
+  browserTabCreate:   (url)        => ipcRenderer.invoke('browser-tab-create', url),
+  browserTabClose:    (id)         => ipcRenderer.invoke('browser-tab-close', id),
+  browserTabNavigate: (id, url)    => ipcRenderer.invoke('browser-tab-navigate', id, url),
+  browserTabBack:     (id)         => ipcRenderer.invoke('browser-tab-back', id),
+  browserTabForward:  (id)         => ipcRenderer.invoke('browser-tab-forward', id),
+  browserTabReload:   (id)         => ipcRenderer.invoke('browser-tab-reload', id),
+  browserTabActivate: (id)         => ipcRenderer.invoke('browser-tab-activate', id),
+  browserTabBounds:   (rect)       => ipcRenderer.invoke('browser-tab-bounds', rect),
+  onBrowserTabEvent: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on('browser-tab-event', handler);
+    return () => ipcRenderer.removeListener('browser-tab-event', handler);
+  },
+
+  // Scrape DuckDuckGo's HTML endpoint for clean web results. Main does
+  // the fetch (CORS-free) and returns raw HTML; renderer parses.
+  browserSearch: (query, kind, page) => ipcRenderer.invoke('browser-search', query, kind, page),
+
+  // Popup → new tab. Main intercepts every window.open / target=_blank
+  // path (both top-level and iframes) and pushes the URL back here. The
+  // renderer responds by spawning a fresh tab on the BrowserView side.
+  onBrowserNewTabRequest: (callback) => {
+    const handler = (_e, url) => callback(url);
+    ipcRenderer.on('browser-newtab-request', handler);
+    return () => ipcRenderer.removeListener('browser-newtab-request', handler);
   },
 });

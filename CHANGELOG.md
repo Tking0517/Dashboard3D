@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.0] — 2026-05-11
+
+### In-pane web browser
+- **New BROWSER combo-pane** — full lightweight browser inside the dashboard: per-tab BrowserView, tab strip with rename/close, back/forward/reload/home/bookmark nav row, persistent bookmarks bar, splash screen ("PRIVATE BROWSING") with address + search inputs and live ads/popups counters
+- **Private by default** — `partition: 'dash-browser'` (no `persist:` prefix), so cookies/cache/history die with the dashboard
+- **Hybrid search** — every web search fans out in parallel to DuckDuckGo HTML, Bing, Brave, Yahoo, and Google, parsed per-engine with DOMParser, deduped by canonical URL (strips www, trailing slash, UTM/fbclid/gclid), then interleaved by proportional position-rank `(idx + 0.5) / engineSize` so engines with different result counts blend smoothly instead of clumping by source
+- **Image + video search** — DDG's `i.js` / `v.js` JSON endpoints via vqd token handshake, rendered as grids; left-click → source page, shift/middle-click → raw image
+- **Ad/tracker blocking** — `webRequest.onBeforeRequest` substring blocklist (DoubleClick, Google Ads, Facebook pixels, Hotjar, Mixpanel, etc.); live counter throttled to 4 Hz pushes to the splash
+- **Popup blocking with new-tab redirect** — app-level `web-contents-created` handler with `setWindowOpenHandler` covers both top-level `window.open` and iframe popups (sign-in widgets, embeds); blocked popups become new tabs instead of disappearing, so the user's flow isn't lost
+- **Saved layouts persistence** — `activeLayoutSlot` config key now tracks which slot the user last loaded/saved, so reopening the dashboard restores the same arrangement instead of falling back to side-arrange
+- **Lazy BrowserView allocation** — the BV is only created on first navigation, not when entering the BROWSER pane, to avoid spawning a fresh Chromium renderer process during the dashboard's cold start (was contributing to the GPU spike that flipped the emergency UI red)
+
+### BrowserView bounds, CSS-zoom-aware
+- Bounds are now sent to main as **fractional rects** (0–1 of the dashboard viewport) and resolved to DIPs against `BrowserWindow.getContentBounds()` at apply time — zoom-invariant
+- Walks ancestors for cumulative CSS `zoom` (the `.combo-body` rule applies `zoom: 1.2`), multiplied into the rect so the BV matches the **visual** stage size, not its pre-zoom layout box
+- 500 ms heartbeat plus ResizeObserver + MutationObserver on the panel and its parent stack keep the view tracking through drags, fold transitions, and saved-layout restores
+
+### FFT scaling
+- audify-worker now clamps each band at 250 (was 100) with a lower base multiplier — gives the renderer's AGC enough dynamic range to normalize loud passages without saturating to a flat ceiling before normalization
+
 ## [0.5.1] — 2026-05-10
 
 ### Coder-friendliness pass

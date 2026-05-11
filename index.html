@@ -13,6 +13,34 @@
       <div class="bg-grid"></div>
       <div class="bg-grid-overlay" id="bg-grid-overlay"></div>
 
+      <!-- Background diagnostics overlay (toggled by #diag-btn).
+           One element per line so each can pulse on its own clock —
+           giving the block a "live process" feel rather than synchronous
+           breathing. JS assigns randomized animation-delay per line on
+           first show. -->
+      <div id="diag-overlay" class="diag-overlay" hidden>
+        <div class="diag-block" id="diag-content">
+          <div class="diag-line" data-key="title">DASHBOARD3D —</div>
+          <div class="diag-line diag-gap"></div>
+          <div class="diag-line" data-key="rheap">R-HEAP   —</div>
+          <div class="diag-line" data-key="mrss">M-RSS    —</div>
+          <div class="diag-line" data-key="nodes">NODES    —</div>
+          <div class="diag-line" data-key="canvas">CANVAS   —</div>
+          <div class="diag-line diag-gap"></div>
+          <div class="diag-line" data-key="fps">FPS      —</div>
+          <div class="diag-line" data-key="draws">DRAWS/S  —</div>
+          <div class="diag-line" data-key="viewport">VIEWPORT —</div>
+          <div class="diag-line diag-gap"></div>
+          <div class="diag-line" data-key="audioin">AUDIO IN  —</div>
+          <div class="diag-line" data-key="audioout">AUDIO OUT —</div>
+          <div class="diag-line" data-key="mode">MODE      —</div>
+          <div class="diag-line diag-gap"></div>
+          <div class="diag-line" data-key="theme">THEME    —</div>
+          <div class="diag-line" data-key="alerts">ALERTS   —</div>
+          <div class="diag-line" data-key="up">UP       —</div>
+        </div>
+      </div>
+
       <!-- Floating webcam preview. Hidden until the user clicks the camera
            button in the top bar. Drag to move; close with the × chip. -->
       <!-- Terminal / diagnostics overlay. Floating, draggable, scrollable.
@@ -150,6 +178,8 @@
       </div>
 
       <div class="topbar-controls">
+        <!-- ── Theme / appearance group ─────────────────────────────── -->
+        <span id="version-chip" class="theme-name version-chip" title="Dashboard3D version">v—</span>
         <span id="theme-name" class="theme-name">DEFAULT</span>
         <button id="theme-btn" class="topbar-btn" type="button" title="Cycle theme" aria-label="Cycle theme">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -166,7 +196,6 @@
           </svg>
         </button>
 
-        <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
         <span id="font-name" class="theme-name">DEFAULT</span>
         <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -174,38 +203,6 @@
             <path d="M6.5 14 H11.5"/>
             <path d="M16 19 V9"/>
             <path d="M14 11.5 Q16 9 18 11.5"/>
-          </svg>
-        </button>
-
-        <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
-
-        <button id="refresh-btn" class="topbar-btn" type="button" title="Reload (F5)" aria-label="Reload">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 12a9 9 0 0 1 15.5-6.4"/>
-            <path d="M21 5v4h-4"/>
-            <path d="M21 12a9 9 0 0 1-15.5 6.4"/>
-            <path d="M3 19v-4h4"/>
-          </svg>
-        </button>
-
-        <button id="restart-btn" class="topbar-btn" type="button" title="Full restart (relaunches main + renderer)" aria-label="Full restart">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 4 V2 L9 5 L12 8 V6"/>
-            <path d="M12 6 a8 8 0 1 1 -8 8"/>
-            <circle cx="12" cy="13" r="1.2" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-
-        <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M6 6 L18 18"/>
-            <path d="M18 6 L6 18"/>
-          </svg>
-        </button>
-
-        <button id="airplane-btn" class="topbar-btn" type="button" title="Airplane mode (disables network adapters · requires admin)" aria-label="Airplane mode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12 L13 12 L11 20 L9 20 L9.5 12 L3 12 L4 9 L9.5 9 L9 4 L11 4 L13 9 L21 9 Z"/>
           </svg>
         </button>
 
@@ -223,8 +220,77 @@
           </svg>
         </button>
 
+        <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
+
+        <!-- ── Panel debug group ────────────────────────────────────── -->
+        <button id="recall-panels-btn" class="topbar-btn" type="button" title="Recall panels (snap any off-screen panel back into the viewport)" aria-label="Recall panels">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="6" width="12" height="12"/>
+            <path d="M2 6 L6 6 L6 2"/>
+            <path d="M22 6 L18 6 L18 2"/>
+            <path d="M2 18 L6 18 L6 22"/>
+            <path d="M22 18 L18 18 L18 22"/>
+          </svg>
+        </button>
+
+        <!-- Saved layout slots. STORE arms save mode (~5s); next slot
+             click writes the current layout to that slot. Empty slots are
+             dimmed; click a filled slot to restore that layout. -->
+        <button id="save-layout-btn" class="topbar-btn" type="button" title="Store current layout (click, then click a slot 1/2/3)" aria-label="Store layout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 4 H17 L20 7 V20 H4 V5 Z"/>
+            <rect x="8" y="4"  width="8" height="5"/>
+            <rect x="7" y="13" width="10" height="7"/>
+          </svg>
+        </button>
+        <button id="layout-slot-1" class="topbar-btn topbar-slot" type="button" data-slot="1" title="Layout slot 1" aria-label="Layout slot 1">1</button>
+        <button id="layout-slot-2" class="topbar-btn topbar-slot" type="button" data-slot="2" title="Layout slot 2" aria-label="Layout slot 2">2</button>
+        <button id="layout-slot-3" class="topbar-btn topbar-slot" type="button" data-slot="3" title="Layout slot 3" aria-label="Layout slot 3">3</button>
+
+        <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
+
+        <!-- ── Mode + system group ──────────────────────────────────── -->
+        <button id="lock-ui-btn" class="topbar-btn" type="button" title="Lock UI (prevents panel drag, resize, and topbar reorder)" aria-label="Lock UI">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="5" y="11" width="14" height="9" rx="1"/>
+            <path d="M8 11 V7 a4 4 0 0 1 8 0 V11"/>
+            <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
+        <button id="diag-btn" class="topbar-btn" type="button" title="Toggle diagnostics overlay" aria-label="Toggle diagnostics overlay">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18"/>
+            <path d="M3 9 H21 M9 3 V21"/>
+            <circle cx="6" cy="6" r="0.8" fill="currentColor"/>
+          </svg>
+        </button>
+
+        <button id="flush-ram-btn" class="topbar-btn" type="button" title="Flush RAM (drops working sets to standby for every accessible process)" aria-label="Flush RAM">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="8" width="18" height="9" rx="1"/>
+            <path d="M7 8 V6 M11 8 V6 M15 8 V6 M19 8 V6"/>
+            <path d="M7 17 V19 M11 17 V19 M15 17 V19 M19 17 V19"/>
+            <path d="M6 12 H10 M14 12 H18"/>
+          </svg>
+        </button>
+
+        <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
+          <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
+            <path d="M16 9 Q18 12 16 15"/>
+            <path d="M19 7 Q22 12 19 17"/>
+          </svg>
+          <svg class="sfx-icon-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
+            <path d="M16 9 L22 15"/>
+            <path d="M22 9 L16 15"/>
+          </svg>
+        </button>
+
         <span id="topbar-div-3" class="topbar-divider" title="Drag to reposition divider"></span>
 
+        <!-- ── Tools group ──────────────────────────────────────────── -->
         <button id="camera-btn" class="topbar-btn" type="button" title="Webcam" aria-label="Toggle webcam">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 7h4l2-2h6l2 2h4v12H3z"/>
@@ -240,16 +306,23 @@
           </svg>
         </button>
 
+        <button id="youtube-btn" class="topbar-btn" type="button" title="YouTube popout" aria-label="Open YouTube popout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2.5" y="6" width="19" height="12" rx="3"/>
+            <path d="M10 9.5 L15 12 L10 14.5 Z" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
         <button id="zen-btn" class="topbar-btn" type="button" title="Enter zen mode" aria-label="Enter zen mode">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
           </svg>
         </button>
 
-        <button id="youtube-btn" class="topbar-btn" type="button" title="YouTube popout" aria-label="Open YouTube popout">
+        <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2.5" y="6" width="19" height="12" rx="3"/>
-            <path d="M10 9.5 L15 12 L10 14.5 Z" fill="currentColor" stroke="none"/>
+            <path d="M6 6 L18 18"/>
+            <path d="M18 6 L6 18"/>
           </svg>
         </button>
       </div>
@@ -520,15 +593,17 @@
                One panel with a mode toggle so each retains its own UI. -->
           <section class="panel panel-combo" data-mode="notes">
             <header class="panel-header">
-              <span class="panel-title" id="combo-title">NOTES <em>N1</em></span>
-              <span class="panel-code" id="combo-code">SCRATCHPAD</span>
+              <span class="panel-title" id="combo-title">PRODUCTIVITY <em>N1</em></span>
+              <span class="panel-code" id="combo-code">NOTES · SCRATCHPAD</span>
               <span class="panel-id" id="combo-tag">—</span>
             </header>
             <div class="combo-mode-tabs">
               <button type="button" class="combo-mode-tab is-active" data-mode="notes">NOTES</button>
               <button type="button" class="combo-mode-tab" data-mode="chat">CHAT</button>
               <button type="button" class="combo-mode-tab" data-mode="paper">PAPER</button>
-              <button type="button" class="combo-mode-tab" data-mode="web">WEB</button>
+              <button type="button" class="combo-mode-tab" data-mode="explore">EXPLORE</button>
+              <button type="button" class="combo-mode-tab" data-mode="visualizer">VISUALIZER</button>
+              <button type="button" class="combo-mode-tab" data-mode="browser">BROWSER</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -621,32 +696,135 @@
                 ></div>
               </div>
 
-              <!-- WEB pane (lightweight in-panel browser with adblock + tabs) -->
-              <div class="combo-pane combo-pane-web">
-                <div class="web-tabs" id="web-tabs">
-                  <button type="button" class="web-tab-add" id="web-tab-new" title="New tab">＋</button>
-                  <button type="button" class="web-tab-add web-tab-private-add" id="web-tab-new-private" title="New private tab (no history)">⊘</button>
+              <!-- EXPLORE pane (in-panel mini-Explorer for gallery + docs) -->
+              <div class="combo-pane combo-pane-explore" data-explore-tab="gallery">
+                <div class="explore-tabs">
+                  <button type="button" class="explore-tab is-active" data-explore-tab-btn="gallery">GALLERY</button>
+                  <button type="button" class="explore-tab" data-explore-tab-btn="docs">DOCS</button>
                 </div>
-                <div class="web-toolbar">
-                  <button type="button" class="web-btn" id="web-back" title="Back">‹</button>
-                  <button type="button" class="web-btn" id="web-forward" title="Forward">›</button>
-                  <button type="button" class="web-btn" id="web-reload" title="Reload">↻</button>
-                  <button type="button" class="web-btn" id="web-home" title="Home">⌂</button>
-                  <input
-                    id="web-url"
-                    class="web-url"
-                    type="text"
-                    placeholder="ENTER URL OR SEARCH …"
-                    spellcheck="false"
-                    autocomplete="off"
-                  />
-                  <button type="button" class="web-btn" id="web-go" title="Go">→</button>
-                  <span class="web-blocked" id="web-blocked" title="Requests blocked this session">0 BLK</span>
+                <div class="explore-section" data-explore="gallery">
+                  <header class="explore-section-head">
+                    <span class="explore-section-title">GALLERY</span>
+                    <button type="button" class="explore-action" data-explore-up="gallery"      title="Up">↑</button>
+                    <span class="explore-section-path" id="explore-gallery-path">—</span>
+                    <button type="button" class="explore-action" data-explore-mkdir="gallery"   title="New folder">+</button>
+                    <button type="button" class="explore-action" data-explore-delete="gallery"  title="Delete selected (→ Recycle Bin)">🗑</button>
+                    <button type="button" class="explore-action" data-explore-open="gallery"    title="Open in Explorer">⌂</button>
+                    <button type="button" class="explore-action" data-explore-refresh="gallery" title="Refresh">↻</button>
+                  </header>
+                  <ul class="explore-list" id="explore-gallery-list"></ul>
                 </div>
-                <div class="web-view-wrap" id="web-view-wrap">
-                  <!-- webviews are injected here by app.js, one per tab -->
+                <div class="explore-section" data-explore="docs">
+                  <header class="explore-section-head">
+                    <span class="explore-section-title">DOCS</span>
+                    <button type="button" class="explore-action" data-explore-up="docs"         title="Up">↑</button>
+                    <span class="explore-section-path" id="explore-docs-path">—</span>
+                    <button type="button" class="explore-action" data-explore-mkdir="docs"      title="New folder">+</button>
+                    <button type="button" class="explore-action" data-explore-delete="docs"     title="Delete selected (→ Recycle Bin)">🗑</button>
+                    <button type="button" class="explore-action" data-explore-open="docs"       title="Open in Explorer">⌂</button>
+                    <button type="button" class="explore-action" data-explore-refresh="docs"    title="Refresh">↻</button>
+                  </header>
+                  <ul class="explore-list" id="explore-docs-list"></ul>
                 </div>
               </div>
+
+              <!-- VISUALIZER pane (video player; videos auto-route from gallery) -->
+              <div class="combo-pane combo-pane-visualizer">
+                <div class="visualizer-player-wrap">
+                  <canvas id="visualizer-audio-canvas" class="visualizer-audio-canvas"></canvas>
+                  <video id="visualizer-video" class="visualizer-video" controls preload="metadata"></video>
+                  <div class="visualizer-empty" id="visualizer-empty">SYSTEM AUDIO · CLICK A VIDEO BELOW TO PLAY</div>
+                </div>
+                <div class="visualizer-list-head">
+                  <span class="visualizer-list-title">VIDEOS</span>
+                  <span class="visualizer-list-now" id="visualizer-now">—</span>
+                  <button type="button" class="explore-action" id="visualizer-prev-btn" title="Previous">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2" height="14"/><path d="M20 5 L8 12 L20 19 Z"/></svg>
+                  </button>
+                  <button type="button" class="explore-action" id="visualizer-playpause-btn" title="Play / pause">
+                    <svg class="vis-play-icon"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
+                    <svg class="vis-pause-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+                  </button>
+                  <button type="button" class="explore-action" id="visualizer-next-btn" title="Next">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5 L16 12 L4 19 Z"/><rect x="18" y="5" width="2" height="14"/></svg>
+                  </button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-vizoff-btn" title="Toggle audio visualization">V-ON</button>
+                  <button type="button" class="explore-action" id="visualizer-refresh-btn"   title="Refresh">↻</button>
+                </div>
+                <ul class="visualizer-list" id="visualizer-list"></ul>
+              </div>
+
+              <!-- BROWSER pane (lightweight private browser w/ tab strip,
+                   nav row, URL bar, bookmarks bar, and a BrowserView stage
+                   wired to the dash-browser session partition). -->
+              <div class="combo-pane combo-pane-browser">
+                <div class="browser-tabstrip" id="browser-tabstrip">
+                  <button type="button" class="browser-newtab" id="browser-newtab-btn" title="New tab">+</button>
+                </div>
+                <div class="browser-navrow">
+                  <button type="button" class="browser-navbtn" id="browser-back-btn" title="Back" disabled>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 6 L9 12 L15 18 V6 Z"/></svg>
+                  </button>
+                  <button type="button" class="browser-navbtn" id="browser-forward-btn" title="Forward" disabled>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 6 L15 12 L9 18 V6 Z"/></svg>
+                  </button>
+                  <button type="button" class="browser-navbtn" id="browser-reload-btn" title="Reload">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12 A8 8 0 1 0 6 6.5"/><polyline points="3,3 6,6.5 9.5,5"/></svg>
+                  </button>
+                  <button type="button" class="browser-navbtn" id="browser-home-btn" title="Home">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12 L12 4 L20 12"/><path d="M6 11 V20 H18 V11"/></svg>
+                  </button>
+                  <input id="browser-url" class="browser-url" type="text" placeholder="Search or type a URL…" spellcheck="false" autocomplete="off" />
+                  <button type="button" class="browser-navbtn" id="browser-bookmark-btn" title="Bookmark this page">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 4 H18 V21 L12 16 L6 21 Z"/></svg>
+                  </button>
+                </div>
+                <div class="browser-bookmarks" id="browser-bookmarks">
+                  <span class="browser-bookmarks-empty" id="browser-bookmarks-empty">NO BOOKMARKS · CLICK THE FLAG TO SAVE THIS PAGE</span>
+                </div>
+                <div class="browser-stage" id="browser-stage" data-mode="splash">
+                  <div class="browser-splash" id="browser-splash">
+                    <div class="browser-splash-title">PRIVATE BROWSING</div>
+                    <form class="browser-splash-form" id="browser-splash-address-form" autocomplete="off">
+                      <label class="browser-splash-label" for="browser-splash-address">ADDRESS</label>
+                      <input id="browser-splash-address" class="browser-splash-input" type="text" placeholder="example.com" spellcheck="false" />
+                    </form>
+                    <form class="browser-splash-form" id="browser-splash-search-form" autocomplete="off">
+                      <label class="browser-splash-label" for="browser-splash-search">SEARCH</label>
+                      <div class="browser-splash-search-row">
+                        <input id="browser-splash-search" class="browser-splash-input" type="text" placeholder="Type a query…" spellcheck="false" />
+                        <div class="browser-splash-kind" role="tablist">
+                          <button type="button" class="browser-splash-kind-btn is-active" data-kind="web">WEB</button>
+                          <button type="button" class="browser-splash-kind-btn" data-kind="images">IMAGES</button>
+                          <button type="button" class="browser-splash-kind-btn" data-kind="videos">VIDEOS</button>
+                        </div>
+                      </div>
+                    </form>
+                    <div class="browser-splash-stats">
+                      <div class="browser-splash-stat">
+                        <div class="browser-splash-stat-num" id="browser-stat-ads">0</div>
+                        <div class="browser-splash-stat-label">ADS BLOCKED</div>
+                      </div>
+                      <div class="browser-splash-stat">
+                        <div class="browser-splash-stat-num" id="browser-stat-popups">0</div>
+                        <div class="browser-splash-stat-label">POPUPS BLOCKED</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="browser-results" id="browser-results">
+                    <div class="browser-results-head">
+                      <span class="browser-results-label" id="browser-results-label">RESULTS</span>
+                      <span class="browser-results-count" id="browser-results-count">—</span>
+                    </div>
+                    <ul class="browser-results-list" id="browser-results-list"></ul>
+                    <div class="browser-results-grid" id="browser-results-grid"></div>
+                    <button type="button" class="browser-results-loadmore" id="browser-results-loadmore" hidden>LOAD MORE</button>
+                    <div class="browser-results-empty" id="browser-results-empty" hidden>NO RESULTS</div>
+                  </div>
+                  <div class="browser-status" id="browser-status">READY</div>
+                </div>
+              </div>
+
             </div>
             <footer class="panel-footer">
               <span class="footer-label" id="combo-footer-label">NOTES STATUS</span>
@@ -851,6 +1029,24 @@
             <footer class="panel-footer">
               <span class="footer-label">NET STATUS</span>
               <span class="footer-readout" id="net-status">STANDBY</span>
+            </footer>
+          </section>
+
+          <!-- Active downloads / file transfers panel -->
+          <section class="panel panel-transfers">
+            <header class="panel-header">
+              <span class="panel-title">TRANSFERS <em>H8</em></span>
+              <span class="panel-code">ACTIVE I/O</span>
+              <span class="panel-id" id="transfers-count">—</span>
+            </header>
+            <div class="panel-body transfers-body">
+              <div class="transfers-list" id="transfers-list">
+                <div class="storage-empty transfers-empty">NO ACTIVE TRANSFERS</div>
+              </div>
+            </div>
+            <footer class="panel-footer">
+              <span class="footer-label">TRANSFER STATUS</span>
+              <span class="footer-readout" id="transfers-status">IDLE</span>
             </footer>
           </section>
 

@@ -766,8 +766,15 @@ html, body {
   bottom: 6px;
   width: 320px;
   height: 72px;
-  min-width: 100px;
-  min-height: 40px;
+  /* Mirror the JS AUDIO_MIN_W / AUDIO_MIN_H constants so a stray drag or
+     resize that bypasses the JS clamp still can't shrink the grid below
+     panel-equivalent dimensions. */
+  min-width: 280px;
+  min-height: 120px;
+  /* Same hairline outline as .panel — audio visualizers participate in
+     the panel layout (see applySideArrange) so they should read as the
+     same chrome. */
+  border: 1px solid var(--rule-dim);
   z-index: 60;
   pointer-events: auto;
   cursor: move;
@@ -1102,7 +1109,14 @@ html, body {
   display: flex;
   gap: 6px;
   pointer-events: none; /* container is just layout */
+  zoom: 1.35;
 }
+/* Bump the combo panel's contents 20% — header chip, mode tabs, and the
+   notes/chat/paper/web/explore/visualizer panes — without touching the
+   panel's outer box (which is sized by the grid and fold states). */
+.panel-combo > .panel-header,
+.panel-combo > .combo-mode-tabs,
+.panel-combo > .combo-body { zoom: 1.2; }
 /* Reorder feedback: dragged item fades to half-opacity while others stay
    visible so the user can see the slot they're dropping into. The browser
    draws the standard ghost preview at the cursor automatically. */
@@ -1162,8 +1176,6 @@ html, body {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
-#refresh-btn:hover  svg { transform: rotate(120deg); }
-#refresh-btn:active svg { transform: rotate(360deg); transition-duration: 0.15s; }
 #theme-btn:hover    svg { transform: scale(1.1); }
 #invert-btn:hover   svg { transform: rotate(180deg); }
 #dim-btn.is-active,
@@ -1172,6 +1184,37 @@ html, body {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* Saved-layout slot buttons — empty slots dim out so the user can see
+   which numbered slots have layouts stored. STORE armed-mode pulses the
+   three slots amber to signal "next click writes here". */
+.topbar-slot {
+  font-family: var(--font-tech);
+  font-size: clamp(11px, 2.4cqi, 14px);
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+.topbar-slot.is-empty { opacity: 0.35; }
+.topbar-slot.is-active {
+  border-color: var(--accent, currentColor);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+#save-layout-btn.is-armed {
+  border-color: var(--amber);
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+}
+body.is-layout-save-armed .topbar-slot {
+  border-color: var(--amber);
+  color: var(--amber);
+  opacity: 1;
+  animation: layout-slot-pulse 0.7s ease-in-out infinite alternate;
+}
+body.is-eco-mode.is-layout-save-armed .topbar-slot { animation: none; background: color-mix(in srgb, var(--amber) 12%, transparent); }
+@keyframes layout-slot-pulse {
+  from { background: transparent; }
+  to   { background: color-mix(in srgb, var(--amber) 22%, transparent); }
 }
 
 /* Terminal / diagnostics overlay — styled to match the rest of the HUD
@@ -1657,6 +1700,11 @@ body.is-zen .terminal-panel:not([hidden]) {
   pointer-events: auto;
   position: relative;
   background: var(--panel-bg);
+  /* Hairline outline so every panel has a visible edge against the
+     grid wallpaper. Uses the same --rule-dim that internal dividers
+     (headers, footers, drive rows) use, so the outline reads as part
+     of the existing chrome rather than a competing line. */
+  border: 1px solid var(--rule-dim);
   padding: 0;
   min-width: 0;
   display: flex;
@@ -1690,6 +1738,19 @@ body.is-zen .terminal-panel:not([hidden]) {
   color: var(--muted);
 }
 .panel-header.is-draggable { cursor: move; user-select: none; }
+/* When the UI is locked, swap the grab/move cursors back to default and
+   hide the resize handles so it's clear nothing is going to move.
+   PRODUCTIVITY (panel-combo) is exempt — it stays interactive. */
+body.is-ui-locked .panel-header.is-draggable { cursor: default; }
+body.is-ui-locked .panel-combo .panel-header.is-draggable { cursor: move; }
+body.is-ui-locked .resize-handle,
+body.is-ui-locked .audio-resize-handle { display: none; }
+body.is-ui-locked .panel-combo > .resize-handle { display: block; }
+#lock-ui-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 
 /* Collapse button + collapsed-state hides everything below the header */
 .panel-collapse-btn {
@@ -1715,6 +1776,15 @@ body.is-zen .terminal-panel:not([hidden]) {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .panel-fold-btn { font-size: 9px; }
+/* SFX toggle: show speaker-on or speaker-off based on state. */
+#sfx-btn .sfx-icon-off       { display: none; }
+#sfx-btn.is-muted .sfx-icon-on  { display: none; }
+#sfx-btn.is-muted .sfx-icon-off { display: inline; color: var(--muted); }
+/* Spinning icon while a long action is in flight (RAM flush, etc.). */
+.topbar-btn.is-busy svg { animation: topbar-busy 0.8s linear infinite; }
+@keyframes topbar-busy {
+  to { transform: rotate(360deg); }
+}
 /* Full-down ● glyph runs visually small at 9px; bump it up but keep the
    button box the same so the three controls stay aligned. */
 .panel-fold-btn-full { font-size: 14px; }
@@ -1868,14 +1938,21 @@ body.is-combo-fold-full::before {
 .bigvalue-num {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: clamp(22px, 9cqi, 56px);
+  /* Unified numeric size for every readout in the dashboard. Two
+     headline values escape this — the LOCAL clock row (via
+     .bigvalue-primary) and the weather temperature (via .weather-left)
+     — see the override rules further down. The per-context size
+     overrides for alt-zone clocks / thermal / network all resolve to
+     this same clamp now, so the dashboard reads as one visual weight
+     instead of five competing scales. */
+  font-size: clamp(11px, 3.4cqi, 18px);
   letter-spacing: 0.04em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .bigvalue-unit {
   font-family: var(--font-display);
-  font-size: clamp(10px, 3.4cqi, 22px);
+  font-size: clamp(8px, 2.4cqi, 13px);
   color: var(--muted);
   letter-spacing: 0.05em;
 }
@@ -1935,7 +2012,7 @@ body.is-combo-fold-full::before {
 }
 .meter-value {
   font-family: var(--font-display);
-  font-size: clamp(10px, 3cqi, 17px);
+  font-size: clamp(11px, 3.4cqi, 18px);
   font-weight: 500;
   letter-spacing: 0.06em;
   color: var(--text);
@@ -2014,15 +2091,20 @@ body.is-combo-fold-full::before {
   font-size: clamp(10px, 3cqi, 16px);
 }
 
-/* Make the secondary readout a touch smaller */
-/* Big readouts scale with the panel's width via container queries.
-   Min/max keep them readable in tiny panels and from looking absurd in
-   huge ones — clamps stay close to the original fixed pixel sizes. */
-.bigvalue-primary   .bigvalue-num  { font-size: clamp(22px, 9cqi, 56px); }
-.bigvalue-primary   .bigvalue-unit { font-size: clamp(10px, 3.4cqi, 22px); }
-.bigvalue-secondary .bigvalue-num  { font-size: clamp(18px, 7cqi, 44px); color: var(--text); }
-.bigvalue-secondary .bigvalue-unit { font-size: clamp(8px,  2.6cqi, 16px); }
-.bigvalue-secondary .caret         { font-size: clamp(8px,  2.2cqi, 14px); color: var(--amber); }
+/* Headline values — the only two readouts that escape the unified
+   numeric size set on .bigvalue-num / .bigvalue-unit above. Everything
+   else (alt-zone clocks, thermal, network, etc.) inherits the unified
+   small size. */
+.bigvalue-primary .bigvalue-num,
+.weather-left    .bigvalue-num  { font-size: clamp(22px, 9cqi, 56px); }
+.bigvalue-primary .bigvalue-unit,
+.weather-left    .bigvalue-unit { font-size: clamp(10px, 3.4cqi, 22px); }
+
+/* Alt-zone clocks (.bigvalue-secondary) — keep the dim text color but
+   drop the size override so the digits match every other readout. The
+   caret stays slightly larger so it still reads as a list marker. */
+.bigvalue-secondary .bigvalue-num  { color: var(--text); }
+.bigvalue-secondary .caret         { font-size: clamp(8px, 2.2cqi, 14px); color: var(--amber); }
 
 /* Time-zone visual hierarchy. The top row (local) reads brightest with the
    accent-colored caret; alt zones progressively dim toward the background
@@ -2453,21 +2535,8 @@ body.is-combo-fold-full::before {
   margin-bottom: 4px;
 }
 .temp-readout .caret { color: var(--accent); }
-.temp-readout .bigvalue-num {
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-size: clamp(15px, 6cqi, 32px);
-  letter-spacing: 0.04em;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.temp-readout .bigvalue-unit {
-  font-family: var(--font-display);
-  font-size: clamp(8px, 2.6cqi, 14px);
-  color: var(--muted);
-}
-/* Power-draw chip: pushed to the right of the temp readout, slightly
-   smaller numerals so it reads as secondary info next to the temperature. */
+/* Thermal readouts inherit the unified .bigvalue-num size; only the
+   accent color on the power-draw chip is context-specific. */
 .temp-power {
   margin-left: auto;
   display: inline-flex;
@@ -2476,11 +2545,7 @@ body.is-combo-fold-full::before {
   padding-left: 10px;
   border-left: 1px dashed var(--rule-dim);
 }
-.temp-power .bigvalue-num {
-  font-size: clamp(12px, 4.5cqi, 24px);
-  color: var(--accent);
-}
-.temp-power .bigvalue-unit { font-size: clamp(7px, 2.2cqi, 12px); }
+.temp-power .bigvalue-num { color: var(--accent); }
 
 /* Temp segment bar — color reflects severity */
 .seg-temp {
@@ -2497,8 +2562,9 @@ body.is-combo-fold-full::before {
 }
 
 /* ── Network specifics ───────────────────────────────────────── */
-.panel-network  {}
-.panel-driveio  {}
+.panel-network   {}
+.panel-driveio   {}
+.panel-transfers {}
 .net-body { gap: 14px; }
 
 /* The two rows split the panel's vertical space equally so the sparklines
@@ -2523,12 +2589,7 @@ body.is-combo-fold-full::before {
   gap: 3px;
   min-width: 0;
 }
-.bigvalue-net .bigvalue-num {
-  font-size: clamp(16px, 6cqi, 38px);
-}
-.bigvalue-net .bigvalue-unit {
-  font-size: clamp(8px, 2.4cqi, 15px);
-}
+/* Network rates inherit the unified .bigvalue-num size. */
 
 /* Bar-grid sparkline (canvas-backed, same visual language as audio bars).
    Used for net/disk traffic + CPU/GPU/RAM history. The container holds a
@@ -2789,6 +2850,75 @@ body.is-combo-fold-full::before {
   text-transform: uppercase;
 }
 
+/* ── Transfers panel (mirrors storage rows visually) ─────────── */
+.transfers-body { overflow-y: auto; }
+.transfers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.transfer-row { display: flex; flex-direction: column; gap: 4px; }
+.transfer-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2.4cqi, 13px);
+}
+.transfer-name {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: clamp(11px, 3.2cqi, 17px);
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.transfer-name em {
+  color: var(--muted);
+  font-style: normal;
+  font-size: clamp(7px, 2.2cqi, 12px);
+  font-family: var(--font-tech);
+  margin-left: 8px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+.transfer-vals {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  font-size: clamp(7px, 2.2cqi, 12px);
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.transfer-vals .speed { color: var(--accent); }
+.seg-transfer { background:
+  repeating-linear-gradient(90deg,
+    var(--accent) 0, var(--accent) 6px,
+    transparent 6px, transparent 8px); }
+.seg-bar-fill.indeterminate {
+  width: 100% !important;
+  opacity: 0.45;
+  background:
+    repeating-linear-gradient(90deg,
+      var(--accent) 0, var(--accent) 6px,
+      transparent 6px, transparent 18px);
+  animation: transfer-pulse 1.2s linear infinite;
+}
+@keyframes transfer-pulse {
+  0%   { background-position: 0 0; }
+  100% { background-position: 24px 0; }
+}
+body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
+.transfers-empty {
+  padding-top: 2px;
+}
+
 /* ── Combined Notes + Chat panel ─────────────────────────────── */
 .panel-combo .combo-mode-tabs {
   display: flex;
@@ -2818,13 +2948,23 @@ body.is-combo-fold-full::before {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
+/* Drag-to-reorder feedback — same look as the topbar / CREATE reorder.
+   The dragged tab dims to make its leaving slot visible while the
+   browser's drag ghost rides the cursor. */
+.panel-combo .combo-mode-tab.is-mode-dragging { opacity: 0.35; }
 
-/* Body fills available space; each pane fills the body */
+/* Body fills available space; each pane fills the body. Override the
+   inherited `overflow-y: auto` from .panel-body — every combo pane has
+   its own internal scroll container (notes textarea, chat messages list,
+   paper editor, web webview, explore lists), so a body-level scrollbar
+   would only steal ~17 px from the right edge and cause the panes to
+   read as inset on that side. */
 .panel-combo .combo-body {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 .panel-combo .combo-pane {
   display: none;
@@ -2842,174 +2982,459 @@ body.is-combo-fold-full::before {
 .panel-combo[data-mode="chat"]  .combo-footer-notes { display: none; }
 .panel-combo[data-mode="paper"] .combo-footer-chat,
 .panel-combo[data-mode="paper"] .combo-footer-notes { display: none; }
-.panel-combo[data-mode="web"] .combo-footer-chat,
-.panel-combo[data-mode="web"] .combo-footer-notes { display: none; }
+.panel-combo[data-mode="explore"] .combo-footer-chat,
+.panel-combo[data-mode="explore"] .combo-footer-notes { display: none; }
+.panel-combo[data-mode="visualizer"] .combo-footer-chat,
+.panel-combo[data-mode="visualizer"] .combo-footer-notes { display: none; }
+.panel-combo[data-mode="browser"] .combo-footer-chat,
+.panel-combo[data-mode="browser"] .combo-footer-notes { display: none; }
 
-/* ── Web browser pane ─────────────────────────────────────────── */
-.combo-pane-web { gap: 6px; }
-
-.web-tabs {
+/* ── Explore (gallery + docs file browser) ──────────────────────
+   Tabbed mini-Explorer: a tab strip at the top switches between
+   the gallery and docs sections so only one is visible at a time
+   (the inactive one is display:none, freeing the full pane height
+   for the active list). Click a row to select; double-click to
+   navigate (folder) or open (file). */
+.combo-pane-explore { gap: 8px; }
+.explore-tabs {
   display: flex;
-  align-items: stretch;
-  gap: 2px;
-  flex-wrap: wrap;
-  padding-bottom: 2px;
+  gap: 0;
+  border-bottom: 1px dashed var(--rule-dim);
+  flex-shrink: 0;
 }
-.web-tab {
+.explore-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  letter-spacing: 0.18em;
+  padding: 6px 14px 4px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: color 0.12s, border-color 0.12s;
+}
+.explore-tab:hover { color: var(--accent); }
+.explore-tab.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.combo-pane-explore[data-explore-tab="gallery"] .explore-section[data-explore="docs"]    { display: none; }
+.combo-pane-explore[data-explore-tab="docs"]    .explore-section[data-explore="gallery"] { display: none; }
+.explore-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  border: 1px solid var(--rule-dim);
+  background: rgba(0, 0, 0, 0.4);
+}
+.explore-section-head {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 6px 3px 8px;
-  background: rgba(0, 0, 0, 0.4);
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px dashed var(--rule-dim);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+.explore-section-title {
+  text-transform: uppercase;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.explore-section-path {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: clamp(8px, 2cqi, 10px);
+  letter-spacing: 0.05em;
+  color: var(--dim);
+  text-transform: none;
+}
+.explore-action {
+  appearance: none;
+  background: transparent;
   border: 1px solid var(--rule-dim);
   color: var(--muted);
   font-family: var(--font-tech);
-  font-size: clamp(8px, 2.2cqi, 11px);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   cursor: pointer;
-  max-width: 160px;
-  min-width: 60px;
-  transition: border-color 0.12s, color 0.12s, background 0.12s;
+  line-height: 1;
 }
-.web-tab:hover {
-  border-color: var(--accent);
+.explore-action:hover { border-color: var(--accent); color: var(--accent); }
+.explore-action svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  margin: 0 auto;
+}
+
+/* Background diagnostics overlay — large monospace process block centered
+   in the viewport, sitting between the bg-grid and the panels. Each line
+   pulses opacity on its own clock (animation-delay set per element via
+   JS on first show) so the block reads as a "live process" rather than
+   synchronous breathing. `pointer-events: none` lets clicks pass through. */
+.diag-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 1;
+  font-family: var(--font-tech);
   color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
 }
-.web-tab.is-active {
+.diag-overlay[hidden] { display: none; }
+.diag-block {
+  font-size: clamp(11px, 1.4vw, 20px);
+  line-height: 1.7;
+  text-align: center;
+  margin: 0;
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.diag-line {
+  white-space: pre;
+  /* Container is opaque — the per-character spans fade independently
+     so each letter scintillates at its own rate. */
+}
+.diag-line.diag-gap { height: 0.6em; }
+.diag-char {
+  display: inline-block;
+  animation: diag-char-pulse 4s ease-in-out infinite;
+}
+.diag-char.is-space {
+  /* Render a non-breaking width for spaces inside spans so the column
+     alignment in lines like "HEAP    124 MB" survives the wrapping. */
+  white-space: pre;
+}
+@keyframes diag-char-pulse {
+  0%, 100% { opacity: 0.15; }
+  50%      { opacity: 0.7;  }
+}
+#diag-btn.is-active {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.web-tab.is-private {
-  border-style: dashed;
+
+/* Eco mode — permanently on. Kills idle CSS animations + slows long
+   transitions so a low-end CPU (4-core laptops, older iGPU) isn't
+   pegged just compositing the chrome. JS handles the heavier work
+   (audio-rAF throttle, etc.) — these rules are the cheap, purely-
+   cosmetic side. */
+body.is-eco-mode .diag-char {
+  animation: none;
+  opacity: 0.55;
 }
-.web-tab-icon {
-  font-size: 1.05em;
+body.is-eco-mode .audio-grid {
+  transition: none;
+}
+/* Higher-specificity override so [hidden] beats the display:block above
+   — used by the play / pause toggle to swap SVGs in the same button. */
+.explore-action svg[hidden] { display: none; }
+.explore-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.explore-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 10px;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  letter-spacing: 0.04em;
+  color: var(--text);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+}
+.explore-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); }
+.explore-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.explore-row.is-dir .explore-row-name::before { content: '▸ '; color: var(--accent); }
+.explore-row-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* Inline rename input replaces .explore-row-name during F2 / dbl-click on name. */
+.explore-row-rename {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  padding: 1px 4px;
+  outline: none;
+}
+.explore-row-size,
+.explore-row-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.explore-empty {
+  padding: 12px 10px;
+  color: var(--dim);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* ── Thumbnail grid (gallery only) ───────────────────────────────
+   Same data, different layout: tiles in a CSS grid sized via
+   minmax(140px, 1fr) so the column count auto-adapts to width.
+   Each tile shows a square preview (or icon for non-images and
+   folders) with the filename below. */
+.explore-list.is-thumbnails {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  /* Without an explicit `grid-auto-rows`, a row with fewer tiles than
+     columns stretches to fill the .explore-list height (which is
+     `flex: 1 1 auto`). Pin row height to content so each tile stays
+     a clean square + label regardless of row count. */
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 8px;
+  padding: 8px;
+}
+.explore-list.is-thumbnails .explore-row {
+  grid-template-columns: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+  background: rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.explore-list.is-thumbnails .explore-row:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.explore-list.is-thumbnails .explore-row.is-selected {
+  outline: none;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.explore-thumb-preview {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.explore-thumb-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.explore-thumb-icon {
+  font-size: 42px;
+  color: var(--accent);
   line-height: 1;
-  flex-shrink: 0;
+  letter-spacing: 0;
 }
-.web-tab-title {
+/* Format-extension placeholder used when Chromium can't decode the file
+   (TIFF / PSD / RAW etc.) — renders as a chunky monospace badge so the
+   tile still reads as "this is an image, just an unsupported format". */
+.explore-thumb-ext {
+  font-family: var(--font-tech);
+  font-size: clamp(20px, 6cqi, 32px);
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  padding: 6px 12px;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* ── Visualizer (video player) ─────────────────────────────────
+   Big player on top, scrollable file list below. The list shows
+   only video files pulled from the gallery folder — image-format
+   files stay in the GALLERY tab. */
+.combo-pane-visualizer { gap: 8px; }
+
+.visualizer-player-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  aspect-ratio: 16 / 9;
+  max-height: 60%;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.visualizer-video {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+  z-index: 2;
+}
+.visualizer-video:not([src]) { display: none; }
+/* Audio-bars mirror canvas — clone of the SPEAKERS panel that paints
+   inside the visualizer pane whenever no video is active. Hidden the
+   moment a video starts (sits behind the <video>; the player's solid
+   background covers it anyway, but explicit hiding saves the per-frame
+   blit while video is playing). */
+.visualizer-audio-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+  z-index: 1;
+}
+.visualizer-player-wrap.is-playing .visualizer-audio-canvas { display: none; }
+/* V-OFF mode: user explicitly disabled the audio visualization. The
+   canvas is hidden + sized to 0 so renderToTarget early-outs (W <= 0)
+   and stops doing per-frame work — saves CPU when the user just wants
+   a black pane. */
+.visualizer-player-wrap.is-viz-off .visualizer-audio-canvas { display: none; }
+.explore-action-wide { width: auto; padding: 0 8px; letter-spacing: 0.1em; font-size: 10px; }
+#visualizer-vizoff-btn.is-active {
+  border-color: var(--red);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.visualizer-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dim);
+  font-family: var(--font-tech);
+  font-size: clamp(10px, 2.5cqi, 13px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.visualizer-player-wrap.is-playing .visualizer-empty { display: none; }
+.visualizer-list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--rule-dim);
+  border-bottom: none;
+  background: rgba(0, 0, 0, 0.4);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+.visualizer-list-title { color: var(--accent); text-transform: uppercase; flex-shrink: 0; }
+.visualizer-list-now {
   flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: clamp(8px, 2cqi, 10px);
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+.visualizer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  border: 1px solid var(--rule-dim);
+  background: rgba(0, 0, 0, 0.4);
+  scrollbar-width: thin;
+}
+.visualizer-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 5px 10px;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  color: var(--text);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+}
+.visualizer-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+.visualizer-row.is-playing {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+.visualizer-row-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.web-tab-close {
+.visualizer-row-name::before { content: '▸ '; color: var(--accent); }
+.visualizer-row-size,
+.visualizer-row-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Right-click context menu — fixed-position list of actions over the
+   currently-selected explore rows. Lives on body so the panel's overflow
+   clipping doesn't crop it. */
+.explore-context-menu {
+  position: fixed;
+  z-index: 200;
+  background: rgba(8, 10, 14, 0.96);
+  border: 1px solid var(--accent);
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.7);
+}
+.explore-context-item {
   appearance: none;
   background: transparent;
   border: none;
-  color: inherit;
-  font-family: inherit;
-  font-size: 1.1em;
-  line-height: 1;
-  padding: 0 2px;
-  cursor: pointer;
-  opacity: 0.6;
-}
-.web-tab-close:hover { opacity: 1; color: var(--accent); }
-.web-tab-add {
-  appearance: none;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid var(--rule-dim);
-  color: var(--muted);
-  font-family: var(--font-tech);
-  font-size: clamp(11px, 3cqi, 16px);
-  width: 26px;
-  padding: 0;
-  cursor: pointer;
-  line-height: 1;
-  transition: border-color 0.12s, color 0.12s, background 0.12s;
-}
-.web-tab-add:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-.web-tab-private-add { border-style: dashed; }
-
-.web-toolbar {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
-  padding-bottom: 4px;
-  border-bottom: 1px dashed var(--rule-dim);
-}
-.web-btn {
-  appearance: none;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid var(--rule-dim);
-  color: var(--muted);
-  font-family: var(--font-tech);
-  font-size: clamp(11px, 3cqi, 16px);
-  width: 26px;
-  padding: 0;
-  cursor: pointer;
-  line-height: 1;
-  transition: border-color 0.12s, color 0.12s, background 0.12s;
-}
-.web-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-.web-url {
-  flex: 1;
-  background: rgba(0, 0, 0, 0.55);
-  border: 1px solid var(--rule-dim);
   color: var(--text);
   font-family: var(--font-tech);
-  font-size: clamp(9px, 2.6cqi, 13px);
-  letter-spacing: 0.04em;
-  padding: 4px 10px;
-  outline: none;
-  text-transform: lowercase;
-  caret-color: var(--accent);
-  transition: border-color 0.15s, background 0.15s;
-  min-width: 0;
-}
-.web-url:focus {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-}
-.web-url::placeholder {
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-}
-.web-blocked {
-  font-family: var(--font-tech);
-  font-size: clamp(7px, 2cqi, 11px);
+  font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--muted);
-  align-self: center;
-  padding-left: 6px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  padding: 8px 14px;
+  text-align: left;
+  cursor: pointer;
 }
-
-/* Wrapper around the <webview>(s). One webview per tab is appended here
-   and only the active tab's webview is shown via inline display style.
-   Dark mode + theme tint are injected from inside the webview's document
-   (see app.js applyWebTint + Chromium auto-dark via CDP). */
-.web-view-wrap {
-  flex: 1 1 auto;
-  min-height: 200px;
-  display: flex;
-  position: relative;
-  border: 1px solid var(--rule-dim);
-  background: var(--bg);
+.explore-context-item:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
 }
-.web-view {
-  flex: 1 1 auto;
-  display: flex;
-  border: none;
-  width: 100%;
-  background: var(--bg);
+.explore-list.is-thumbnails .explore-row-name {
+  padding: 4px 8px;
+  font-size: clamp(8px, 2.2cqi, 11px);
+  letter-spacing: 0.05em;
+  text-transform: none;
 }
-
+.explore-list.is-thumbnails .explore-row-name::before { content: ''; }
+.explore-list.is-thumbnails .explore-row-size,
+.explore-list.is-thumbnails .explore-row-time { display: none; }
+.explore-list.is-thumbnails .explore-row-rename {
+  margin: 4px 6px 6px;
+}
 
 /* ── Paper (basic word processor) ─────────────────────────────── */
 .combo-pane-paper { gap: 8px; }
@@ -3141,3 +3566,527 @@ body.is-combo-fold-full::before {
   font-style: italic;
 }
 .paper-editor a { color: var(--accent); }
+
+/* ── BROWSER pane ─────────────────────────────────────────────
+   Lightweight private browser tab. Stack top-to-bottom:
+     tab strip → nav row (URL + back/fwd/reload/home/star) →
+     bookmarks bar → <webview> stage.
+   Uses the dash-browser non-persistent session partition with a
+   tracker blocklist installed in main.js. */
+.combo-pane-browser {
+  gap: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Tab strip */
+.browser-tabstrip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--rule-dim);
+}
+.browser-tabstrip::-webkit-scrollbar { height: 4px; }
+.browser-tabstrip::-webkit-scrollbar-thumb { background: var(--rule-dim); }
+.browser-tab {
+  appearance: none;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  border-bottom: none;
+  padding: 4px 8px 4px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 180px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.browser-tab:hover { color: var(--text); border-color: var(--accent); }
+.browser-tab.is-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.browser-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 130px;
+  font-size: 10px;
+}
+.browser-tab-close {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.6;
+}
+.browser-tab-close:hover { opacity: 1; color: var(--amber, #ffaa00); }
+.browser-newtab {
+  appearance: none;
+  font-family: var(--font-tech);
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  border-bottom: none;
+  padding: 0 10px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.browser-newtab:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Nav row: back / forward / reload / home / URL / bookmark */
+.browser-navrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.browser-navbtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  padding: 0;
+}
+.browser-navbtn svg { width: 14px; height: 14px; }
+.browser-navbtn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.browser-navbtn:disabled { opacity: 0.3; cursor: not-allowed; }
+.browser-navbtn.is-bookmarked { color: var(--accent); border-color: var(--accent); }
+.browser-url {
+  flex: 1 1 auto;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  background: rgba(8, 10, 14, 0.6);
+  color: var(--text);
+  border: 1px solid var(--rule-dim);
+  border-radius: 12px;
+  padding: 4px 12px;
+  outline: none;
+  min-width: 0;
+}
+.browser-url:focus { border-color: var(--accent); background: rgba(0, 0, 0, 0.8); }
+
+/* Bookmarks bar */
+.browser-bookmarks {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding: 2px 0;
+  min-height: 22px;
+  border-bottom: 1px solid var(--rule-dim);
+}
+.browser-bookmarks::-webkit-scrollbar { height: 4px; }
+.browser-bookmarks::-webkit-scrollbar-thumb { background: var(--rule-dim); }
+.browser-bookmark {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-bookmark:hover { color: var(--accent); border-color: var(--accent); }
+.browser-bookmarks-empty {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  opacity: 0.5;
+  padding: 2px 4px;
+}
+
+/* Stage holds the splash, the custom results panel, and (when the
+   active tab is on 'page' mode) a native BrowserView attaches over the
+   top from main-process. We just need a stable rectangle for it to
+   target — splash/results are absolute-positioned overlays inside. */
+.browser-stage {
+  flex: 1 1 auto;
+  position: relative;
+  background: #0a0a0a;
+  border: 1px solid var(--rule-dim);
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Splash overlay — shown when the active tab's mode === 'splash'. */
+.browser-splash {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  background: #0a0a0a;
+  z-index: 1;
+  font-family: var(--font-tech);
+}
+.browser-stage[data-mode="splash"] .browser-splash { display: flex; }
+/* Results overlay — shown when the active tab's mode === 'results'. */
+.browser-results {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  background: #0a0a0a;
+  z-index: 1;
+  font-family: var(--font-tech);
+}
+.browser-stage[data-mode="results"] .browser-results { display: flex; }
+.browser-results {
+  /* Scroll the WHOLE results overlay rather than the grid internally —
+     LOAD MORE just extends the column so the user scrolls naturally. */
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent) 35%, transparent) transparent;
+  padding: 0 16px 8px;
+}
+.browser-results::-webkit-scrollbar { width: 6px; }
+.browser-results::-webkit-scrollbar-track { background: transparent; }
+.browser-results::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 0;
+}
+.browser-results::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+.browser-results-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0 6px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--rule-dim);
+  position: sticky;
+  top: 0;
+  background: #0a0a0a;
+  z-index: 2;
+}
+.browser-results-label {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+}
+.browser-results-count {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  margin-left: auto;
+}
+.browser-results-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  flex: 0 0 auto;
+}
+.browser-result {
+  padding: 16px 8px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 60%, transparent);
+  transition: background 120ms ease;
+}
+.browser-result:last-child { border-bottom: none; }
+.browser-result:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.browser-result-titlerow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.browser-result-chip {
+  flex: 0 0 auto;
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+  border: 1px solid var(--rule-dim);
+  padding: 1px 5px;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+.browser-result-chip.is-multi {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.browser-result-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+  font-family: var(--font-display, var(--font-tech));
+  font-size: clamp(13px, 2.6cqi, 16px);
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-result-title:hover { text-decoration: underline; }
+.browser-result-url {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-result-snippet {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* WEB / IMAGES kind picker on the splash search row. */
+.browser-splash-search-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+.browser-splash-search-row .browser-splash-input { flex: 1 1 auto; }
+.browser-splash-kind {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.browser-splash-kind-btn {
+  appearance: none;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  padding: 0 10px;
+  cursor: pointer;
+}
+.browser-splash-kind-btn:hover { color: var(--text); border-color: var(--accent); }
+.browser-splash-kind-btn.is-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.browser-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+  flex: 0 0 auto;
+  align-content: start;
+}
+.browser-result-img {
+  appearance: none;
+  background: #050505;
+  border: 1px solid var(--rule-dim);
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.browser-result-img:hover { border-color: var(--accent); }
+.browser-result-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Video grid: wider thumbs (16:9), play marker, duration badge,
+   gradient title overlay so the source is readable at a glance. */
+.browser-results.is-videos .browser-results-grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+.browser-result-vid { aspect-ratio: 16 / 9; }
+.browser-result-vid-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 28px;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+  opacity: 0.55;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.browser-result-vid:hover .browser-result-vid-play {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1.1);
+}
+.browser-result-vid-duration {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  pointer-events: none;
+}
+.browser-result-vid-title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.55) 60%, transparent 100%);
+  color: #fff;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+  padding: 18px 8px 6px;
+  text-align: left;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  pointer-events: none;
+}
+.browser-results-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  opacity: 0.6;
+}
+.browser-results-empty[hidden] { display: none; }
+.browser-results-loadmore {
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 14px auto 6px;
+  padding: 7px 26px;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  cursor: pointer;
+}
+.browser-results-loadmore:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.browser-results-loadmore:disabled { opacity: 0.4; cursor: wait; }
+.browser-results-loadmore[hidden] { display: none; }
+.browser-splash-title {
+  font-family: var(--font-display, var(--font-tech));
+  font-size: clamp(16px, 4cqi, 28px);
+  letter-spacing: 0.34em;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.browser-splash-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(520px, 90%);
+}
+.browser-splash-label {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--muted);
+}
+.browser-splash-input {
+  font-family: var(--font-tech);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--rule-dim);
+  padding: 8px 14px;
+  outline: none;
+  width: 100%;
+}
+.browser-splash-input:focus { border-color: var(--accent); background: #000; }
+.browser-splash-stats {
+  display: flex;
+  gap: 48px;
+  margin-top: 18px;
+}
+.browser-splash-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.browser-splash-stat-num {
+  font-family: var(--font-display, var(--font-tech));
+  font-size: clamp(22px, 6cqi, 40px);
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.browser-splash-stat-label {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--muted);
+}
+.browser-status {
+  position: absolute;
+  bottom: 4px;
+  left: 8px;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.7);
+  padding: 2px 6px;
+  pointer-events: none;
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  z-index: 2;
+}
