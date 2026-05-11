@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.3] — 2026-05-11
+
+### Phase 3c — Linux audio loopback (visualizer parity)
+- New `src/main/audio-fft.js` — extracted the FFT engine + band binning from the Windows worker into a shared, dependency-free module. Same Hann window, same 1024-pt radix-2 Cooley-Tukey, same log-frequency band layout, same dynamic-range compression. Both platforms now feed PCM through the same code path.
+- New `src/main/audify-worker-linux.js` — utilityProcess that spawns `parec --format=float32le --rate=48000 --channels=2 -d <default-sink>.monitor`, chunks the stdout stream into 512-frame ticks, feeds the shared FFT engine, and posts the same `{rms, bands?, deviceName}` shape the Windows worker emits. Picked `parec` over `pw-cat` because its CLI has been stable for a decade and PipeWire's `pipewire-pulse` shim provides it by default on every modern Linux.
+- `src/main/audify-worker.js` (Windows) collapsed from ~210 lines to ~85 — all FFT/band math removed, now just feeds samples in and forwards results. Same renderer-visible output.
+- `services/audio/linux.js` now forks the Linux worker via `utilityProcess.fork`, same pattern as the Windows path — wires `audio-out-level` IPC, handles exit, supports the same `stop` message.
+
 ## [0.6.2] — 2026-05-11
 
 ### Phase 2 — Linux sensors + window-manager abstraction

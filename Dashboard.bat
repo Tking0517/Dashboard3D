@@ -23,7 +23,9 @@ echo Deploying...
 xcopy /E /Y /I "%DIST_SRC%\*" "%DIST_DEST%\" >nul
 xcopy /Y "%ROOT%src\main\main.js"             "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 xcopy /Y "%ROOT%src\main\preload.js"          "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\audify-worker.js"    "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
+xcopy /Y "%ROOT%src\main\audify-worker.js"       "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
+xcopy /Y "%ROOT%src\main\audify-worker-linux.js" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
+xcopy /Y "%ROOT%src\main\audio-fft.js"           "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 xcopy /Y "%ROOT%src\main\youtube-host.html"   "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 xcopy /Y "%ROOT%src\main\youtube-preload.js"  "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
 xcopy /Y "%ROOT%src\main\default-config.json" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul

@@ -19,7 +19,10 @@
 //     same `{bands, deviceName, sampleRate, channels}` message shape
 //     the Windows worker emits. The dashboard renderer is unchanged.
 
+const path = require('path');
+const fs = require('fs');
 const { execFile } = require('child_process');
+const { utilityProcess } = require('electron');
 
 // dataFlow: 0 = render (sinks / speakers), 1 = capture (sources / mic).
 // wpctl uses @DEFAULT_AUDIO_SINK@ and @DEFAULT_AUDIO_SOURCE@ as magic
@@ -119,12 +122,72 @@ async function setDefaultEndpoint(dataFlow, namePattern) {
   return { ok: true, name: namePattern, id: nodeId };
 }
 
-// Loopback capture — Phase 3c. Stubbed so the dashboard doesn't crash
-// when the renderer asks for audio levels; the visualizer panels will
-// just sit at zero until the pw-cat path is wired.
-function startLoopback() { /* no-op until Phase 3c */ }
-function stopLoopback()  { /* no-op until Phase 3c */ }
-function restartLoopback() { /* no-op until Phase 3c */ }
+// Loopback capture — forks audify-worker-linux.js as a utilityProcess.
+// The worker spawns `parec` to read the default sink's monitor stream,
+// runs it through the shared FFT engine, and posts `{rms, bands?,
+// deviceName}` back to us. We forward to the dashboard window on the
+// same `audio-out-level` IPC channel the Windows worker uses.
+let _audioProc = null;
+let _audioWin  = null;
+
+function startLoopback(win) {
+  if (process.env.DASH3D_DISABLE_AUDIFY) return;
+  if (_audioProc) return;
+  _audioWin = win;
+
+  const workerPath = path.join(__dirname, '..', '..', 'audify-worker-linux.js');
+  if (!fs.existsSync(workerPath)) {
+    console.warn('linux audio worker missing at', workerPath);
+    return;
+  }
+
+  try {
+    _audioProc = utilityProcess.fork(workerPath, [], {
+      stdio: 'pipe',
+      serviceName: 'dash3d-parec',
+      env: process.env,
+    });
+  } catch (err) {
+    console.error('utilityProcess.fork (linux audio) failed:', err.message);
+    _audioProc = null;
+    return;
+  }
+
+  _audioProc.stdout?.on('data', (b) => process.stdout.write(`[parec] ${b}`));
+  _audioProc.stderr?.on('data', (b) => process.stderr.write(`[parec] ${b}`));
+
+  _audioProc.on('message', (data) => {
+    if (data?.status === 'started') {
+      console.log(`PipeWire loopback started on "${data.deviceName}" (${data.sampleRate}Hz, ${data.channels}ch)`);
+    }
+    if (_audioWin && !_audioWin.isDestroyed()) {
+      _audioWin.webContents.send('audio-out-level', data);
+    }
+  });
+
+  _audioProc.on('exit', (code) => {
+    console.log('parec worker exited code', code);
+    if (_audioWin && !_audioWin.isDestroyed()) {
+      _audioWin.webContents.send('audio-out-level', { error: `worker exit ${code}` });
+    }
+    _audioProc = null;
+  });
+}
+
+function stopLoopback() {
+  if (!_audioProc) return;
+  try { _audioProc.postMessage('stop'); } catch {}
+  const p = _audioProc;
+  setTimeout(() => { try { p.kill(); } catch {} }, 200);
+  _audioProc = null;
+}
+
+function restartLoopback(win) {
+  stopLoopback();
+  // PipeWire/Pulse releases the monitor source quickly — same 350 ms
+  // safety margin as the Windows worker for parity.
+  setTimeout(() => startLoopback(win), 350);
+}
 
 module.exports = {
   startLoopback,
