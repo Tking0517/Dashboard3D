@@ -1,3 +1,40 @@
+/* ════════════════════════════════════════════════════════════════
+   Dashboard3D · renderer styles
+   ────────────────────────────────────────────────────────────────
+   TABLE OF CONTENTS · search the SECTION banners to jump
+
+     §1  BASE              Fonts, z-index ladder, :root vars, UI font themes
+     §2  THEMES            Cyberpunk / Pastel / Muted palettes · alert override
+     §3  BACKGROUND        Grid pattern + variants · brightness pulse
+     §4  LAYOUT            App shell, body, sidebars
+     §5  CONTROL BAR       Topbar (top-center): buttons, dividers, chips,
+                           Hz control, theme picker
+     §6  PANEL CHROME      Shared panel base, header/body/footer, resize
+                           handles, panel stack, fold/collapse buttons
+     §7  PANELS            Individual: clock · weather · system · thermal
+                           · network · storage · transfers · drive I/O
+     §8  PRODUCTIVITY      Combo panel + every pane:
+                             notes · chat · paper · explore · thumbnail
+                             grid · visualizer · browser · tasks
+     §9  AUDIO GRIDS       Floating bottom-corner visualizers
+     §10 OVERLAYS          Zen mode · first-run setup · terminal /
+                           diag console · webcam · combo-fold backdrop
+     §11 UTILITIES         Invert / dim / eco-mode dampers
+
+   Each section starts with a big "===== §N · NAME =====" banner.
+   Sub-sections within use a lighter "── Sub-section ──" banner.
+
+   Themed values live in §2; everywhere else references them via
+   var(--accent), var(--amber), var(--text), etc., so changing
+   palette automatically re-tints the whole UI.
+   ════════════════════════════════════════════════════════════════ */
+
+
+/* ════════════════════════════════════════════════════════════════
+   §1 · BASE
+   Fonts, z-index, :root, UI font themes
+   ════════════════════════════════════════════════════════════════ */
+
 /* ── Bundled web fonts ───────────────────────────────────────────
    Self-hosted (no network at runtime) so the dashboard renders the
    same on any machine. Vite hashes + copies the woff2 files into
@@ -120,106 +157,282 @@ body.font-writing {
   --font-tech:    'Source Serif', Georgia, serif;
 }
 
+/* ════════════════════════════════════════════════════════════════
+   §2 · THEMES
+   Each [data-theme="..."] block overrides --accent, --amber, --red,
+   --ok, --text, --muted, --dim. The alert theme auto-engages on
+   offline / error / 90%+ CPU/GPU. Sections: Cyberpunk · Pastel ·
+   Muted (earth/E-Ink) · Alert override.
+   ════════════════════════════════════════════════════════════════ */
+
 /* ── Theme palettes ─────────────────────────────────────────── */
-[data-theme="azure"] {
-  --accent: #6da3d4;
-  --amber:  #f0eba8;
-  --red:    #e66e50;
-  --ok:     #9dbad0;
-  --text:   #e0d7c5;
-  --muted:  #7e8da4;
-  --dim:    #3a4756;
+/* The default palette (no [data-theme]) plus a Cyberpunk section
+   (4 variants) and the `alert` auto-override. */
+
+/* CYBERPUNK · NEON — spring-green + cyan + electric magenta */
+[data-theme="cyber-neon"] {
+  --accent: #00ff95;
+  --amber:  #00cfff;
+  --red:    #ff00b0;
+  --ok:     #00ff95;
+  --text:   #c8ffe8;
+  --muted:  #5a90a8;
+  --dim:    #0e2a3a;
 }
-[data-theme="rose"] {
-  --accent: #d89eb1;
-  --amber:  #b98aab;
-  --red:    #c45a78;
-  --ok:     #b6cdd1;
-  --text:   #f0e0e8;
-  --muted:  #8e7080;
-  --dim:    #4a3a44;
+
+/* CYBERPUNK · MOODY — dark navy + mint + crimson */
+[data-theme="cyber-moody"] {
+  --accent: #00d8a8;
+  --amber:  #2098c8;
+  --red:    #d81f55;
+  --ok:     #00d8a8;
+  --text:   #c8e8e0;
+  --muted:  #6a8090;
+  --dim:    #0c2030;
 }
-[data-theme="ocean"] {
-  --accent: #3fb7b0;
-  --amber:  #f5d780;
-  --red:    #e07090;
-  --ok:     #a6e0d9;
-  --text:   #f1ecda;
-  --muted:  #6c8d92;
-  --dim:    #3a4d52;
+
+/* CYBERPUNK · VIOLET — electric purple + hot pink */
+[data-theme="cyber-violet"] {
+  --accent: #ee00ff;
+  --amber:  #ff1f80;
+  --red:    #ff005a;
+  --ok:     #aa20ff;
+  --text:   #f0d0ff;
+  --muted:  #8a6098;
+  --dim:    #1a0838;
 }
-[data-theme="pastel"] {
-  --accent: #f2b0b5;
-  --amber:  #fce0cc;
-  --red:    #d68080;
-  --ok:     #c8e5d6;
-  --text:   #f8e5e8;
-  --muted:  #c0a0a8;
-  --dim:    #5a4548;
+
+/* CYBERPUNK · DARK — deep navy + hot pink + cyan */
+[data-theme="cyber-dark"] {
+  --accent: #ff0098;
+  --amber:  #00b8ff;
+  --red:    #ff0098;
+  --ok:     #00d4a8;
+  --text:   #d8e8ff;
+  --muted:  #5070a0;
+  --dim:    #060e28;
 }
-[data-theme="meadow"] {
-  --accent: #a8d690;
-  --amber:  #fac5a0;
-  --red:    #f0a085;
-  --ok:     #ddebac;
-  --text:   #f0e8c8;
-  --muted:  #8a9d70;
-  --dim:    #4a5238;
+
+/* CYBERPUNK · RUNNER — Blade Runner 2049: dystopian amber + teal */
+[data-theme="cyber-runner"] {
+  --accent: #ff8c2c;
+  --amber:  #ffc070;
+  --red:    #ff4040;
+  --ok:     #00d0c0;
+  --text:   #ffe0c8;
+  --muted:  #997555;
+  --dim:    #1c1208;
 }
-[data-theme="citrus"] {
-  --accent: #7dd480;
-  --amber:  #f8b280;
-  --red:    #f0884a;
-  --ok:     #d5eaa0;
-  --text:   #f4ecc7;
-  --muted:  #88a070;
-  --dim:    #4a5238;
+
+/* CYBERPUNK · 2077 — electric yellow + hot magenta on near-black */
+[data-theme="cyber-2077"] {
+  --accent: #fcee0a;
+  --amber:  #ff2cc4;
+  --red:    #ff1060;
+  --ok:     #00ffaa;
+  --text:   #fce8ff;
+  --muted:  #a09030;
+  --dim:    #181504;
 }
-[data-theme="neon"] {
-  --accent: #ff1356;
-  --amber:  #f0e500;
-  --red:    #8b0a2a;
-  --ok:     #5be7d2;
-  --text:   #f5e8c8;
-  --muted:  #b48aa0;
-  --dim:    #4a2535;
+
+/* CYBERPUNK · AKIRA — Kaneda red + warning yellow */
+[data-theme="cyber-akira"] {
+  --accent: #ff3030;
+  --amber:  #ffcc00;
+  --red:    #ff3030;
+  --ok:     #ffcc00;
+  --text:   #ffe8c0;
+  --muted:  #884040;
+  --dim:    #220808;
 }
-[data-theme="vaporwave"] {
-  --accent: #dd338e;
-  --amber:  #f5a6c1;
-  --red:    #702eaa;
-  --ok:     #1c84c1;
-  --text:   #e6d8f0;
-  --muted:  #a888c0;
-  --dim:    #3a2855;
+
+/* CYBERPUNK · SYNTHWAVE — Outrun sunset: pink + orange + cyan */
+[data-theme="cyber-synthwave"] {
+  --accent: #ff2090;
+  --amber:  #ff7733;
+  --red:    #ff0050;
+  --ok:     #00e0ff;
+  --text:   #ffd0e8;
+  --muted:  #8050a0;
+  --dim:    #14082c;
 }
-[data-theme="matrix"] {
-  --accent: #2ee8a3;
-  --amber:  #cd00cd;
-  --red:    #ff5570;
-  --ok:     #66ff66;
-  --text:   #c8f5d8;
-  --muted:  #5aa080;
-  --dim:    #1f4530;
+
+/* PASTEL · BLOOM — pink → purple → cyan */
+[data-theme="pastel-bloom"] {
+  --accent: #b795e4;
+  --amber:  #95dff2;
+  --red:    #fcd1f5;
+  --ok:     #97a5ee;
+  --text:   #efb8f0;
+  --muted:  #7a6592;
+  --dim:    #2d2538;
 }
-[data-theme="volt"] {
-  --accent: #fbe517;
-  --amber:  #ff8400;
-  --red:    #42297f;
-  --ok:     #6fa6dd;
-  --text:   #f0e8c8;
-  --muted:  #888a98;
-  --dim:    #3a3c45;
+
+/* PASTEL · SKY — cyan/blue + soft pinks */
+[data-theme="pastel-sky"] {
+  --accent: #b4daf9;
+  --amber:  #fbb1d3;
+  --red:    #fed8ec;
+  --ok:     #b7edf7;
+  --text:   #dde8f8;
+  --muted:  #7a8aa0;
+  --dim:    #1a2535;
 }
-[data-theme="crimson"] {
-  --accent: #c90000;
-  --amber:  #980002;
-  --red:    #68030e;
-  --ok:     #d4a4a4;
-  --text:   #f5d0d0;
-  --muted:  #a55050;
-  --dim:    #3a0a10;
+
+/* PASTEL · SPRING — mint + cyan + soft pink */
+[data-theme="pastel-spring"] {
+  --accent: #ceffc4;
+  --amber:  #b3f8ff;
+  --red:    #ffd1ff;
+  --ok:     #b9d4ff;
+  --text:   #effddf;
+  --muted:  #7a9080;
+  --dim:    #1e2a22;
 }
+
+/* PASTEL · SUNSET — magenta + warm peach */
+[data-theme="pastel-sunset"] {
+  --accent: #f770e5;
+  --amber:  #ffcb97;
+  --red:    #ffaeb0;
+  --ok:     #ff8ecc;
+  --text:   #ffe8dd;
+  --muted:  #a88080;
+  --dim:    #382428;
+}
+
+/* PASTEL · MIST — off-white + cyan/blue */
+[data-theme="pastel-mist"] {
+  --accent: #72ddf7;
+  --amber:  #79b8f4;
+  --red:    #8093f1;
+  --ok:     #b1e6f3;
+  --text:   #ededed;
+  --muted:  #7a8590;
+  --dim:    #1a2330;
+}
+
+/* PASTEL · LILAC — lavender + violet */
+[data-theme="pastel-lilac"] {
+  --accent: #c2a9ef;
+  --amber:  #d8caf6;
+  --red:    #ac88e8;
+  --ok:     #c2a9ef;
+  --text:   #eeeafd;
+  --muted:  #8070a0;
+  --dim:    #2a1f3a;
+}
+
+/* PASTEL · SORBET — cyan + mint + cream + peach + pink */
+[data-theme="pastel-sorbet"] {
+  --accent: #9bf6ff;
+  --amber:  #fdffb6;
+  --red:    #ffadad;
+  --ok:     #caffbf;
+  --text:   #fff5ed;
+  --muted:  #908070;
+  --dim:    #2a2218;
+}
+
+/* PASTEL · CANDY — pink + cream + mint */
+[data-theme="pastel-candy"] {
+  --accent: #ffaaff;
+  --amber:  #fdffb6;
+  --red:    #ffaaff;
+  --ok:     #b2ffa3;
+  --text:   #ffeaff;
+  --muted:  #a07a98;
+  --dim:    #2a1828;
+}
+
+/* MUTED · CLAY — terracotta + warm khaki, easy on the eyes */
+[data-theme="earth-clay"] {
+  --accent: #c97a5a;
+  --amber:  #d8a070;
+  --red:    #a83a3a;
+  --ok:     #8a8a4a;
+  --text:   #d8c0a8;
+  --muted:  #806858;
+  --dim:    #2a1f18;
+}
+
+/* MUTED · MOSS — forest green + mustard, low-saturation */
+[data-theme="earth-moss"] {
+  --accent: #7a9060;
+  --amber:  #a89860;
+  --red:    #8a4a3a;
+  --ok:     #7a9060;
+  --text:   #d0d0b8;
+  --muted:  #607048;
+  --dim:    #1c2418;
+}
+
+/* MUTED · SAND — desert beige + sage, warm and quiet */
+[data-theme="earth-sand"] {
+  --accent: #b89a70;
+  --amber:  #d8b888;
+  --red:    #a85a4a;
+  --ok:     #98a878;
+  --text:   #e0d0b0;
+  --muted:  #807260;
+  --dim:    #2a2218;
+}
+
+/* MUTED · STONE — cool slate gray, neutral + minimal */
+[data-theme="earth-stone"] {
+  --accent: #9098a0;
+  --amber:  #a89c90;
+  --red:    #80707a;
+  --ok:     #809088;
+  --text:   #c8c8c8;
+  --muted:  #686868;
+  --dim:    #1a1c1e;
+}
+
+/* MUTED · PAPER — Kindle Paperwhite warm mode: soft cream tones */
+[data-theme="earth-paper"] {
+  --accent: #b8a080;
+  --amber:  #c0a888;
+  --red:    #a87060;
+  --ok:     #909878;
+  --text:   #d8c0a0;
+  --muted:  #707058;
+  --dim:    #28201a;
+}
+
+/* MUTED · EINK — classic monochrome E Ink: gray on near-black */
+[data-theme="earth-eink"] {
+  --accent: #b0b0b0;
+  --amber:  #989898;
+  --red:    #888080;
+  --ok:     #a0a8a0;
+  --text:   #c8c8c8;
+  --muted:  #686868;
+  --dim:    #161616;
+}
+
+/* MUTED · SEPIA — aged paper, brown ink */
+[data-theme="earth-sepia"] {
+  --accent: #a87850;
+  --amber:  #c89868;
+  --red:    #98483a;
+  --ok:     #888848;
+  --text:   #d8b888;
+  --muted:  #785838;
+  --dim:    #281c10;
+}
+
+/* MUTED · CHARCOAL — warm gray on warm dark */
+[data-theme="earth-charcoal"] {
+  --accent: #888070;
+  --amber:  #a89880;
+  --red:    #806858;
+  --ok:     #788870;
+  --text:   #b8b0a0;
+  --muted:  #585048;
+  --dim:    #1c1816;
+}
+
 /* Alert theme — auto-engaged when offline, on errors, or when CPU/GPU load
    crosses 90%. Same animation cadence as every other theme; the strobe
    peaks 70% brighter via swapped keyframes (panel-pulse-alert / element-
@@ -255,109 +468,29 @@ body.font-writing {
   50%      { filter: brightness(2.30); }
 }
 
-/* ── Low-contrast complementary palettes — desaturated pairs ─── */
-
-[data-theme="dust"] {           /* sandy beige + dusty rose */
-  --accent: #c9a880;
-  --amber:  #d6b89e;
-  --red:    #b87a6e;
-  --ok:     #b8c8a8;
-  --text:   #ebe2d2;
-  --muted:  #998a72;
-  --dim:    #4a4036;
-}
-[data-theme="slate"] {          /* cool gray + muted teal */
-  --accent: #8aa0a8;
-  --amber:  #b0a89e;
-  --red:    #a87a82;
-  --ok:     #98b0a8;
-  --text:   #d8dde0;
-  --muted:  #707880;
-  --dim:    #353c40;
-}
-[data-theme="mint"] {           /* soft mint + faded peach */
-  --accent: #9dc8b8;
-  --amber:  #d8b8b0;
-  --red:    #c89090;
-  --ok:     #b0d6c0;
-  --text:   #e2eee5;
-  --muted:  #7c948a;
-  --dim:    #3a4a44;
-}
-[data-theme="lavender"] {       /* lavender + buttercream */
-  --accent: #b0a0c8;
-  --amber:  #d6c8a0;
-  --red:    #b08aa8;
-  --ok:     #c0c8d0;
-  --text:   #e8e2ee;
-  --muted:  #807088;
-  --dim:    #3a3344;
-}
-[data-theme="harbor"] {         /* harbor blue + sand */
-  --accent: #7090a8;
-  --amber:  #c8b890;
-  --red:    #b07880;
-  --ok:     #98b8b0;
-  --text:   #e0e8ee;
-  --muted:  #6a7a88;
-  --dim:    #2e3942;
-}
-[data-theme="moss"] {           /* moss green + warm clay */
-  --accent: #9aaa88;
-  --amber:  #c8a880;
-  --red:    #b08070;
-  --ok:     #b8c8a0;
-  --text:   #e2e8d8;
-  --muted:  #768070;
-  --dim:    #383c30;
-}
-[data-theme="dusk"] {           /* muted purple + mustard */
-  --accent: #9888a8;
-  --amber:  #c8b070;
-  --red:    #a87080;
-  --ok:     #a8a8c0;
-  --text:   #e0d8e8;
-  --muted:  #786878;
-  --dim:    #38303e;
-}
-[data-theme="paper"] {          /* off-white sepia / aged paper */
-  --accent: #b8a890;
-  --amber:  #d8c8a8;
-  --red:    #a88880;
-  --ok:     #b0b8a0;
-  --text:   #e8dec8;
-  --muted:  #8a8070;
-  --dim:    #44403a;
-}
-[data-theme="storm"] {          /* storm blue-gray + warm tan */
-  --accent: #7c889e;
-  --amber:  #b8a890;
-  --red:    #a07a8a;
-  --ok:     #98a8b8;
-  --text:   #d8dee8;
-  --muted:  #6a7282;
-  --dim:    #2e3440;
-}
-[data-theme="sage"] {           /* muted sage + dusty pink */
-  --accent: #a0b8a0;
-  --amber:  #d0b8b0;
-  --red:    #b89898;
-  --ok:     #b8c8b0;
-  --text:   #e0e8de;
-  --muted:  #788878;
-  --dim:    #364038;
-}
+/* ════════════════════════════════════════════════════════════════
+   §11 · UTILITIES (invert / dim / eco-mode)
+   Body-class filters that compose on top of any theme. .theme-invert
+   inverts the app + hue-rotates so colors don't go negative; brightness
+   pulls the would-be-white surface back to ~30% gray so the inverted
+   view doesn't blast the room. .theme-dim halves brightness for low-
+   light use. Both combine. .is-eco-mode disables non-essential
+   animations to save CPU on low-power machines.
+   ════════════════════════════════════════════════════════════════ */
 
 /* Invert + dim toggles. hue-rotate keeps color identity through invert
-   (blue stays blue-ish); the combined rule composes both filters. */
+   (blue stays blue-ish). brightness() after invert pulls the would-be-
+   white surface back to roughly mid-gray so the inverted view doesn't
+   blast the room — close to 50% with a slight bias darker. dim chains
+   on top by simply multiplying the brightness factor. */
 body.theme-invert #app {
-  filter: invert(1) hue-rotate(180deg);
+  filter: invert(1) hue-rotate(180deg) brightness(0.3);
 }
 body.theme-dim #app {
   filter: brightness(0.5);
 }
 body.theme-invert.theme-dim #app {
-  filter: invert(1) hue-rotate(180deg) brightness(0.5);
+  filter: invert(1) hue-rotate(180deg) brightness(0.18);
 }
 
 /* Zen overlay: big centered clock + weather summary, only visible while
@@ -664,6 +797,15 @@ body.is-zen .topbar-controls {
   pointer-events: none;
 }
 
+/* ════════════════════════════════════════════════════════════════
+   §10 · OVERLAYS — Zen mode
+   Fullscreen "focus" mode. Body gets .is-zen; panels fade away and
+   the zen-overlay (clock + weather summary + audio bars) fades in.
+   Wallpaper / audio grids may be configured to remain visible.
+   Other overlays (first-run wizard · terminal · webcam · combo-fold
+   backdrop · diag overlay) live further down in this section.
+   ════════════════════════════════════════════════════════════════ */
+
 /* ── Zen entry/exit transition ────────────────────────────────────
    Plain opacity crossfade: cards fade to 0 over a black backdrop and
    back in on exit. A fixed full-screen black layer (body::after) is
@@ -758,6 +900,14 @@ html, body {
 }
 
 #app { position: relative; width: 100vw; height: 100vh; }
+
+/* ════════════════════════════════════════════════════════════════
+   §9 · AUDIO GRIDS
+   Floating visualizers pinned to the bottom corners. Two instances:
+   default-output (loopback) at the left, default-input (mic) at the
+   right. Draggable / resizable; minimum size mirrors the panel mins.
+   Zen mode keeps them visible (see §10).
+   ════════════════════════════════════════════════════════════════ */
 
 /* Shared audio bar-grid container — used for both default-output (loopback)
    and default-input (mic). Position + accent color are scoped per variant. */
@@ -900,6 +1050,16 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Diagnostic Hz readout — TEMP, slated for removal. Lives right of the
+   device name; small + dim so it doesn't compete with the label. */
+.audio-grid .audio-hz {
+  flex: none;
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  color: #6e8aa3;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
 /* Hardcoded red on the muted state — themes can override --red but mute
    is a hard "off" signal that should read the same on every theme. */
 .audio-grid.is-muted .audio-mute-btn {
@@ -976,7 +1136,18 @@ html, body {
 .audio-grid .audio-resize-e { right: 0;  top: 6px;  bottom: 6px; width: 6px; cursor: ew-resize; }
 .audio-grid .audio-resize-w { left: 0;   top: 6px;  bottom: 6px; width: 6px; cursor: ew-resize; }
 
-/* Flat background grid + tick dots, with a slow brightness pulse */
+/* ════════════════════════════════════════════════════════════════
+   §3 · BACKGROUND
+   Wallpaper grid behind the panels. The default is an orthogonal
+   grid + tick dots; 7 alternate patterns (dots, diagonal, diamond,
+   triangles, hexagons, herringbone, circuit) are layered as overrides
+   on body[data-bg-pattern="..."]. Brightness pulses every 8s.
+   ════════════════════════════════════════════════════════════════ */
+
+/* Flat background grid + tick dots, with a slow brightness pulse. The
+   default pattern (GRID) is defined here; alternates are layered below
+   under `body[data-bg-pattern=...]` so they override the background-
+   image without changing position / pulse / z-index. */
 .bg-grid {
   position: fixed;
   inset: 0;
@@ -994,6 +1165,78 @@ html, body {
   background-size: 80px 80px, auto, auto, auto, auto;
   z-index: 0;
   animation: bg-grid-pulse 8s ease-in-out infinite;
+}
+
+/* ── Background pattern variants ─────────────────────────────────
+   Each variant swaps just the background-image. Color is themed via
+   --accent so they pick up every palette automatically. Pulse stays
+   the same so the variants feel like siblings of the default grid. */
+body[data-bg-pattern="dots"] .bg-grid {
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, var(--accent) 32%, transparent) 1.3px, transparent 1.8px),
+    radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, transparent) 0.7px, transparent 1.1px);
+  background-size: 40px 40px, 12px 12px;
+}
+body[data-bg-pattern="diagonal"] .bg-grid {
+  background-image:
+    repeating-linear-gradient(45deg, transparent 0 39px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 39px 40px);
+  background-size: auto;
+}
+body[data-bg-pattern="diamond"] .bg-grid {
+  background-image:
+    repeating-linear-gradient(45deg,  transparent 0 39px,
+      color-mix(in srgb, var(--accent) 10%, transparent) 39px 40px),
+    repeating-linear-gradient(-45deg, transparent 0 39px,
+      color-mix(in srgb, var(--accent) 10%, transparent) 39px 40px);
+  background-size: auto;
+}
+body[data-bg-pattern="triangles"] .bg-grid {
+  background-image:
+    repeating-linear-gradient(60deg,  transparent 0 49px,
+      color-mix(in srgb, var(--accent) 11%, transparent) 49px 50px),
+    repeating-linear-gradient(-60deg, transparent 0 49px,
+      color-mix(in srgb, var(--accent) 11%, transparent) 49px 50px),
+    repeating-linear-gradient(0deg,   transparent 0 49px,
+      color-mix(in srgb, var(--accent) 11%, transparent) 49px 50px);
+  background-size: auto;
+}
+body[data-bg-pattern="hexagons"] .bg-grid {
+  /* Three diagonal grids 60° apart trace the outlines of hexagonal cells. */
+  background-image:
+    repeating-linear-gradient(30deg,  transparent 0 49px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 49px 50px),
+    repeating-linear-gradient(90deg,  transparent 0 49px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 49px 50px),
+    repeating-linear-gradient(150deg, transparent 0 49px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 49px 50px);
+  background-size: auto;
+}
+body[data-bg-pattern="herringbone"] .bg-grid {
+  /* Short opposing diagonals tiled into a 30×30 cell, offset by half a
+     cell so they interlock instead of overlapping. */
+  background-image:
+    repeating-linear-gradient(45deg,
+      transparent 0 14px,
+      color-mix(in srgb, var(--accent) 16%, transparent) 14px 15px,
+      transparent 15px 30px),
+    repeating-linear-gradient(-45deg,
+      transparent 0 14px,
+      color-mix(in srgb, var(--accent) 16%, transparent) 14px 15px,
+      transparent 15px 30px);
+  background-size: 30px 30px, 30px 30px;
+  background-position: 0 0, 15px 15px;
+}
+body[data-bg-pattern="circuit"] .bg-grid {
+  /* PCB-style: dots at every 80px node, thin connectors on the major
+     grid. Reads denser than the default grid but cleaner than dots. */
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, var(--accent) 38%, transparent) 1.4px, transparent 2px),
+    repeating-linear-gradient(90deg, transparent 0 79px,
+      color-mix(in srgb, var(--accent) 8%, transparent) 79px 80px),
+    repeating-linear-gradient(0deg,  transparent 0 79px,
+      color-mix(in srgb, var(--accent) 8%, transparent) 79px 80px);
+  background-size: 80px 80px, auto, auto;
 }
 
 @keyframes bg-grid-pulse {
@@ -1074,6 +1317,11 @@ html, body {
   filter: none;
 }
 
+/* ════════════════════════════════════════════════════════════════
+   §4 · LAYOUT
+   Body / #app root, sidebar mounts, grid containers.
+   ════════════════════════════════════════════════════════════════ */
+
 /* ── Layout ──────────────────────────────────────────────────── */
 .hud {
   position: relative;
@@ -1099,6 +1347,14 @@ html, body {
 .hud-row-mid    { grid-template-columns: 1fr 1fr 1fr; }
 .hud-row-bottom { grid-template-columns: 1fr 1fr; }
 
+/* ════════════════════════════════════════════════════════════════
+   §5 · CONTROL BAR (top-center)
+   Floating row at the top of the viewport. Contains the version /
+   user / name chip, Hz stepper, theme picker dropdown, bg pattern
+   button, layout slots, lock-UI / setup / restart, and the right-
+   hand button cluster (camera, terminal, youtube, zen, close).
+   ════════════════════════════════════════════════════════════════ */
+
 /* ── Top-center control bar (theme · refresh · invert) ───────── */
 .topbar-controls {
   position: fixed;
@@ -1107,9 +1363,19 @@ html, body {
   transform: translateX(-50%);
   z-index: 100;
   display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
   gap: 6px;
   pointer-events: none; /* container is just layout */
   zoom: 1.35;
+  /* Solid background strip so the row reads as one unit, not floating
+     icons over the dashboard. */
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--rule-dim);
+  border-radius: 2px;
+  padding: 3px 6px;
+  /* The bar is pointer-events: none for the layout container, but the
+     bg / border still needs to catch hovers? No — leave layout-only. */
 }
 /* Bump the combo panel's contents 20% — header chip, mode tabs, and the
    notes/chat/paper/web/explore/visualizer panes — without touching the
@@ -1644,7 +1910,9 @@ body.is-zen .terminal-panel:not([hidden]) {
   to   { transform: rotate(360deg); }
 }
 
-/* Current-theme name chip beside the theme button */
+/* Topbar chip — version, Hz value, theme name, font name all share this.
+   Single row, no wrap, no enforced min-width so the chip grows with its
+   content instead of trying to wrap text onto a second line. */
 .theme-name {
   pointer-events: none;
   align-self: center;
@@ -1658,9 +1926,18 @@ body.is-zen .terminal-panel:not([hidden]) {
   height: 30px;
   line-height: 30px;
   text-transform: uppercase;
-  min-width: 78px;
   text-align: center;
+  white-space: nowrap;
 }
+
+/* ════════════════════════════════════════════════════════════════
+   §6 · PANEL CHROME (shared)
+   Everything that every panel inherits: resize handles, the
+   panel-stack column layout, the .panel base box, panel-header /
+   panel-body / panel-footer, the collapse + fold (half / full /
+   screen / light) buttons, and shared atoms (big numeric readout,
+   micro grid, segmented progress bars, footer chip).
+   ════════════════════════════════════════════════════════════════ */
 
 /* ── Resize handles (4 corners, omnidirectional) ─────────────── */
 .resize-handle {
@@ -1678,6 +1955,13 @@ body.is-zen .terminal-panel:not([hidden]) {
 .resize-handle-nw { top: 0;    left: 0;  cursor: nwse-resize; }
 .resize-handle-sw { bottom: 0; left: 0;  cursor: nesw-resize; }
 .resize-handle-ne { top: 0;    right: 0; cursor: nesw-resize; }
+/* Edge handles — taller strips along the side that don't include the
+   corner hit boxes (those still belong to the diagonal handles). Used
+   on the productivity combo panel so the user can grab either side. */
+.resize-handle-e  { right: 0;  top: 14px; bottom: 14px; width: 6px; height: auto; cursor: ew-resize; }
+.resize-handle-w  { left: 0;   top: 14px; bottom: 14px; width: 6px; height: auto; cursor: ew-resize; }
+.resize-handle-n  { top: 0;    left: 14px; right: 14px; width: auto; height: 6px; cursor: ns-resize; }
+.resize-handle-s  { bottom: 0; left: 14px; right: 14px; width: auto; height: 6px; cursor: ns-resize; }
 
 /* ── Panel stack (vertical column of panels inside a row) ────── */
 .panel-stack {
@@ -1787,7 +2071,9 @@ body.is-ui-locked .panel-combo > .resize-handle { display: block; }
 }
 /* Full-down ● glyph runs visually small at 9px; bump it up but keep the
    button box the same so the three controls stay aligned. */
-.panel-fold-btn-full { font-size: 14px; }
+.panel-fold-btn-full   { font-size: 14px; }
+.panel-fold-btn-screen { font-size: 13px; }
+.panel-fold-btn-light  { font-size: 12px; }
 .panel-fold-group {
   display: inline-flex;
   align-items: center;
@@ -1795,9 +2081,11 @@ body.is-ui-locked .panel-combo > .resize-handle { display: block; }
   margin-left: auto;
 }
 
-/* When the combo panel is folded full-down, dim everything else. The
-   backdrop is a fixed full-screen overlay at z-index 49; the combo panel
-   sits at z-index 50 (set above) so it stays at full brightness. */
+/* When the combo panel is folded full-down or in heavy focus, dim
+   everything else. The backdrop is a fixed full-screen overlay at
+   z-index 49; the combo panel sits at z-index 50 (set above) so it
+   stays at full brightness. Heavy focus (is-combo-fold-screen) adds
+   a backdrop blur on top of the dim. */
 body.is-combo-fold-full::before {
   content: '';
   position: fixed;
@@ -1806,25 +2094,86 @@ body.is-combo-fold-full::before {
   z-index: 49;
   pointer-events: none;
 }
+body.is-combo-fold-screen::before {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+/* Heavy + full focus: tuck the floating audio grids underneath the
+   backdrop so they dim with everything else instead of staying lit
+   above the overlay. They're at z-index 60 by default. */
+body.is-combo-fold-full .audio-grid {
+  z-index: 40 !important;
+}
+/* Light focus: same viewport-pinned panel, no dim backdrop. Force the
+   panel itself to a fully opaque background so the dashboard behind
+   doesn't bleed through the normal translucent --panel-bg. Audio
+   grids drop below the panel so they're hidden behind it. */
+.panel-combo.is-fold-light {
+  background: #0b0d0f !important;
+}
+body.is-combo-fold-light .audio-grid {
+  z-index: 40 !important;
+}
 .panel.is-collapsed .panel-collapse-btn:not(.panel-fold-btn) { transform: rotate(180deg); }
 .panel.is-collapsed .panel-body,
 .panel.is-collapsed .panel-footer { display: none; }
 
-/* Combo panel fold-down states. The panel becomes a fixed overlay anchored
-   at its current grid-column (via --fold-top / --fold-left / --fold-width
-   set from JS at fold time), and extends downward 50% (half) or to near the
-   bottom of the viewport (full). */
+/* Combo panel fold states (half / full / collapsed). The panel is
+   ALWAYS pinned center-below-control-bar in these modes — independent
+   of where it has been dragged or which mode it was just in. This kills
+   the "goes weird after focus mode" bug: the previous design captured
+   the live bounding rect into --fold-top/--fold-left/--fold-width which
+   would leak the focus-mode (full-viewport) rect when transitioning out
+   of focus. min/max-width are explicitly cleared so the inline panelSize
+   values from drag-resize don't clamp the centered width. */
 .panel-combo.is-fold-half,
-.panel-combo.is-fold-full {
+.panel-combo.is-fold-full,
+.panel-combo.is-collapsed:not(.is-fold-screen):not(.is-fold-light) {
   position: fixed !important;
-  top: var(--fold-top, 0) !important;
-  left: var(--fold-left, 0) !important;
-  width: var(--fold-width, auto) !important;
+  /* Geometry is computed in JS from the live side-panel rects and the
+     topbar bottom (see _updateComboFoldBounds). The vars get rewritten
+     every fold transition + on window resize so a manual drag of the
+     side panels is honored. Fallbacks are the default-layout numbers. */
+  top:   var(--combo-fold-top,   72px)  !important;
+  left:  var(--combo-fold-left,  480px) !important;
+  right: var(--combo-fold-right, 600px) !important;
+  transform: none !important;
+  width: auto !important;
+  min-width: 280px !important;
+  max-width: none !important;
   z-index: 50;
   align-self: auto !important;
 }
 .panel-combo.is-fold-half { height: 50vh !important; max-height: 50vh !important; }
 .panel-combo.is-fold-full { bottom: 12px !important; height: auto !important; max-height: none !important; }
+.panel-combo.is-collapsed:not(.is-fold-half):not(.is-fold-full):not(.is-fold-screen):not(.is-fold-light) {
+  height: auto !important;
+  max-height: none !important;
+}
+
+/* Fullscreen overlay — ignores the column anchor and pins the panel to
+   the viewport edges with a uniform dark margin. is-fold-screen pairs
+   with the dim backdrop (is-combo-fold-full) and triggers always-on-
+   top via JS; is-fold-light is the same geometry but without the
+   backdrop or always-on-top — the rest of the dashboard stays visible
+   and interactive. max-width / min-width are forced to none/0 so the
+   inline panelSize values from drag-resize don't constrain the width. */
+.panel-combo.is-fold-screen,
+.panel-combo.is-fold-light {
+  position: fixed !important;
+  top: 24px !important;
+  left: 24px !important;
+  right: 24px !important;
+  bottom: 24px !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  max-height: none !important;
+  z-index: 50;
+  align-self: auto !important;
+}
 
 .panel.is-collapsed {
   /* Force header-only size regardless of any inline width/height saved by
@@ -2067,9 +2416,66 @@ body.is-combo-fold-full::before {
       transparent 6px, transparent 8px) !important;
 }
 
-/* ── Clock specifics ─────────────────────────────────────────── */
+/* ════════════════════════════════════════════════════════════════
+   §7 · PANELS (individual)
+   Per-panel rules layered on top of §6 panel chrome. One sub-section
+   per panel:  Clock · Weather · System (CPU/mem/GPU) · Thermal ·
+   Network · Storage · Transfers · Drive I/O. Note: the productivity
+   panes (Notes / Chat / Paper / Explore / Tasks / Visualizer /
+   Browser) belong to §8 below — they share the combo-panel host.
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── PANEL · Clock ────────────────────────────────────────────── */
 .panel-clock {}
 .clock-body  { gap: 14px; }
+
+/* Top row of the clock body: the primary (LOCAL) time on the left,
+   a square profile-picture slot on the right. The slot fills its
+   natural square based on the row height; the picture goes inside
+   once the user supplies one. */
+.clock-primary-row {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  border-bottom: 1px dashed var(--rule-dim);
+  padding-bottom: 10px;
+}
+.clock-primary-row .time-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.profile-pic {
+  flex: 0 0 auto;
+  aspect-ratio: 1 / 1;
+  width: clamp(56px, 22cqi, 96px);
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+.profile-pic-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.profile-pic-img[hidden] { display: none; }
+.profile-pic-placeholder {
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  color: var(--muted);
+  opacity: 0.55;
+  text-transform: uppercase;
+}
+.profile-pic:has(.profile-pic-img:not([hidden])) .profile-pic-placeholder {
+  display: none;
+}
 
 .time-row {
   display: grid;
@@ -2135,7 +2541,7 @@ body.is-combo-fold-full::before {
   align-items: center;
 }
 
-/* ── Notes (tabbed scratchpad) ───────────────────────────────── */
+/* ── PRODUCTIVITY · Notes (tabbed scratchpad) ─────────────────── */
 .panel-notes {}
 .notes-body  { gap: 8px; }
 
@@ -2231,7 +2637,7 @@ body.is-combo-fold-full::before {
   text-transform: uppercase;
 }
 
-/* ── Weather specifics ───────────────────────────────────────── */
+/* ── PANEL · Weather ──────────────────────────────────────────── */
 .panel-weather {}
 .weather-body {
   flex-direction: row;
@@ -2278,7 +2684,7 @@ body.is-combo-fold-full::before {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
-/* ── System specifics ────────────────────────────────────────── */
+/* ── PANEL · System (CPU / mem / GPU / core grid) ─────────────── */
 /* Per-logical-processor vertical bar grid */
 .core-grid {
   display: grid;
@@ -2501,7 +2907,7 @@ body.is-combo-fold-full::before {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Thermal specifics ───────────────────────────────────────── */
+/* ── PANEL · Thermal (CPU/GPU temps · sensor array) ───────────── */
 .panel-thermal {}
 .thermal-body { gap: 12px; }
 .temp-row {
@@ -2561,7 +2967,7 @@ body.is-combo-fold-full::before {
       transparent 6px, transparent 8px) !important;
 }
 
-/* ── Network specifics ───────────────────────────────────────── */
+/* ── PANEL · Network (live traffic + drive I/O share these atoms) */
 .panel-network   {}
 .panel-driveio   {}
 .panel-transfers {}
@@ -2615,7 +3021,7 @@ body.is-combo-fold-full::before {
   height: 100%;
 }
 
-/* ── Chat (Ollama) specifics ─────────────────────────────────── */
+/* ── PRODUCTIVITY · Chat (Ollama / Azure) ─────────────────────── */
 .chat-body { gap: 10px; }
 
 .chat-toolbar {
@@ -2805,7 +3211,7 @@ body.is-combo-fold-full::before {
   color: var(--muted);
 }
 
-/* ── Storage specifics ───────────────────────────────────────── */
+/* ── PANEL · Storage (per-drive rows) ─────────────────────────── */
 .panel-storage {}
 .storage-list {
   display: flex;
@@ -2850,7 +3256,7 @@ body.is-combo-fold-full::before {
   text-transform: uppercase;
 }
 
-/* ── Transfers panel (mirrors storage rows visually) ─────────── */
+/* ── PANEL · Transfers (mirrors storage rows visually) ────────── */
 .transfers-body { overflow-y: auto; }
 .transfers-list {
   display: flex;
@@ -2919,7 +3325,17 @@ body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
   padding-top: 2px;
 }
 
-/* ── Combined Notes + Chat panel ─────────────────────────────── */
+/* ════════════════════════════════════════════════════════════════
+   §8 · PRODUCTIVITY (combo panel + all panes)
+   The combo panel is the dashboard's main work area. It hosts one
+   pane at a time selected by the mode tabs: Notes · Chat · Paper ·
+   Explore · Visualizer · Browser · Tasks. Note that the Notes and
+   Chat panes' own internals are styled higher up in this file (under
+   their original "PRODUCTIVITY · Notes" / "PRODUCTIVITY · Chat"
+   sub-section banners) — only the combo HOST styling lives here.
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── PRODUCTIVITY · Combo panel host (mode tabs + body) ───────── */
 .panel-combo .combo-mode-tabs {
   display: flex;
   gap: 0;
@@ -2988,8 +3404,717 @@ body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
 .panel-combo[data-mode="visualizer"] .combo-footer-notes { display: none; }
 .panel-combo[data-mode="browser"] .combo-footer-chat,
 .panel-combo[data-mode="browser"] .combo-footer-notes { display: none; }
+.panel-combo[data-mode="tasks"] .combo-footer-chat,
+.panel-combo[data-mode="tasks"] .combo-footer-notes { display: none; }
 
-/* ── Explore (gallery + docs file browser) ──────────────────────
+/* ── PRODUCTIVITY · Tasks (process / service monitor) ─────────
+   Every text node here is built from .diag-char spans (one per
+   letter, independent pulse) so the whole pane scintillates the
+   way the background diagnostics overlay does. The pane itself is
+   a flex column: toolbar / hero card / proc list / svc list, with
+   the list sections taking the remaining vertical space. */
+.combo-pane-tasks {
+  gap: 8px;
+  overflow: hidden;
+  font-family: var(--font-tech);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.tasks-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.tasks-toolbar-left,
+.tasks-toolbar-right {
+  display: flex;
+  gap: 4px;
+}
+.tasks-sort-btn,
+.tasks-action {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text-dim);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.tasks-sort-btn:hover,
+.tasks-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tasks-sort-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.tasks-action.is-busy {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.tasks-hero {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px 16px;
+  padding: 8px 10px;
+  border: 1px dashed var(--rule-dim);
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.tasks-hero-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tasks-hero-row-wide {
+  grid-column: 1 / -1;
+}
+.tasks-hero-label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+.tasks-hero-value {
+  font-size: 12px;
+  color: var(--accent);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tasks-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px dashed var(--rule-dim);
+  padding-bottom: 3px;
+  flex-shrink: 0;
+}
+.tasks-section-title {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+}
+.tasks-section-tag {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  opacity: 0.6;
+}
+
+.tasks-proc-list,
+.tasks-svc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.tasks-proc-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.tasks-svc-list {
+  flex: 0 0 auto;
+  max-height: 30%;
+}
+
+.tasks-proc-row {
+  display: grid;
+  grid-template-columns: 44px 60px 1fr 80px 56px 80px;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 60%, transparent);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+.tasks-proc-row:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.tasks-proc-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -1px;
+}
+.tp-type {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-align: left;
+}
+.tp-pid {
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.tp-name {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tp-bar {
+  position: relative;
+  height: 4px;
+  background: color-mix(in srgb, var(--rule-dim) 50%, transparent);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.tp-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 70%, transparent),
+    var(--accent)
+  );
+  transition: width 240ms ease;
+}
+.tp-cpu,
+.tp-mem {
+  font-size: 10px;
+  color: var(--accent);
+  text-align: right;
+}
+
+.tasks-svc-row {
+  display: grid;
+  grid-template-columns: 14px 90px 1fr 64px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 50%, transparent);
+}
+.ts-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--rule-dim) 80%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rule-dim) 60%, transparent);
+  transition: background 200ms ease, box-shadow 200ms ease;
+}
+.tasks-svc-row.is-up .ts-dot {
+  background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.tasks-svc-row.is-down .ts-dot {
+  background: color-mix(in srgb, #ff4040 80%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, #ff4040 50%, transparent);
+}
+.tasks-svc-row.is-static .ts-dot {
+  background: color-mix(in srgb, var(--text-dim) 60%, transparent);
+}
+.ts-label {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+}
+.ts-code {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ts-state {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-align: right;
+  color: var(--text-dim);
+}
+.tasks-svc-row.is-up .ts-state    { color: var(--accent); }
+.tasks-svc-row.is-down .ts-state  { color: #ff4040; }
+
+/* ── OVERLAY · First-run guided setup (WiFi → Location → Name) ─
+   Full-viewport overlay with a centered card. All text inside [data-fr-anim]
+   nodes uses the diag-char letter pulse from the diagnostics overlay
+   for visual continuity. Z-index sits above every panel and the topbar. */
+.first-run-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, #000 82%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  font-family: var(--font-tech);
+  color: var(--text-dim);
+}
+.first-run-overlay[hidden] { display: none; }
+
+.fr-card {
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  background: var(--bg, #0b0d0f);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 25%, transparent),
+              0 0 60px color-mix(in srgb, var(--accent) 12%, transparent);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fr-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px dashed var(--rule-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.fr-card-title {
+  color: var(--accent);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.fr-card-code {
+  font-size: 9px;
+  opacity: 0.5;
+  letter-spacing: 0.22em;
+}
+.fr-close-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0.5;
+  transition: opacity 100ms ease, color 100ms ease;
+}
+.fr-close-btn:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.fr-steps {
+  list-style: none;
+  margin: 0;
+  padding: 10px 14px 6px;
+  display: flex;
+  gap: 14px;
+  border-bottom: 1px dashed var(--rule-dim);
+  flex-shrink: 0;
+}
+.fr-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  opacity: 0.4;
+  text-transform: uppercase;
+  transition: opacity 200ms ease, color 200ms ease;
+}
+.fr-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--rule-dim);
+  border-radius: 50%;
+  font-size: 9px;
+  letter-spacing: 0;
+}
+.fr-step.is-active {
+  opacity: 1;
+  color: var(--accent);
+}
+.fr-step.is-active .fr-step-num {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.fr-step.is-done {
+  opacity: 0.8;
+}
+.fr-step.is-done .fr-step-num {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.fr-body {
+  position: relative;
+  padding: 16px 18px 14px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.fr-pane { display: none; flex-direction: column; gap: 10px; }
+.fr-pane.is-visible { display: flex; }
+
+.fr-pane-title {
+  font-size: 14px;
+  letter-spacing: 0.22em;
+  color: var(--accent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.fr-pane-sub {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  opacity: 0.6;
+  margin-bottom: 6px;
+}
+
+.fr-input-label {
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  opacity: 0.6;
+  text-transform: uppercase;
+}
+.fr-input {
+  appearance: none;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+.fr-input:focus {
+  border-color: var(--accent);
+}
+
+.fr-btn {
+  appearance: none;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 7px 18px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text-dim);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.fr-btn:hover:not([disabled]) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.fr-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.fr-btn-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.fr-btn-primary:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.fr-link-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 6px 0;
+  opacity: 0.6;
+  transition: opacity 100ms ease, color 100ms ease;
+}
+.fr-link-btn:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.fr-pane-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+}
+
+/* WiFi step */
+.fr-wifi-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--rule-dim);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.fr-wifi-current[hidden] { display: none; }
+.fr-wifi-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.fr-wifi-current-text {
+  display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0;
+}
+.fr-wifi-current-label {
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  opacity: 0.6;
+}
+.fr-wifi-current-ssid {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fr-wifi-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px dashed var(--rule-dim);
+}
+.fr-wifi-list[hidden] { display: none; }
+.fr-wifi-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 50px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 50%, transparent);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+.fr-wifi-row:last-child { border-bottom: none; }
+.fr-wifi-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.fr-wifi-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -1px;
+}
+.fr-wifi-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 14px;
+}
+.fr-wifi-bars span {
+  display: block;
+  width: 3px;
+  background: color-mix(in srgb, var(--rule-dim) 80%, transparent);
+}
+.fr-wifi-bars span.is-lit { background: var(--accent); }
+.fr-wifi-bars span:nth-child(1) { height: 4px; }
+.fr-wifi-bars span:nth-child(2) { height: 7px; }
+.fr-wifi-bars span:nth-child(3) { height: 10px; }
+.fr-wifi-bars span:nth-child(4) { height: 14px; }
+.fr-wifi-ssid {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fr-wifi-lock {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-align: right;
+  opacity: 0.6;
+}
+.fr-wifi-password { display: flex; flex-direction: column; gap: 6px; }
+.fr-wifi-password[hidden] { display: none; }
+.fr-wifi-pass-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.fr-wifi-status {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  opacity: 0.8;
+}
+.fr-wifi-status[hidden] { display: none; }
+.fr-wifi-status.is-error { color: #ff5050; }
+.fr-wifi-status.is-ok    { color: var(--accent); }
+
+/* Location step */
+.fr-loc-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px dashed var(--rule-dim);
+}
+.fr-loc-results:empty { display: none; }
+.fr-loc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 50%, transparent);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+.fr-loc-row:last-child { border-bottom: none; }
+.fr-loc-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.fr-loc-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -1px;
+}
+.fr-loc-name {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--text);
+}
+.fr-loc-region {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  opacity: 0.6;
+}
+.fr-loc-status {
+  margin: 4px 0 0;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  opacity: 0.8;
+}
+.fr-loc-status[hidden] { display: none; }
+.fr-loc-status.is-error { color: #ff5050; }
+
+/* Theme picker dropdown (topbar). The .theme-name chip itself is the
+   trigger now; clicking it opens the menu. Active item picks up the
+   accent color; sections render as small dashed separators with a
+   faint label, matching the panel design. */
+.theme-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.theme-name-trigger {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  font: inherit;
+  color: inherit;
+  padding: 2px 6px;
+  border-radius: 2px;
+  transition: border-color 100ms ease, background 100ms ease, color 100ms ease;
+}
+.theme-name-trigger:hover,
+.theme-name-trigger[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.theme-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 160px;
+  z-index: 200;
+  background: var(--bg, #0b0d0f);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 25%, transparent);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.theme-menu[hidden] { display: none; }
+.theme-menu-item {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+.theme-menu-item:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.theme-menu-item.is-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.theme-menu-section {
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  color: var(--text-dim);
+  opacity: 0.45;
+  padding: 8px 10px 2px;
+  border-top: 1px dashed var(--rule-dim);
+  margin-top: 4px;
+}
+.theme-menu-section:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
+/* Topbar Hz control — global refresh-rate stepper. The arrows step the
+   rate by 5 Hz; clamped 10-200 in JS. Sits between the version chip
+   and the theme picker. */
+.hz-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+.hz-btn {
+  padding: 2px 4px;
+  min-width: 22px;
+}
+.hz-btn svg { width: 14px; height: 14px; }
+.hz-value {
+  min-width: 52px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* User-name chip in the topbar */
+.user-name-chip {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  padding: 2px 6px;
+  border-radius: 2px;
+  margin-right: 6px;
+}
+
+/* ── PRODUCTIVITY · Explore (gallery + docs + downloads) ──────
    Tabbed mini-Explorer: a tab strip at the top switches between
    the gallery and docs sections so only one is visible at a time
    (the inactive one is display:none, freeing the full pane height
@@ -3200,7 +4325,7 @@ body.is-eco-mode .audio-grid {
   text-transform: uppercase;
 }
 
-/* ── Thumbnail grid (gallery only) ───────────────────────────────
+/* ── PRODUCTIVITY · Thumbnail grid (gallery only) ─────────────
    Same data, different layout: tiles in a CSS grid sized via
    minmax(140px, 1fr) so the column count auto-adapts to width.
    Each tile shows a square preview (or icon for non-images and
@@ -3270,7 +4395,7 @@ body.is-eco-mode .audio-grid {
   background: rgba(0, 0, 0, 0.4);
 }
 
-/* ── Visualizer (video player) ─────────────────────────────────
+/* ── PRODUCTIVITY · Visualizer (video player) ────────────────
    Big player on top, scrollable file list below. The list shows
    only video files pulled from the gallery folder — image-format
    files stay in the GALLERY tab. */
@@ -3440,7 +4565,7 @@ body.is-eco-mode .audio-grid {
   margin: 4px 6px 6px;
 }
 
-/* ── Paper (basic word processor) ─────────────────────────────── */
+/* ── PRODUCTIVITY · Paper (basic word processor) ──────────────── */
 .combo-pane-paper { gap: 8px; }
 
 .paper-toolbar {
@@ -3571,7 +4696,7 @@ body.is-eco-mode .audio-grid {
 }
 .paper-editor a { color: var(--accent); }
 
-/* ── BROWSER pane ─────────────────────────────────────────────
+/* ── PRODUCTIVITY · Browser (BrowserView + chrome) ────────────
    Lightweight private browser tab. Stack top-to-bottom:
      tab strip → nav row (URL + back/fwd/reload/home/star) →
      bookmarks bar → <webview> stage.

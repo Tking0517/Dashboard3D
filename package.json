@@ -1,6 +1,6 @@
 {
   "name": "dashboard3d",
-  "version": "0.7.0-alpha.1",
+  "version": "0.8.0-alpha.1",
   "private": true,
   "description": "A 3D desktop dashboard with system info, storage, date/time, and weather (Open-Meteo).",
   "main": "src/main/main.js",
@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "systeminformation": "^5.31.6",
-    "three": "^0.164.1"
+    "three": "^0.164.1",
+    "yt-client": "file:../yt-client"
   },
   "optionalDependencies": {
     "audify": "^1.10.1"

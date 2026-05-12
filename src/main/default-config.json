@@ -1,9 +1,7 @@
 {
   "_comment": "Default layout shipped with the app. Read by main.js readConfig() as a base layer; any user customizations stored in %APPDATA%\\Dashboard3D\\config.json override these values per-key.",
-  "theme": "dust",
   "invert": true,
   "dim": true,
-  "themeAuto": false,
   "comboMode": "chat",
   "collapsed": {
     "notes": true,
@@ -43,5 +41,8 @@
     "net":   true,
     "disk":  true,
     "store": false
-  }
+  },
+  "setupCompleted": false,
+  "userName": "",
+  "browserDarkMode": true
 }

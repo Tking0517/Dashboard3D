@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('dash', {
   setConfig:   (partial) => ipcRenderer.invoke('config-set', partial),
   configPath:  () => ipcRenderer.invoke('config-path'),
   toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen'),
+  setAlwaysOnTop:   (on) => ipcRenderer.invoke('set-always-on-top', on),
   azureAutoConfig:  () => ipcRenderer.invoke('azure-auto-config'),
   getScreenSources: () => ipcRenderer.invoke('get-screen-sources'),
 
@@ -35,6 +36,10 @@ contextBridge.exposeInMainWorld('dash', {
   appQuit:        () => ipcRenderer.invoke('app-quit'),
   appVersion:     () => ipcRenderer.invoke('app-version'),
   processStats:   () => ipcRenderer.invoke('process-stats'),
+  appMetrics:     () => ipcRenderer.invoke('app-metrics'),
+  wifiStatus:     () => ipcRenderer.invoke('wifi-status'),
+  wifiScan:       () => ipcRenderer.invoke('wifi-scan'),
+  wifiConnect:    (ssid, password) => ipcRenderer.invoke('wifi-connect', { ssid, password }),
   galleryPath:    () => ipcRenderer.invoke('gallery-path'),
   docsPath:       () => ipcRenderer.invoke('docs-path'),
   downloadsPath:  () => ipcRenderer.invoke('downloads-path'),
@@ -70,6 +75,8 @@ contextBridge.exposeInMainWorld('dash', {
   browserGetStats:   () => ipcRenderer.invoke('browser-get-stats'),
   browserResetStats: () => ipcRenderer.invoke('browser-reset-stats'),
   browserSetReaderMode: (on) => ipcRenderer.invoke('browser-set-reader-mode', on),
+  browserGetDarkMode:   () => ipcRenderer.invoke('browser-get-dark-mode'),
+  browserSetDarkMode:   (on) => ipcRenderer.invoke('browser-set-dark-mode', on),
   onBrowserStats: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on('browser-stats', handler);

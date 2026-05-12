@@ -252,11 +252,13 @@ const altNameEl     = document.querySelector('#alt-name');
 const altTzEl       = document.querySelector('#alt-tz');
 const altCityInput  = document.querySelector('#alt-city-input');
 
-const alt2TimeEl    = document.querySelector('#alt2-time');
-const alt2AmpmEl    = document.querySelector('#alt2-ampm');
-const alt2NameEl    = document.querySelector('#alt2-name');
-const alt2TzEl      = document.querySelector('#alt2-tz');
-const alt2CityInput = document.querySelector('#alt2-city-input');
+// Alt-zone 2 was removed from the clock panel; refs kept null so any
+// downstream code that may still reference them falls through cleanly.
+const alt2TimeEl    = null;
+const alt2AmpmEl    = null;
+const alt2NameEl    = null;
+const alt2TzEl      = null;
+const alt2CityInput = null;
 
 const dateFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: '2-digit' });
 const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -390,14 +392,7 @@ function tickClock() {
     altAmpmEl.textContent = '--';
   }
 
-  if (altTimeFmt2 && altLocation2) {
-    const { hms, ampm } = splitTime(altTimeFmt2, now);
-    alt2TimeEl.textContent = hms;
-    alt2AmpmEl.textContent = ampm;
-  } else {
-    alt2TimeEl.textContent = '--:--:--';
-    alt2AmpmEl.textContent = '--';
-  }
+  // Alt-zone 2 removed; skip its tick.
 }
 clockTzEl.textContent = (localTz || '—').toUpperCase();
 tickClock();
@@ -412,14 +407,8 @@ function applyAltLocation(loc) {
   tickClock();
 }
 
-function applyAltLocation2(loc) {
-  altLocation2 = loc;
-  altTimeFmt2 = loc?.timezone ? makeTimeFmt(loc.timezone) : null;
-  alt2NameEl.textContent = loc ? (loc.name || '—').toUpperCase() : '—';
-  alt2TzEl.textContent   = loc?.timezone ? loc.timezone.toUpperCase() : '—';
-  if (loc) alt2CityInput.value = loc.name || '';
-  tickClock();
-}
+// applyAltLocation2 / alt2 city handler — removed along with the
+// alt-zone-2 row. Boot config code below also skips cfg.altCity2.
 
 async function geocodeForTimezone(name) {
   // Reuses Open-Meteo's geocoding API; the response includes .timezone.
@@ -446,19 +435,6 @@ altCityInput.addEventListener('keydown', async (e) => {
   }
 });
 
-alt2CityInput.addEventListener('keydown', async (e) => {
-  if (e.key !== 'Enter') return;
-  const v = alt2CityInput.value.trim();
-  if (!v) return;
-  alt2NameEl.textContent = 'LOOKING UP…';
-  try {
-    const hit = await geocodeForTimezone(v);
-    await window.dash?.setConfig?.({ altCity2: hit });
-    applyAltLocation2(hit);
-  } catch (err) {
-    alt2NameEl.textContent = 'NOT FOUND';
-  }
-});
 
 // ── HUD: System ──────────────────────────────────────────────────────────────
 const sysCoresEl       = document.querySelector('#sys-cores');
@@ -1605,15 +1581,46 @@ const AUDIO_MIC_FLOOR = 24;
 // FFT band layout matches the audify worker (60 Hz – 16 kHz, log-spaced).
 const AUDIO_BAND_FMIN = 60;
 const AUDIO_BAND_FMAX = 16000;
-// Per-bar fill decay. Snap up on rises; fall by this many percent per push
-// on drops so the bar gracefully tails off instead of flickering.
+// Global visualizer redraw cadence (milliseconds between sampler ticks).
+// Driven by the single topbar Hz control — the per-panel ▲/▼ arrows are
+// gone. Persisted under cfg.audioFrameMs. Range 5 ms (200 Hz) – 100 ms
+// (10 Hz) so the topbar arrows can step in 5 Hz increments across the
+// full 10-200 Hz range.
+let AUDIO_FRAME_MS = 100;
+const AUDIO_FRAME_MS_MIN = 5;     // 200 Hz
+const AUDIO_FRAME_MS_MAX = 100;   // 10 Hz
+function setAudioFrameMs(ms) {
+  const clamped = Math.max(AUDIO_FRAME_MS_MIN, Math.min(AUDIO_FRAME_MS_MAX, Math.round(ms)));
+  AUDIO_FRAME_MS = clamped;
+  // Update the topbar Hz readout. Step is 5 Hz so we display whole Hz
+  // values without decimals.
+  const hz = Math.round(1000 / clamped);
+  const hzValueEl = document.getElementById('hz-value');
+  if (hzValueEl) hzValueEl.textContent = `${hz} Hz`;
+  if (window.dash?.setConfig) window.dash.setConfig({ audioFrameMs: clamped });
+  return clamped;
+}
+// Step the rate by ±5 Hz. Clamped to [10, 200] Hz.
+function stepHz(deltaHz) {
+  const cur = Math.round(1000 / AUDIO_FRAME_MS);
+  // Snap to the nearest multiple of 5 first so steps don't drift.
+  const snapped = Math.round(cur / 5) * 5;
+  const next = Math.max(10, Math.min(200, snapped + deltaHz));
+  setAudioFrameMs(1000 / next);
+}
+// Initial display before any user interaction.
+setAudioFrameMs(AUDIO_FRAME_MS);
+// Per-bar fill decay. Snap up on rises; fall by this many percent per
+// frame on drops so the bar gracefully tails off instead of flickering.
+// Unchanged from the 23 Hz tuning — at 10 Hz this yields a slightly
+// slower per-second decay (40/s vs 92/s) which actually reads as a
+// more graceful fall.
 const AUDIO_DECAY_PER_FRAME = 4;
 // Peak-hold: independent floating marker that snaps to the highest recent
-// fill, holds for HOLD frames, then falls slowly. Push rate is ~47 Hz from
-// the FFT side of the worker, so HOLD=12 ≈ 250 ms hold; PEAK_DECAY=1.4 ≈
-// 1.5 s to fall from 100 → 0.
-const AUDIO_PEAK_HOLD_FRAMES = 12;
-const AUDIO_PEAK_DECAY_PER_FRAME = 1.4;
+// fill, holds for HOLD frames, then falls slowly. Scaled so hold stays
+// ~500 ms regardless of AUDIO_FRAME_MS — 5 frames * 100 ms.
+const AUDIO_PEAK_HOLD_FRAMES = 5;
+const AUDIO_PEAK_DECAY_PER_FRAME = 3.3;
 
 function shortDeviceName(label, fallback) {
   if (!label) return fallback || 'DEFAULT';
@@ -2192,33 +2199,8 @@ function createAudioVisualizer({
     if (window.dash?.setConfig) await window.dash.setConfig({ [mutedKey]: muted });
   });
 
-  // Inject ▲/▼ gain triangles into the meta row. Each click bumps userGain
-  // by ~15% (clamped 0.2×–3×) so the user can dial bar height per
-  // visualizer. mousedown is stopped so the row's picker click doesn't
-  // also fire and the panel doesn't start dragging from the button.
-  const metaRow = deviceNameEl?.parentElement;
-  if (metaRow) {
-    const ctrls = document.createElement('div');
-    ctrls.className = 'audio-gain-controls';
-    const up = document.createElement('button');
-    up.type = 'button';
-    up.className = 'audio-gain-btn audio-gain-up';
-    up.title = 'Increase bar height';
-    up.textContent = '▲';
-    const dn = document.createElement('button');
-    dn.type = 'button';
-    dn.className = 'audio-gain-btn audio-gain-down';
-    dn.title = 'Decrease bar height';
-    dn.textContent = '▼';
-    ctrls.appendChild(up);
-    ctrls.appendChild(dn);
-    metaRow.appendChild(ctrls);
-    const stop = (e) => e.stopPropagation();
-    up.addEventListener('mousedown', stop);
-    dn.addEventListener('mousedown', stop);
-    up.addEventListener('click', (e) => { stop(e); setUserGain(userGain * 1.15); });
-    dn.addEventListener('click', (e) => { stop(e); setUserGain(userGain / 1.15); });
-  }
+  // Per-panel ▲/▼ Hz arrows removed; rate is now driven by the single
+  // topbar #hz-control (see stepHz / setAudioFrameMs below).
 
   async function saveGeom() {
     if (!window.dash?.setConfig || !gridEl) return;
@@ -2304,6 +2286,10 @@ audioOutViz.setPartner(audioInViz);
 // main-process audify binding talks directly to WASAPI.
 const NATIVE_LOOPBACK_BOUND = !!(IS_ELECTRON && window.dash?.onAudioOutLevel);
 let _nativeReceivedFirst = false;
+// Last render timestamp for the loopback viz — used to throttle the
+// worker's ~23 Hz IPC push down to AUDIO_FRAME_MS so the ▲/▼ arrows
+// actually control the displayed rate.
+let _lastOutRenderMs = 0;
 let _audioDeviceList = [];
 if (NATIVE_LOOPBACK_BOUND) {
   audioOutViz.setLabelOnly('NATIVE LOOPBACK · STARTING…');
@@ -2325,8 +2311,15 @@ if (NATIVE_LOOPBACK_BOUND) {
       audioOutViz.setLabelOnly(shortDeviceName(data.deviceName, 'SYSTEM AUDIO'));
       _nativeReceivedFirst = true;
     }
+    // Throttle the render path to AUDIO_FRAME_MS so the ▲/▼ arrows
+    // actually control the output viz refresh rate. The worker keeps
+    // emitting at its own ~23 Hz; we just drop the inter-frame ones.
     if (Array.isArray(data?.bands)) {
-      audioOutViz.setBands(data.bands);
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (now - _lastOutRenderMs >= AUDIO_FRAME_MS) {
+        _lastOutRenderMs = now;
+        audioOutViz.setBands(data.bands);
+      }
     }
     // RMS-only off-frames are ignored — FFT frames arrive every ~21 ms
     // which is plenty for the visual decay/peak-hold logic.
@@ -2611,16 +2604,14 @@ async function startAudioWaves() {
   drawAudioFrame();
 }
 
-// Sample the mic visualizer at ~15 Hz — half realtime since these meters
-// Audio sampler loop at ~23 Hz (one frame every 43 ms) to match the
-// native WASAPI loopback worker, which FFTs every 4th callback of
-// 512 samples at 48 kHz. With both visualizers updating at the same
-// rate the input mic and output speakers look identical instead of
-// the mic appearing choppy.
+// Audio sampler loop. AUDIO_FRAME_MS controls the visualizer redraw
+// cadence — currently 100 ms (10 Hz). Worker still produces FFT bands
+// at ~23 Hz; we just sample the latest at each tick. Lower the rate to
+// trade visual smoothness for renderer CPU.
 function drawAudioFrame() {
   audioInViz.sample();
   audioOutViz.sample();
-  setTimeout(drawAudioFrame, 43);
+  setTimeout(drawAudioFrame, AUDIO_FRAME_MS);
 }
 startAudioWaves();
 
@@ -3317,17 +3308,20 @@ async function resetAllPanelSizes() {
   await window.dash.setConfig({ panelSizes: {} });
 }
 
-function makeResizeHandle(panel, key, corner /* 'nw' | 'ne' | 'sw' | 'se' */) {
+function makeResizeHandle(panel, key, dir /* 'nw'|'ne'|'sw'|'se' corners, or 'n'|'s'|'e'|'w' edges */) {
   const handle = document.createElement('div');
-  handle.className = `resize-handle resize-handle-${corner}`;
+  handle.className = `resize-handle resize-handle-${dir}`;
   handle.title = 'Drag to resize · Ctrl+Shift+R to reset';
   panel.appendChild(handle);
 
+  // .includes works for both 2-char corners ('nw') and 1-char edges ('w'),
+  // so an edge handle grows along a single axis while corners grow along
+  // two axes — same downstream math.
   const grows = {
-    n: corner[0] === 'n',
-    s: corner[0] === 's',
-    w: corner[1] === 'w',
-    e: corner[1] === 'e',
+    n: dir.includes('n'),
+    s: dir.includes('s'),
+    w: dir.includes('w'),
+    e: dir.includes('e'),
   };
 
   handle.addEventListener('mousedown', (e) => {
@@ -3588,6 +3582,13 @@ function attachResize(panel) {
   makeResizeHandle(panel, key, 'ne');
   makeResizeHandle(panel, key, 'sw');
   makeResizeHandle(panel, key, 'se');
+  // The productivity combo panel also gets left + right edge handles so
+  // the user can grab either side and resize horizontally — the corner
+  // hit boxes alone (14×14) are easy to miss next to the header chrome.
+  if (panel.classList.contains('panel-combo')) {
+    makeResizeHandle(panel, key, 'e');
+    makeResizeHandle(panel, key, 'w');
+  }
 }
 
 // Stagger the panel-pulse animation so panels don't all peak at the same time.
@@ -3649,29 +3650,90 @@ function attachComboFoldButtons(panel) {
   fullBtn.title = 'Fold full-down';
   fullBtn.textContent = '●';
 
-  function applyFold(mode) {
-    panel.classList.remove('is-fold-half', 'is-fold-full', 'is-collapsed');
-    halfBtn.classList.toggle('is-active', mode === 'half');
-    fullBtn.classList.toggle('is-active', mode === 'full');
-    // Body class drives the dim-rest-of-dashboard backdrop in CSS.
-    document.body.classList.toggle('is-combo-fold-full', mode === 'full');
-    if (!mode) {
-      panel.style.removeProperty('--fold-top');
-      panel.style.removeProperty('--fold-left');
-      panel.style.removeProperty('--fold-width');
-      return;
-    }
-    // Capture current column geometry so the fixed overlay lines up with
-    // the grid cell underneath. Read BEFORE adding the class.
-    const r = panel.getBoundingClientRect();
-    panel.style.setProperty('--fold-top',   `${Math.round(r.top)}px`);
-    panel.style.setProperty('--fold-left',  `${Math.round(r.left)}px`);
-    panel.style.setProperty('--fold-width', `${Math.round(r.width)}px`);
-    panel.classList.add(mode === 'half' ? 'is-fold-half' : 'is-fold-full');
+  // Screen-fill ("heavy" focus): fixed overlay covering nearly the
+  // whole viewport with a dim backdrop behind it AND the dashboard
+  // pinned always-on-top so the panel stays visible above every other
+  // app. For deep focus on one pane.
+  const screenBtn = document.createElement('button');
+  screenBtn.className = 'panel-collapse-btn panel-fold-btn panel-fold-btn-screen';
+  screenBtn.type = 'button';
+  screenBtn.title = 'Focus mode (always-on-top, dim backdrop)';
+  screenBtn.textContent = '⛶';
+
+  // Light focus: same geometry as screen mode, but no dim backdrop and
+  // no always-on-top — the rest of the dashboard stays visible and
+  // interactive. A gentler "spread out this pane" mode.
+  const lightBtn = document.createElement('button');
+  lightBtn.className = 'panel-collapse-btn panel-fold-btn panel-fold-btn-light';
+  lightBtn.type = 'button';
+  lightBtn.title = 'Light focus (no dim, not always-on-top)';
+  lightBtn.textContent = '▢';
+
+  // Walk every visible non-combo panel and audio grid, classify each as
+  // "left column" (center to the left of viewport center) or "right
+  // column", and record the rightmost-right-edge / leftmost-left-edge.
+  // The combo panel's fold geometry is pinned between those edges plus
+  // a small gap so half/full/collapse never overlap any side panel.
+  function _updateComboFoldBounds() {
+    const vw = window.innerWidth;
+    const cx = vw / 2;
+    let leftMax  = 0;
+    let rightMin = vw;
+    // Include both .panel siblings and .audio-grid floats so audio
+    // visualizers at the bottom corners are respected too.
+    document.querySelectorAll('.panel:not(.panel-combo), .audio-grid').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      const center = (r.left + r.right) / 2;
+      if (center < cx) leftMax  = Math.max(leftMax,  r.right);
+      else             rightMin = Math.min(rightMin, r.left);
+    });
+    const GAP = 12;
+    // Topbar lives at top: 6px with its own height; query its rect so
+    // the panel sits below the bar even if the bar's contents grow.
+    const topbar = document.querySelector('.topbar-controls');
+    const topbarBottom = topbar ? topbar.getBoundingClientRect().bottom : 60;
+    panel.style.setProperty('--combo-fold-top',   `${Math.round(topbarBottom + GAP)}px`);
+    panel.style.setProperty('--combo-fold-left',  `${Math.round(leftMax + GAP)}px`);
+    panel.style.setProperty('--combo-fold-right', `${Math.round(vw - rightMin + GAP)}px`);
   }
 
-  halfBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-  fullBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+  function applyFold(mode) {
+    panel.classList.remove('is-fold-half', 'is-fold-full', 'is-fold-screen', 'is-fold-light', 'is-collapsed');
+    halfBtn.classList.toggle('is-active',   mode === 'half');
+    fullBtn.classList.toggle('is-active',   mode === 'full');
+    screenBtn.classList.toggle('is-active', mode === 'screen');
+    lightBtn.classList.toggle('is-active',  mode === 'light');
+    document.body.classList.toggle('is-combo-fold-full',   mode === 'full' || mode === 'screen');
+    document.body.classList.toggle('is-combo-fold-screen', mode === 'screen');
+    document.body.classList.toggle('is-combo-fold-light',  mode === 'light');
+    try { window.dash?.setAlwaysOnTop?.(mode === 'screen'); } catch {}
+    panel.style.removeProperty('--fold-top');
+    panel.style.removeProperty('--fold-left');
+    panel.style.removeProperty('--fold-width');
+    if (!mode) return;
+    if (mode === 'screen') { panel.classList.add('is-fold-screen'); return; }
+    if (mode === 'light')  { panel.classList.add('is-fold-light');  return; }
+    // Half / full / collapse modes: re-measure side panels before
+    // applying the class so the fold uses fresh geometry every time.
+    _updateComboFoldBounds();
+    if (mode === 'half')   { panel.classList.add('is-fold-half');   return; }
+    if (mode === 'full')   { panel.classList.add('is-fold-full');   return; }
+  }
+  // Re-measure on window resize so a viewport change doesn't leave the
+  // panel hanging at the old offsets (only applies while a fold is on).
+  window.addEventListener('resize', () => {
+    if (panel.classList.contains('is-fold-half') ||
+        panel.classList.contains('is-fold-full') ||
+        panel.classList.contains('is-collapsed')) {
+      _updateComboFoldBounds();
+    }
+  });
+
+  halfBtn.addEventListener('mousedown',   (e) => e.stopPropagation());
+  fullBtn.addEventListener('mousedown',   (e) => e.stopPropagation());
+  screenBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+  lightBtn.addEventListener('mousedown',  (e) => e.stopPropagation());
   halfBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     applyFold(panel.classList.contains('is-fold-half') ? null : 'half');
@@ -3680,34 +3742,48 @@ function attachComboFoldButtons(panel) {
     e.stopPropagation();
     applyFold(panel.classList.contains('is-fold-full') ? null : 'full');
   });
+  screenBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    applyFold(panel.classList.contains('is-fold-screen') ? null : 'screen');
+  });
+  lightBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    applyFold(panel.classList.contains('is-fold-light') ? null : 'light');
+  });
 
-  // Group all three controls (collapse + half + full) in a single flex
-  // wrapper so they hug the right edge of the header instead of being
-  // separated by the grid's auto columns.
+  // Group all five controls (collapse + half + full + screen + light)
+  // in a single flex wrapper so they hug the right edge of the header
+  // instead of being separated by the grid's auto columns.
   const group = document.createElement('span');
   group.className = 'panel-fold-group';
   if (collapseBtn) group.appendChild(collapseBtn);
   group.appendChild(halfBtn);
   group.appendChild(fullBtn);
+  group.appendChild(screenBtn);
+  group.appendChild(lightBtn);
   header.appendChild(group);
 
   // Existing collapse chevron must clear any fold state so the three modes
-  // are mutually exclusive.
+  // are mutually exclusive. Also re-measure side-panel bounds so the
+  // collapsed header sits in the centered gap, not at its grid column.
   if (collapseBtn) {
     collapseBtn.addEventListener('click', () => {
       if (panel.classList.contains('is-collapsed')) {
         applyFold(null);
         panel.classList.add('is-collapsed');
+        _updateComboFoldBounds();
+      } else {
+        _updateComboFoldBounds();
       }
     });
   }
 
   // Re-pin geometry on viewport resize while a fold is active (the column
-  // width can change when the dashboard window is resized).
+  // width can change when the dashboard window is resized). Screen mode
+  // is pinned to viewport edges by CSS so it doesn't need re-pinning.
   window.addEventListener('resize', () => {
-    if (!panel.classList.contains('is-fold-half') && !panel.classList.contains('is-fold-full')) return;
-    const mode = panel.classList.contains('is-fold-full') ? 'full' : 'half';
-    applyFold(mode);
+    if (panel.classList.contains('is-fold-half'))   { applyFold('half'); return; }
+    if (panel.classList.contains('is-fold-full'))   { applyFold('full'); return; }
   });
 }
 
@@ -3730,6 +3806,7 @@ if (comboPanel) {
   const explorePane     = comboPanel.querySelector('.combo-pane-explore');
   const visualizerPane  = comboPanel.querySelector('.combo-pane-visualizer');
   const browserPane     = comboPanel.querySelector('.combo-pane-browser');
+  const tasksPane       = comboPanel.querySelector('.combo-pane-tasks');
 
   function paintComboHeader() {
     const mode = comboPanel.dataset.mode || 'notes';
@@ -3761,6 +3838,13 @@ if (comboPanel) {
       codeEl.textContent = 'BROWSER · PRIVATE';
       tagEl.textContent = _browserState?.tabs?.length ? `${_browserState.tabs.length} TAB${_browserState.tabs.length === 1 ? '' : 'S'}` : '—';
       footerLabelEl.textContent = 'BROWSER URL';
+    } else if (mode === 'tasks') {
+      titleEl.innerHTML = 'PRODUCTIVITY <em>T1</em>';
+      codeEl.textContent = 'TASKS · PROCESS MONITOR';
+      tagEl.textContent = window._tasksState?.procCount != null
+        ? `${window._tasksState.procCount} PROC`
+        : '—';
+      footerLabelEl.textContent = 'TASK STATUS';
     } else {
       titleEl.innerHTML = 'PRODUCTIVITY <em>X1</em>';
       const provider = document.getElementById('chat-provider')?.value;
@@ -3771,7 +3855,7 @@ if (comboPanel) {
   }
 
   function setComboMode(mode, persist = true) {
-    const VALID = new Set(['notes', 'chat', 'paper', 'explore', 'visualizer', 'browser']);
+    const VALID = new Set(['notes', 'chat', 'paper', 'explore', 'visualizer', 'browser', 'tasks']);
     if (!VALID.has(mode)) mode = 'notes';
     comboPanel.dataset.mode = mode;
     notesPane     ?.classList.toggle('is-visible', mode === 'notes');
@@ -3780,6 +3864,7 @@ if (comboPanel) {
     explorePane   ?.classList.toggle('is-visible', mode === 'explore');
     visualizerPane?.classList.toggle('is-visible', mode === 'visualizer');
     browserPane   ?.classList.toggle('is-visible', mode === 'browser');
+    tasksPane     ?.classList.toggle('is-visible', mode === 'tasks');
     comboPanel.querySelectorAll('.combo-mode-tab').forEach(b => {
       b.classList.toggle('is-active', b.dataset.mode === mode);
     });
@@ -3788,6 +3873,7 @@ if (comboPanel) {
     if (mode === 'explore')    refreshExplore();
     if (mode === 'visualizer') refreshVisualizer();
     if (mode === 'browser')    initBrowserOnce();
+    if (mode === 'tasks')      refreshTasksNow();
     // BROWSER pane tracks attach/detach state so BrowserView gets
     // detached from the host window when the user leaves the tab.
     if (window._browserState) {
@@ -4576,6 +4662,7 @@ if (comboPanel) {
   const browserUrlEl      = document.getElementById('browser-url');
   const browserBookmarkBtn= document.getElementById('browser-bookmark-btn');
   const browserReaderBtn  = document.getElementById('browser-reader-btn');
+  const browserDarkBtn    = document.getElementById('browser-dark-btn');
   const browserBookmarksEl= document.getElementById('browser-bookmarks');
   const browserBookmarksEmptyEl = document.getElementById('browser-bookmarks-empty');
   const browserStageEl    = document.getElementById('browser-stage');
@@ -4675,13 +4762,17 @@ if (comboPanel) {
     }
     const onPage = t.mode === 'page';
     const onResults = t.mode === 'results';
-    if (document.activeElement !== browserUrlEl) browserUrlEl.value = onPage ? (t.url || '') : '';
-    // Back button is "go up one step": page → (BV history → results),
-    // results → splash. So enable it whenever there's any step to take.
-    const hasResultsToReturnTo = !!(t.results && t.results.items?.length);
-    const canBack = (onPage && (t.canBack || hasResultsToReturnTo)) || onResults;
-    browserBackBtn.disabled    = !canBack;
-    browserForwardBtn.disabled = !onPage || !t.canFwd;
+    // Keep the user's typed query visible when returning to a results
+    // page so they don't have to re-type to refine — falls back to the
+    // page URL on 'page' and empty on 'splash'.
+    if (document.activeElement !== browserUrlEl) {
+      browserUrlEl.value = onPage ? (t.url || '') : (onResults ? (t.query || '') : '');
+    }
+    // Back / forward are driven by our per-tab nav stack now. BV history
+    // is irrelevant because the stack already includes every milestone +
+    // every in-page link the user clicked.
+    browserBackBtn.disabled    = !_navCanBack(t);
+    browserForwardBtn.disabled = !_navCanFwd(t);
     const bookmarked = onPage && (_browserState.bookmarks || []).some(b => b.url === t.url);
     browserBookmarkBtn.classList.toggle('is-bookmarked', bookmarked);
     browserBookmarkBtn.disabled = !onPage;
@@ -4755,10 +4846,86 @@ if (comboPanel) {
       results: null,
       page: 1,
       hasMore: true,
+      // Per-tab navigation stack: { type, url?, query?, kind?, results?, page?, hasMore? }
+      // Back/forward step through this — BV's own history is no longer
+      // consulted (it can't represent our app-level results/splash modes).
+      nav: { stack: [], idx: -1 },
     };
+    _navPush(tab, url ? { type: 'page', url } : { type: 'splash' });
     _browserState.tabs.push(tab);
     _browserActivateTab(backendId);
     return tab;
+  }
+
+  // ── Per-tab nav stack ──────────────────────────────────────────
+  // Entries are app-level milestones (splash / results / page). Every
+  // user-initiated state change pushes; every BV did-navigate event also
+  // pushes (covers in-page link clicks). Back/forward simply walk the
+  // stack and re-apply each entry's UI/BV state.
+  //
+  // _navRestoring is the dedupe guard: when we re-navigate the BV from a
+  // back/forward restore, the BV fires did-navigate; that one event must
+  // NOT push a duplicate entry. We mark the expected URL here and clear
+  // it once the matching event arrives.
+  const _navRestoring = new Map(); // tabId -> expected url
+
+  function _navEntryEq(a, b) {
+    if (!a || !b || a.type !== b.type) return false;
+    if (a.type === 'page')    return a.url === b.url;
+    if (a.type === 'results') return a.query === b.query && a.kind === b.kind;
+    if (a.type === 'splash')  return true;
+    return false;
+  }
+  function _navPush(t, entry) {
+    if (!t.nav) t.nav = { stack: [], idx: -1 };
+    t.nav.stack = t.nav.stack.slice(0, t.nav.idx + 1);
+    const last = t.nav.stack[t.nav.idx];
+    if (last && _navEntryEq(last, entry)) return;
+    t.nav.stack.push(entry);
+    t.nav.idx = t.nav.stack.length - 1;
+  }
+  function _navCanBack(t) { return !!(t?.nav && t.nav.idx > 0); }
+  function _navCanFwd(t)  { return !!(t?.nav && t.nav.idx < t.nav.stack.length - 1); }
+  async function _navBack(t) {
+    if (!_navCanBack(t)) return;
+    t.nav.idx--;
+    await _navApply(t, t.nav.stack[t.nav.idx]);
+  }
+  async function _navFwd(t) {
+    if (!_navCanFwd(t)) return;
+    t.nav.idx++;
+    await _navApply(t, t.nav.stack[t.nav.idx]);
+  }
+  async function _navApply(t, entry) {
+    if (!entry) return;
+    if (entry.type === 'splash') {
+      t.mode = 'splash';
+      t.url = '';
+      t.title = 'NEW TAB';
+      t.loading = false;
+      t.query = '';
+      t.results = null;
+    } else if (entry.type === 'results') {
+      t.mode = 'results';
+      t.query = entry.query || '';
+      t.title = `${entry.kind === 'images' ? 'IMG · ' : entry.kind === 'videos' ? 'VID · ' : ''}${entry.query || ''}`;
+      t.results = entry.results || null;
+      t.page = entry.page || 1;
+      t.hasMore = entry.hasMore !== false;
+    } else if (entry.type === 'page') {
+      t.mode = 'page';
+      t.url = entry.url || '';
+      t.title = entry.title || entry.url || '';
+      t.loading = true;
+      if (entry.url) {
+        _navRestoring.set(t.id, entry.url);
+        try { await window.dash?.browserTabNavigate?.(t.id, entry.url); } catch {}
+      }
+    }
+    _browserRenderTabStrip();
+    _browserUpdateChrome();
+    _browserApplyStageMode();
+    if (t.mode === 'results') _browserRenderResults();
   }
 
   async function _browserNavigateActive(url) {
@@ -4768,6 +4935,10 @@ if (comboPanel) {
     t.mode = 'page';
     t.url = url;
     t.loading = true;
+    // Mark the BV navigation as ours so the did-navigate echo doesn't
+    // re-push, then push the milestone ourselves with proper metadata.
+    _navRestoring.set(t.id, url);
+    _navPush(t, { type: 'page', url });
     try { await window.dash?.browserTabNavigate?.(t.id, url); } catch {}
     _browserUpdateChrome();
     _browserApplyStageMode();
@@ -4784,6 +4955,10 @@ if (comboPanel) {
     t.page = 1;
     t.hasMore = true;
     t.results = { kind, items: [], loading: true };
+    // Push milestone BEFORE the fetch so the back stack reflects intent
+    // even mid-load. We update the entry's results snapshot once items
+    // arrive below so a back-to-this-search restores the cached items.
+    _navPush(t, { type: 'results', query: q, kind, results: t.results, page: 1, hasMore: true });
     _browserRenderTabStrip();
     _browserUpdateChrome();
     _browserApplyStageMode();
@@ -4807,6 +4982,13 @@ if (comboPanel) {
     // If a fresh page-1 search returned nothing, there's no point
     // offering LOAD MORE.
     t.hasMore = items.length > 0;
+    // Refresh the current milestone's snapshot so a future back-restore
+    // gets the loaded items, not the in-flight placeholder.
+    const cur = t.nav?.stack?.[t.nav.idx];
+    if (cur && cur.type === 'results' && cur.query === q) {
+      cur.results = t.results;
+      cur.hasMore = t.hasMore;
+    }
     _browserRenderResults();
   }
 
@@ -5178,15 +5360,8 @@ if (comboPanel) {
   function _browserGoHome() {
     const t = _browserActiveTab();
     if (!t) { _browserNewTab(); return; }
-    t.mode = 'splash';
-    t.url = '';
-    t.title = 'NEW TAB';
-    t.loading = false;
-    t.query = '';
-    t.results = null;
-    _browserRenderTabStrip();
-    _browserUpdateChrome();
-    _browserApplyStageMode();
+    _navPush(t, { type: 'splash' });
+    _navApply(t, { type: 'splash' });
     setTimeout(() => browserSplashAddrEl?.focus(), 30);
   }
 
@@ -5268,6 +5443,10 @@ if (comboPanel) {
     // persisted state from the moment the user enters the BROWSER pane.
     try { window.dash?.browserSetReaderMode?.(_browserState.readerMode); } catch {}
     browserReaderBtn?.classList.toggle('is-active', _browserState.readerMode);
+    // Dark-mode default ON unless the user has explicitly turned it off.
+    _browserState.darkMode = cfg.browserDarkMode !== false;
+    try { window.dash?.browserSetDarkMode?.(_browserState.darkMode); } catch {}
+    browserDarkBtn?.classList.toggle('is-active', _browserState.darkMode);
     try {
       const stats = await window.dash?.browserGetStats?.();
       if (stats && typeof stats.adsBlocked    === 'number') _browserState.adsBlocked    = stats.adsBlocked;
@@ -5295,6 +5474,15 @@ if (comboPanel) {
       if (data.type === 'navigate') {
         t.url = data.url || t.url;
         t.mode = 'page';
+        // Push to nav stack — unless this navigation is the BV echoing
+        // a load we already pushed (back/forward restore, or a fresh
+        // URL bar navigation we pushed eagerly above).
+        const expecting = _navRestoring.get(t.id);
+        if (expecting && (expecting === data.url || expecting === t.url)) {
+          _navRestoring.delete(t.id);
+        } else if (data.url) {
+          _navPush(t, { type: 'page', url: data.url });
+        }
         _browserUpdateChrome();
       } else if (data.type === 'title') {
         t.title = data.title || t.title;
@@ -5322,23 +5510,13 @@ if (comboPanel) {
   browserBackBtn?.addEventListener('click', () => {
     const t = _browserActiveTab();
     if (!t) return;
-    if (t.mode === 'page') {
-      // Prefer the BrowserView's own history. If it has nowhere to go
-      // and we have a saved results page from before this navigation,
-      // restore that instead.
-      if (t.canBack) { window.dash?.browserTabBack?.(t.id); return; }
-      if (t.results && t.results.items?.length) {
-        t.mode = 'results';
-        _browserRenderTabStrip();
-        _browserUpdateChrome();
-        _browserApplyStageMode();
-        _browserRenderResults();
-        return;
-      }
-    }
-    if (t.mode === 'results') { _browserGoHome(); return; }
+    _navBack(t);
   });
-  browserForwardBtn?.addEventListener('click', () => { const t = _browserActiveTab(); if (t && t.mode === 'page') window.dash?.browserTabForward?.(t.id); });
+  browserForwardBtn?.addEventListener('click', () => {
+    const t = _browserActiveTab();
+    if (!t) return;
+    _navFwd(t);
+  });
   browserReloadBtn?.addEventListener('click',  () => {
     const t = _browserActiveTab();
     if (!t) return;
@@ -5362,6 +5540,15 @@ if (comboPanel) {
       // filter would never see those requests.
       try { window.dash?.browserTabReloadFresh?.(t.id); } catch {}
     }
+  });
+  // Dark mode — insert/remove an invert CSS overlay on every BrowserView.
+  // No reload needed; main does insertCSS/removeInsertedCSS at runtime so
+  // the toggle is instant.
+  browserDarkBtn?.addEventListener('click', async () => {
+    _browserState.darkMode = !_browserState.darkMode;
+    browserDarkBtn.classList.toggle('is-active', _browserState.darkMode);
+    try { await window.dash?.browserSetDarkMode?.(_browserState.darkMode); } catch {}
+    playSfx?.('click');
   });
   browserUrlEl?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -5595,11 +5782,24 @@ staggerStrobeAll();
     requestAnimationFrame(() => { applySideArrange(); });
   }
 
-  setUserTheme(cfg?.theme || null); // also paints the theme-name chip
+  // Theme: keep the saved slug only if it's still a known palette;
+  // older configs that referenced deleted palette names fall back to
+  // null and get cleared so the next launch starts clean.
+  const savedTheme = cfg?.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : null;
+  setUserTheme(savedTheme);
+  _themeSetPickerActive(savedTheme);
+  if (cfg?.theme && !savedTheme) {
+    try { window.dash?.setConfig?.({ theme: null }); } catch {}
+  }
+  // Restore auto-cycle state. setThemeAuto starts the 20s interval.
+  if (cfg?.themeAuto) setThemeAuto(true);
+  // Restore background pattern (defaults to 'grid' if missing/invalid).
+  setBgPattern(cfg?.bgPattern || 'grid');
+  const bgBtn = document.getElementById('bg-pattern-btn');
+  if (bgBtn) bgBtn.title = `Background · ${(cfg?.bgPattern || 'grid').toUpperCase()}`;
   applyUiFont(cfg?.uiFont || 'DEFAULT');
   if (cfg?.invert) applyInvert(true);
   if (cfg?.dim)    applyDim(true);
-  if (cfg?.themeAuto) setThemeAuto(true);
   if (webcamPanelEl && cfg?.webcamPos) {
     webcamPanelEl.style.left = `${cfg.webcamPos.x}px`;
     webcamPanelEl.style.top  = `${cfg.webcamPos.y}px`;
@@ -5653,6 +5853,8 @@ staggerStrobeAll();
   audioOutViz?.applySavedGeom(cfg?.audioOutPos, sharedSize, cfg?.audioOutMuted);
   audioInViz?.applySavedGain?.(cfg?.audioInGain);
   audioOutViz?.applySavedGain?.(cfg?.audioOutGain);
+  // Restore the persisted visualizer rate (▲/▼ buttons set this).
+  if (Number.isFinite(cfg?.audioFrameMs)) setAudioFrameMs(cfg.audioFrameMs);
   if (cfg?.collapsed) {
     for (const [k, v] of Object.entries(cfg.collapsed)) {
       const panel = document.querySelector(`.panel-${k}`);
@@ -5664,7 +5866,7 @@ staggerStrobeAll();
   initChat(cfg);
 
   if (cfg?.altCity)  applyAltLocation(cfg.altCity);
-  if (cfg?.altCity2) applyAltLocation2(cfg.altCity2);
+  // cfg.altCity2 ignored — alt-zone 2 row was removed from the clock.
   if (cfg?.weatherCity) {
     activeLocation = cfg.weatherCity;
     weatherCityEl.value = activeLocation.name || '';
@@ -6187,6 +6389,762 @@ document.querySelector('#flush-ram-btn')?.addEventListener('click', async () => 
   }
 });
 
+// ── TASKS pane (process / service monitor) ───────────────────────────────
+// Combo-pane mode 'tasks' surfaces app.getAppMetrics() from main: every
+// Electron child process (Browser / Renderer / GPU / Utility / …) with
+// per-proc CPU + working-set memory. Polled every UI_REFRESH_MS but only
+// while the pane is the active combo mode so we don't burn CPU when the
+// user is elsewhere. Each piece of text uses the diag-char letter pulse
+// from the diagnostics overlay so the whole pane scintillates the way
+// the rest of the dashboard chrome does.
+window._tasksState = window._tasksState || {
+  procCount: null,
+  sort:      'memory',    // memory · cpu · pid · name
+  selectedPid: null,
+  prevCpu: new Map(),     // pid -> last cpu sample, for scramble-on-change
+};
+
+function _scrambleInto(el, text) {
+  if (!el) return;
+  const frag = document.createDocumentFragment();
+  for (const ch of String(text)) {
+    const span = document.createElement('span');
+    span.className = ch === ' ' ? 'diag-char is-space' : 'diag-char';
+    span.textContent = ch;
+    const dur   = (2.5 + Math.random() * 3.0).toFixed(2);  // 2.5–5.5s
+    const delay = (-Math.random() * 4).toFixed(2);          // -4..0s
+    span.style.animationDuration = `${dur}s`;
+    span.style.animationDelay    = `${delay}s`;
+    frag.appendChild(span);
+  }
+  el.replaceChildren(frag);
+}
+
+function _fmtMemKb(kb) {
+  if (!Number.isFinite(kb) || kb <= 0) return '—';
+  const mb = kb / 1024;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
+  return `${mb.toFixed(1)} MB`;
+}
+
+function _fmtMemBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '—';
+  const mb = bytes / 1048576;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
+  return `${mb.toFixed(1)} MB`;
+}
+
+// Compute system CPU % from two consecutive os.cpus() snapshots. Caches
+// the prior sample on _tasksState so successive polls produce a moving
+// percentage. Returns null on the very first call (no delta yet).
+function _computeSysCpu(sysInfo) {
+  if (!sysInfo || !Array.isArray(sysInfo.cpuTimes)) return null;
+  const prev = window._tasksState._prevCpuTimes;
+  window._tasksState._prevCpuTimes = sysInfo.cpuTimes.map((t) => ({ ...t }));
+  if (!prev || prev.length !== sysInfo.cpuTimes.length) return null;
+  let busyDelta = 0, totalDelta = 0;
+  for (let i = 0; i < sysInfo.cpuTimes.length; i++) {
+    const p = prev[i], c = sysInfo.cpuTimes[i];
+    const pTotal = (p.user || 0) + (p.nice || 0) + (p.sys || 0) + (p.idle || 0) + (p.irq || 0);
+    const cTotal = (c.user || 0) + (c.nice || 0) + (c.sys || 0) + (c.idle || 0) + (c.irq || 0);
+    const dT = cTotal - pTotal;
+    const dI = (c.idle || 0) - (p.idle || 0);
+    if (dT > 0) {
+      busyDelta  += (dT - dI);
+      totalDelta += dT;
+    }
+  }
+  if (totalDelta <= 0) return null;
+  return (busyDelta / totalDelta) * 100;
+}
+
+function _fmtUpSec(s) {
+  if (!Number.isFinite(s) || s < 0) return '—';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+function _procTypeLabel(t) {
+  // Electron's process types map to short, fixed-width labels so the
+  // PID column lines up regardless of which subprocess is reporting.
+  switch ((t || '').toLowerCase()) {
+    case 'browser':         return 'MAIN';
+    case 'renderer':        return 'RNDR';
+    case 'gpu':             return 'GPU';
+    case 'utility':         return 'UTIL';
+    case 'zygote':          return 'ZYG';
+    case 'sandbox helper':  return 'SBOX';
+    case 'pepper plugin':   return 'PLUG';
+    case 'ppapi':           return 'PPAPI';
+    default:                return (t || '?').slice(0, 4).toUpperCase();
+  }
+}
+
+// Services the app depends on — sourced from src/main/services/. Each
+// row is a lightweight status pill that the renderer can probe by
+// calling the corresponding window.dash channel (probe = "does the
+// channel respond"). Static service catalog so the pane shows what the
+// app *requires* even when polling fails.
+// Each service maps to a window.dash channel we can call as a liveness
+// probe. POWER and WM don't have public read endpoints — they're modules
+// in main — so they piggyback on appVersion (any successful main-process
+// IPC means the host is alive). `slow` services (sensors via LHM) get a
+// longer timeout because PowerShell + native temp reads cost real time.
+const TASK_SERVICES = [
+  { key: 'system',  label: 'SYSTEM',   code: 'CPU · MEM · OS',     probe: 'systemInfo'      },
+  { key: 'sensors', label: 'SENSORS',  code: 'GPU · TEMPS · LHM',  probe: 'tempsInfo',    slow: true },
+  { key: 'power',   label: 'POWER',    code: 'PROFILE · ZEN',      probe: 'appVersion'      },
+  { key: 'audio',   label: 'AUDIO',    code: 'WASAPI · LOOPBACK',  probe: 'getMuteStates'   },
+  { key: 'storage', label: 'STORAGE',  code: 'DISK · DRIVES',      probe: 'storageInfo'     },
+  { key: 'network', label: 'NETWORK',  code: 'LIVE TRAFFIC',       probe: 'netInfo'         },
+  { key: 'wm',      label: 'WINDOW',   code: 'Z-ORDER · FOCUS',    probe: 'appVersion'      },
+  { key: 'browser', label: 'BROWSER',  code: 'BROWSERVIEW · ADS',  probe: 'browserGetStats' },
+];
+// Last-good cache so a single slow tick doesn't flip a probed service to
+// DOWN — we only mark it down after _SVC_DOWN_GRACE consecutive misses.
+const _svcLastOk    = new Map();  // key -> ms timestamp of last resolve
+const _svcMisses    = new Map();  // key -> consecutive timeout/reject count
+const _SVC_FAST_MS  = 1200;
+const _SVC_SLOW_MS  = 3500;
+const _SVC_DOWN_GRACE = 3;        // ticks of misses before flipping to DOWN
+
+const tasksProcListEl    = document.getElementById('tasks-proc-list');
+const tasksSvcListEl     = document.getElementById('tasks-svc-list');
+const tasksFlushBtnEl    = document.getElementById('tasks-flush-btn');
+const tasksRefreshBtnEl  = document.getElementById('tasks-refresh-btn');
+const tasksPaneEl        = document.querySelector('.combo-pane-tasks');
+
+function _sortProcs(metrics) {
+  const arr = Array.isArray(metrics) ? metrics.slice() : [];
+  const sort = window._tasksState.sort;
+  if (sort === 'memory') {
+    arr.sort((a, b) => (b?.memory?.workingSetSize || 0) - (a?.memory?.workingSetSize || 0));
+  } else if (sort === 'cpu') {
+    arr.sort((a, b) => (b?.cpu?.percentCPUUsage || 0) - (a?.cpu?.percentCPUUsage || 0));
+  } else if (sort === 'pid') {
+    arr.sort((a, b) => (a?.pid || 0) - (b?.pid || 0));
+  } else if (sort === 'name') {
+    arr.sort((a, b) => String(a?.type || '').localeCompare(String(b?.type || '')));
+  }
+  return arr;
+}
+
+function renderTasks(data, sysInfo) {
+  if (!tasksPaneEl || !data) return;
+  const metrics = _sortProcs(data.metrics || []);
+  window._tasksState.procCount = metrics.length;
+
+  // ── RAM breakdown (in bytes) ────────────────────────────────────
+  //   APP   = sum of working-set RAM across every Electron child proc
+  //   SYS   = system total used (os.totalmem - os.freemem)
+  //   OTHER = SYS - APP  (clamped to zero in case the polls disagree)
+  const appKb     = metrics.reduce((s, p) => s + (p?.memory?.workingSetSize || 0), 0);
+  const appBytes  = appKb * 1024;
+  const sysUsed   = Number.isFinite(sysInfo?.usedMem)  ? sysInfo.usedMem  : null;
+  const sysTotal  = Number.isFinite(sysInfo?.totalMem) ? sysInfo.totalMem : null;
+  const otherBytes = sysUsed != null ? Math.max(0, sysUsed - appBytes) : null;
+
+  // ── CPU breakdown (% of whole system) ───────────────────────────
+  //   getAppMetrics reports percentCPUUsage as 0..(100 * coreCount); to
+  //   express as % of the whole system we divide by coreCount.
+  //   SYS CPU comes from os.cpus() deltas between two polls — we cache
+  //   the previous sample on window._tasksState.
+  const coreCount = sysInfo?.cpuCount || (sysInfo?.cpuTimes?.length) || 1;
+  const appCpuPct = metrics.reduce((s, p) => s + (p?.cpu?.percentCPUUsage || 0), 0) / coreCount;
+  const sysCpuPct = _computeSysCpu(sysInfo);
+  const otherCpu  = sysCpuPct != null ? Math.max(0, sysCpuPct - appCpuPct) : null;
+
+  // Hero block — labels stay static (rendered once), values scramble.
+  const heroLabels = {
+    app:    'APP',
+    pid:    'PID',
+    upt:    'UPTIME',
+    plat:   'PLATFORM',
+    apprm:  'APP RAM',
+    othrm:  'OTHER RAM',
+    sysrm:  'SYS RAM',
+    appcpu: 'APP CPU',
+    othcpu: 'OTHER CPU',
+    syscpu: 'SYS CPU',
+  };
+  for (const [k, v] of Object.entries(heroLabels)) {
+    _scrambleInto(tasksPaneEl.querySelector(`[data-tasks-line="${k}"]`), v);
+  }
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="appval"]'),
+    `${(data.appName || 'DASHBOARD3D').toUpperCase()} ${data.appVersion ? 'V' + data.appVersion : ''}`);
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="pidval"]'),  String(data.pid ?? '—'));
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="uptval"]'),  _fmtUpSec(data.uptimeSec));
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="platval"]'),
+    `${(data.platform || '').toUpperCase()} · CHROMIUM ${data.chrome || '—'}`);
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="apprmval"]'),
+    _fmtMemBytes(appBytes));
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="othrmval"]'),
+    otherBytes != null ? _fmtMemBytes(otherBytes) : '—');
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="sysrmval"]'),
+    sysUsed != null && sysTotal != null
+      ? `${_fmtMemBytes(sysUsed)} / ${_fmtMemBytes(sysTotal)}`
+      : '—');
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="appcpuval"]'),
+    `${appCpuPct.toFixed(1)} %`);
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="othcpuval"]'),
+    otherCpu != null ? `${otherCpu.toFixed(1)} %` : '—');
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="syscpuval"]'),
+    sysCpuPct != null ? `${sysCpuPct.toFixed(1)} %` : '—');
+
+  // Section headers
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="proctitle"]'), 'PROCESSES');
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="proctag"]'),
+    `${metrics.length} ACTIVE`);
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="svctitle"]'), 'SERVICES');
+  _scrambleInto(tasksPaneEl.querySelector('[data-tasks-line="svctag"]'),
+    `${TASK_SERVICES.length} REGISTERED`);
+
+  // Process rows. Reuse existing <li> nodes when count matches to avoid
+  // re-creating DOM on every tick (cheap-enough animation work stays
+  // limited to the inner spans).
+  if (!tasksProcListEl) return;
+  if (tasksProcListEl.children.length !== metrics.length) {
+    tasksProcListEl.replaceChildren();
+    for (let i = 0; i < metrics.length; i++) {
+      const li = document.createElement('li');
+      li.className = 'tasks-proc-row';
+      li.innerHTML = `
+        <span class="tp-type" data-col="type"></span>
+        <span class="tp-pid"  data-col="pid"></span>
+        <span class="tp-name" data-col="name"></span>
+        <span class="tp-bar"><span class="tp-bar-fill" data-col="bar"></span></span>
+        <span class="tp-cpu"  data-col="cpu"></span>
+        <span class="tp-mem"  data-col="mem"></span>
+      `;
+      tasksProcListEl.appendChild(li);
+    }
+  }
+  const maxKb = Math.max(1, ...metrics.map(p => p?.memory?.workingSetSize || 0));
+  const rows = tasksProcListEl.children;
+  metrics.forEach((p, i) => {
+    const row = rows[i]; if (!row) return;
+    const pid    = p?.pid ?? '?';
+    const type   = _procTypeLabel(p?.type);
+    const cpu    = (p?.cpu?.percentCPUUsage || 0).toFixed(1);
+    const kb     = p?.memory?.workingSetSize || 0;
+    const name   = (p?.serviceName || p?.name || p?.type || '').toString().toUpperCase().slice(0, 28) || '—';
+    row.dataset.pid = String(pid);
+    row.classList.toggle('is-selected', window._tasksState.selectedPid === pid);
+    _scrambleInto(row.querySelector('[data-col="type"]'), type);
+    _scrambleInto(row.querySelector('[data-col="pid"]'),  String(pid));
+    _scrambleInto(row.querySelector('[data-col="name"]'), name);
+    _scrambleInto(row.querySelector('[data-col="cpu"]'),  `${cpu}%`);
+    _scrambleInto(row.querySelector('[data-col="mem"]'),  _fmtMemKb(kb));
+    const fill = row.querySelector('[data-col="bar"]');
+    if (fill) fill.style.width = `${Math.min(100, (kb / maxKb) * 100)}%`;
+  });
+
+  // Services list — built once, then live-probed each tick. Each row's
+  // dot turns green when the matching window.dash channel resolves.
+  if (tasksSvcListEl && tasksSvcListEl.children.length !== TASK_SERVICES.length) {
+    tasksSvcListEl.replaceChildren();
+    for (const svc of TASK_SERVICES) {
+      const li = document.createElement('li');
+      li.className = 'tasks-svc-row';
+      li.dataset.key = svc.key;
+      li.innerHTML = `
+        <span class="ts-dot"></span>
+        <span class="ts-label" data-col="label"></span>
+        <span class="ts-code"  data-col="code"></span>
+        <span class="ts-state" data-col="state">PROBE…</span>
+      `;
+      tasksSvcListEl.appendChild(li);
+    }
+  }
+  if (tasksSvcListEl) {
+    for (const li of tasksSvcListEl.children) {
+      const key = li.dataset.key;
+      const svc = TASK_SERVICES.find(s => s.key === key);
+      if (!svc) continue;
+      _scrambleInto(li.querySelector('[data-col="label"]'), svc.label);
+      _scrambleInto(li.querySelector('[data-col="code"]'),  svc.code);
+      const stateEl = li.querySelector('[data-col="state"]');
+      if (!svc.probe || !window.dash?.[svc.probe]) {
+        // No channel exposed — treat as missing IPC.
+        li.classList.remove('is-up', 'is-static');
+        li.classList.add('is-down');
+        _scrambleInto(stateEl, 'MISSING');
+        continue;
+      }
+      // Probe-with-grace: a timeout doesn't immediately flip the row
+      // to DOWN; it just bumps a miss counter. The row only goes DOWN
+      // after _SVC_DOWN_GRACE consecutive misses, so slow services
+      // (LHM / PowerShell) stay green across the occasional long tick.
+      const timeoutMs = svc.slow ? _SVC_SLOW_MS : _SVC_FAST_MS;
+      let settled = false;
+      const settle = (ok) => {
+        if (settled) return; settled = true;
+        if (ok) {
+          _svcLastOk.set(key, Date.now());
+          _svcMisses.set(key, 0);
+          li.classList.remove('is-down', 'is-static');
+          li.classList.add('is-up');
+          _scrambleInto(stateEl, 'ONLINE');
+        } else {
+          const n = (_svcMisses.get(key) || 0) + 1;
+          _svcMisses.set(key, n);
+          if (n >= _SVC_DOWN_GRACE) {
+            li.classList.remove('is-up', 'is-static');
+            li.classList.add('is-down');
+            _scrambleInto(stateEl, 'DOWN');
+          } else if (_svcLastOk.has(key)) {
+            // Keep the previous ONLINE pill while we're inside the grace
+            // window so the user doesn't see flapping.
+            li.classList.remove('is-down', 'is-static');
+            li.classList.add('is-up');
+            _scrambleInto(stateEl, 'ONLINE');
+          } else {
+            _scrambleInto(stateEl, 'PROBE…');
+          }
+        }
+      };
+      Promise.resolve()
+        .then(() => window.dash[svc.probe]())
+        .then(() => settle(true))
+        .catch(() => settle(false));
+      setTimeout(() => settle(false), timeoutMs);
+    }
+  }
+
+  paintComboHeader();
+}
+
+async function refreshTasksNow() {
+  if (!window.dash?.appMetrics) return;
+  try {
+    // Parallel: appMetrics for per-process detail, systemInfo for the
+    // overall system RAM/CPU totals so we can compute OTHER = SYS - APP.
+    const [data, sysInfo] = await Promise.all([
+      window.dash.appMetrics(),
+      window.dash?.systemInfo?.().catch(() => null),
+    ]);
+    renderTasks(data, sysInfo);
+  } catch (err) {
+    console.warn('[tasks] poll failed:', err?.message || err);
+  }
+}
+
+setInterval(() => {
+  if (document.hidden) return;
+  if (comboPanel?.dataset.mode !== 'tasks') return;
+  refreshTasksNow();
+}, UI_REFRESH_MS);
+
+// Sort buttons cycle the active mode + immediately repaint.
+tasksPaneEl?.querySelectorAll('.tasks-sort-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.tasksSort;
+    if (!key) return;
+    window._tasksState.sort = key;
+    tasksPaneEl.querySelectorAll('.tasks-sort-btn').forEach(b => {
+      b.classList.toggle('is-active', b.dataset.tasksSort === key);
+    });
+    playSfx?.('click');
+    refreshTasksNow();
+  });
+});
+
+// Row select — toggles a highlight on the clicked PID. Selection survives
+// across refreshes because renderTasks() applies it from _tasksState.
+tasksProcListEl?.addEventListener('click', (e) => {
+  const row = e.target.closest?.('.tasks-proc-row');
+  if (!row) return;
+  const pid = Number(row.dataset.pid);
+  if (!Number.isFinite(pid)) return;
+  window._tasksState.selectedPid = (window._tasksState.selectedPid === pid) ? null : pid;
+  for (const r of tasksProcListEl.children) {
+    r.classList.toggle('is-selected', Number(r.dataset.pid) === window._tasksState.selectedPid);
+  }
+  playSfx?.('click');
+});
+
+tasksRefreshBtnEl?.addEventListener('click', () => {
+  playSfx?.('click');
+  refreshTasksNow();
+});
+
+tasksFlushBtnEl?.addEventListener('click', async () => {
+  if (!window.dash?.flushRam) return;
+  tasksFlushBtnEl.classList.add('is-busy');
+  try {
+    const r = await window.dash.flushRam();
+    if (r?.flushed != null) {
+      console.log(`[tasks] flush — ${r.flushed} working sets dropped (${r.failed || 0} failed)`);
+      playSfx?.('confirm');
+    } else {
+      playSfx?.('error');
+    }
+  } catch (err) {
+    console.warn('[tasks] flush failed:', err?.message || err);
+    playSfx?.('error');
+  } finally {
+    tasksFlushBtnEl.classList.remove('is-busy');
+    refreshTasksNow();
+  }
+});
+
+// ── First-run guided setup wizard ──────────────────────────────────────────
+// Three-step overlay (WiFi → Location → Name) that opens automatically when
+// cfg.setupCompleted is false, and on-demand via the topbar #setup-btn.
+// Persists into the same config keys the rest of the app already reads:
+//   weatherCity (object), altCity (object), userName (string), setupCompleted
+const frOverlayEl = document.getElementById('first-run-overlay');
+if (frOverlayEl) {
+  const frCard       = frOverlayEl.querySelector('.fr-card');
+  const frCloseBtn   = frOverlayEl.querySelector('#fr-close-btn');
+  const frStepsEls   = frOverlayEl.querySelectorAll('.fr-step');
+  const frPaneEls    = frOverlayEl.querySelectorAll('.fr-pane');
+  // WiFi pane
+  const frWifiSub        = frOverlayEl.querySelector('#fr-wifi-sub');
+  const frWifiCurrent    = frOverlayEl.querySelector('#fr-wifi-current');
+  const frWifiCurrentSsid= frOverlayEl.querySelector('#fr-wifi-current-ssid');
+  const frWifiRescanBtn  = frOverlayEl.querySelector('#fr-wifi-rescan-btn');
+  const frWifiListEl     = frOverlayEl.querySelector('#fr-wifi-list');
+  const frWifiPassRow    = frOverlayEl.querySelector('#fr-wifi-password-row');
+  const frWifiPassInput  = frOverlayEl.querySelector('#fr-wifi-password');
+  const frWifiCancelBtn  = frOverlayEl.querySelector('#fr-wifi-cancel-btn');
+  const frWifiConnectBtn = frOverlayEl.querySelector('#fr-wifi-connect-btn');
+  const frWifiStatus     = frOverlayEl.querySelector('#fr-wifi-status');
+  const frWifiSkipBtn    = frOverlayEl.querySelector('#fr-wifi-skip-btn');
+  const frWifiNextBtn    = frOverlayEl.querySelector('#fr-wifi-next-btn');
+  // Location pane
+  const frLocInput   = frOverlayEl.querySelector('#fr-loc-input');
+  const frLocResults = frOverlayEl.querySelector('#fr-loc-results');
+  const frLocStatus  = frOverlayEl.querySelector('#fr-loc-status');
+  const frLocBackBtn = frOverlayEl.querySelector('#fr-loc-back-btn');
+  const frLocNextBtn = frOverlayEl.querySelector('#fr-loc-next-btn');
+  // Name pane
+  const frNameInput     = frOverlayEl.querySelector('#fr-name-input');
+  const frNameBackBtn   = frOverlayEl.querySelector('#fr-name-back-btn');
+  const frNameFinishBtn = frOverlayEl.querySelector('#fr-name-finish-btn');
+
+  const STEPS = ['wifi', 'location', 'name'];
+  let frPickedSsid = null;       // SSID currently selected in the scan list
+  let frPickedLocation = null;   // geocoding hit selected for location step
+  let frLocAbort = null;         // AbortController for in-flight geocoding
+
+  // Animate every node tagged [data-fr-anim] with the per-letter pulse the
+  // diagnostics overlay uses, so the wizard reads as part of the same UI.
+  function _frScrambleAll() {
+    frOverlayEl.querySelectorAll('[data-fr-anim]').forEach((el) => {
+      const text = el.dataset.frAnimSrc != null ? el.dataset.frAnimSrc : el.textContent;
+      el.dataset.frAnimSrc = text;
+      _scrambleInto(el, text);
+    });
+  }
+
+  function _frSetText(el, text) {
+    if (!el) return;
+    el.dataset.frAnimSrc = text;
+    _scrambleInto(el, text);
+  }
+
+  function frShowStep(name) {
+    frPaneEls.forEach((p) => p.classList.toggle('is-visible', p.dataset.frPane === name));
+    const idx = STEPS.indexOf(name);
+    frStepsEls.forEach((s, i) => {
+      s.classList.toggle('is-active', i === idx);
+      s.classList.toggle('is-done',   i <  idx);
+    });
+    if (name === 'wifi')     frPaintWifiInitial();
+    if (name === 'location') setTimeout(() => frLocInput?.focus(), 60);
+    if (name === 'name')     setTimeout(() => frNameInput?.focus(), 60);
+  }
+
+  function frOpen() {
+    frOverlayEl.hidden = false;
+    frShowStep('wifi');
+    _frScrambleAll();
+  }
+  function frClose() { frOverlayEl.hidden = true; }
+
+  // ── WiFi pane ─────────────────────────────────────────────────────
+  async function frPaintWifiInitial() {
+    frWifiListEl.hidden = true;
+    frWifiPassRow.hidden = true;
+    frWifiStatus.hidden = true;
+    frPickedSsid = null;
+    _frSetText(frWifiSub, 'CHECKING NETWORK…');
+    if (!window.dash?.wifiStatus) {
+      _frSetText(frWifiSub, 'WIFI CONTROL UNAVAILABLE · YOU CAN CONTINUE IF ALREADY ONLINE');
+      return;
+    }
+    try {
+      const st = await window.dash.wifiStatus();
+      if (st?.connected && st.ssid) {
+        frWifiCurrent.hidden = false;
+        _frSetText(frWifiCurrentSsid, st.ssid);
+        _frSetText(frWifiSub, 'YOU LOOK ONLINE · TAP CONTINUE OR PICK A DIFFERENT NETWORK');
+      } else {
+        frWifiCurrent.hidden = true;
+        _frSetText(frWifiSub, 'NOT CONNECTED · CHOOSE A NETWORK BELOW');
+        await frScanWifi();
+      }
+    } catch {
+      _frSetText(frWifiSub, 'NETWORK CHECK FAILED · YOU CAN STILL CONTINUE');
+    }
+  }
+
+  async function frScanWifi() {
+    if (!window.dash?.wifiScan) return;
+    _frSetText(frWifiSub, 'SCANNING…');
+    frWifiListEl.hidden = false;
+    frWifiListEl.replaceChildren();
+    try {
+      const r = await window.dash.wifiScan();
+      const nets = r?.networks || [];
+      if (!nets.length) {
+        const li = document.createElement('li');
+        li.className = 'fr-wifi-row';
+        li.style.opacity = '0.5';
+        li.innerHTML = `<span></span><span class="fr-wifi-ssid">No networks found</span><span></span>`;
+        frWifiListEl.appendChild(li);
+        _frSetText(frWifiSub, 'NO NETWORKS FOUND');
+        return;
+      }
+      for (const n of nets) {
+        const li = document.createElement('li');
+        li.className = 'fr-wifi-row';
+        li.dataset.ssid = n.ssid;
+        const lit = Math.max(1, Math.min(4, Math.ceil((n.signal || 0) / 25)));
+        const bars = [1,2,3,4].map((i) => `<span class="${i <= lit ? 'is-lit' : ''}"></span>`).join('');
+        const locked = n.auth && !/open/i.test(n.auth);
+        li.innerHTML = `
+          <span class="fr-wifi-bars">${bars}</span>
+          <span class="fr-wifi-ssid">${escapeText(n.ssid)}</span>
+          <span class="fr-wifi-lock">${locked ? 'LOCK' : 'OPEN'}</span>
+        `;
+        li.dataset.locked = locked ? '1' : '0';
+        frWifiListEl.appendChild(li);
+      }
+      _frSetText(frWifiSub, `${nets.length} NETWORK${nets.length === 1 ? '' : 'S'} FOUND`);
+    } catch (err) {
+      _frSetText(frWifiSub, 'SCAN FAILED · ' + (err?.message || ''));
+    }
+  }
+
+  frWifiListEl?.addEventListener('click', (e) => {
+    const row = e.target.closest?.('.fr-wifi-row');
+    if (!row || !row.dataset.ssid) return;
+    frWifiListEl.querySelectorAll('.fr-wifi-row').forEach(r => r.classList.toggle('is-selected', r === row));
+    frPickedSsid = row.dataset.ssid;
+    const locked = row.dataset.locked === '1';
+    if (locked) {
+      frWifiPassRow.hidden = false;
+      setTimeout(() => frWifiPassInput?.focus(), 40);
+    } else {
+      frWifiPassRow.hidden = true;
+      frConnectWifi(frPickedSsid, '');
+    }
+    playSfx?.('click');
+  });
+
+  async function frConnectWifi(ssid, password) {
+    if (!window.dash?.wifiConnect) return;
+    frWifiStatus.hidden = false;
+    frWifiStatus.classList.remove('is-error', 'is-ok');
+    frWifiStatus.textContent = `CONNECTING TO ${ssid}…`;
+    frWifiConnectBtn?.setAttribute('disabled', 'true');
+    try {
+      const r = await window.dash.wifiConnect(ssid, password);
+      if (r?.ok) {
+        frWifiStatus.classList.add('is-ok');
+        frWifiStatus.textContent = `CONNECTED TO ${r.ssid || ssid}`;
+        frWifiPassRow.hidden = true;
+        frWifiCurrent.hidden = false;
+        _frSetText(frWifiCurrentSsid, r.ssid || ssid);
+        playSfx?.('confirm');
+      } else {
+        frWifiStatus.classList.add('is-error');
+        frWifiStatus.textContent = r?.error || 'Connection failed';
+        playSfx?.('error');
+      }
+    } catch (err) {
+      frWifiStatus.classList.add('is-error');
+      frWifiStatus.textContent = err?.message || 'Connection failed';
+    } finally {
+      frWifiConnectBtn?.removeAttribute('disabled');
+    }
+  }
+
+  frWifiRescanBtn?.addEventListener('click', () => {
+    frWifiCurrent.hidden = true;
+    frScanWifi();
+  });
+  frWifiSkipBtn?.addEventListener('click',  () => frShowStep('location'));
+  frWifiNextBtn?.addEventListener('click',  () => frShowStep('location'));
+  frWifiCancelBtn?.addEventListener('click', () => {
+    frWifiPassRow.hidden = true;
+    frWifiPassInput.value = '';
+    frPickedSsid = null;
+    frWifiListEl.querySelectorAll('.fr-wifi-row').forEach(r => r.classList.remove('is-selected'));
+  });
+  frWifiConnectBtn?.addEventListener('click', () => {
+    const pw = frWifiPassInput.value || '';
+    if (!frPickedSsid) return;
+    frConnectWifi(frPickedSsid, pw);
+  });
+  frWifiPassInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') frWifiConnectBtn?.click();
+  });
+
+  // ── Location pane (Open-Meteo geocoding search) ────────────────────
+  function frRenderLocResults(hits) {
+    frLocResults.replaceChildren();
+    if (!hits || !hits.length) {
+      frLocNextBtn.disabled = true;
+      return;
+    }
+    for (const hit of hits) {
+      const li = document.createElement('li');
+      li.className = 'fr-loc-row';
+      const region = [hit.admin1, hit.country_code || hit.country].filter(Boolean).join(' · ');
+      li.innerHTML = `
+        <span class="fr-loc-name">${escapeText(hit.name || '—')}</span>
+        <span class="fr-loc-region">${escapeText(region)}</span>
+      `;
+      li.addEventListener('click', () => {
+        frLocResults.querySelectorAll('.fr-loc-row').forEach(r => r.classList.remove('is-selected'));
+        li.classList.add('is-selected');
+        frPickedLocation = {
+          name: hit.name,
+          latitude: hit.latitude,
+          longitude: hit.longitude,
+          timezone: hit.timezone,
+          country: hit.country_code || hit.country,
+          admin1: hit.admin1,
+        };
+        frLocNextBtn.disabled = false;
+        playSfx?.('click');
+      });
+      frLocResults.appendChild(li);
+    }
+  }
+
+  let _frLocDebounce = null;
+  async function frSearchLocation(q) {
+    if (frLocAbort) { try { frLocAbort.abort(); } catch {} }
+    frLocAbort = new AbortController();
+    try {
+      const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`;
+      const res = await fetch(url, { signal: frLocAbort.signal });
+      if (!res.ok) throw new Error(`Geocoding failed (${res.status})`);
+      const data = await res.json();
+      const hits = data.results || [];
+      frRenderLocResults(hits);
+      frLocStatus.hidden = hits.length !== 0;
+      if (!hits.length) {
+        frLocStatus.hidden = false;
+        frLocStatus.classList.remove('is-error');
+        frLocStatus.textContent = `NO MATCHES FOR "${q.toUpperCase()}"`;
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+      frLocStatus.hidden = false;
+      frLocStatus.classList.add('is-error');
+      frLocStatus.textContent = err?.message || 'Lookup failed';
+    }
+  }
+  frLocInput?.addEventListener('input', () => {
+    const q = frLocInput.value.trim();
+    frPickedLocation = null;
+    frLocNextBtn.disabled = true;
+    frLocStatus.hidden = true;
+    clearTimeout(_frLocDebounce);
+    if (q.length < 2) {
+      frLocResults.replaceChildren();
+      return;
+    }
+    _frLocDebounce = setTimeout(() => frSearchLocation(q), 280);
+  });
+  frLocBackBtn?.addEventListener('click', () => frShowStep('wifi'));
+  frLocNextBtn?.addEventListener('click', async () => {
+    if (!frPickedLocation) return;
+    try {
+      // Save into the same keys the rest of the app already consumes:
+      // weatherCity drives the WEATHER panel; altCity drives the primary
+      // alt-clock in CHRONO. activeLocation gets a live update so the
+      // weather panel refreshes without a reload.
+      await window.dash?.setConfig?.({
+        weatherCity: frPickedLocation,
+        altCity: { name: frPickedLocation.name, timezone: frPickedLocation.timezone, country: frPickedLocation.country },
+      });
+      activeLocation = frPickedLocation;
+      try {
+        if (weatherCityEl) weatherCityEl.value = frPickedLocation.name || '';
+        loadWeather(frPickedLocation);
+        if (weatherTimer) clearInterval(weatherTimer);
+        weatherTimer = setInterval(() => loadWeather(frPickedLocation), 10 * 60 * 1000);
+      } catch {}
+      try { applyAltLocation({ name: frPickedLocation.name, timezone: frPickedLocation.timezone, country: frPickedLocation.country }); } catch {}
+    } catch (err) {
+      console.warn('[setup] location save failed:', err?.message || err);
+    }
+    frShowStep('name');
+  });
+
+  // ── Name pane ─────────────────────────────────────────────────────
+  frNameBackBtn?.addEventListener('click', () => frShowStep('location'));
+  frNameFinishBtn?.addEventListener('click', async () => {
+    const name = (frNameInput.value || '').trim();
+    try {
+      await window.dash?.setConfig?.({ userName: name, setupCompleted: true });
+    } catch {}
+    applyUserName(name);
+    frClose();
+    playSfx?.('confirm');
+  });
+  frNameInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') frNameFinishBtn?.click();
+  });
+
+  // Close button — skips setup but still marks it completed so it doesn't
+  // re-open every boot. The user can re-trigger via the topbar Setup btn.
+  frCloseBtn?.addEventListener('click', async () => {
+    try { await window.dash?.setConfig?.({ setupCompleted: true }); } catch {}
+    frClose();
+  });
+
+  // Expose open() so the topbar Setup button (wired further below) can
+  // re-launch the wizard at any time.
+  window._frOpenSetup = frOpen;
+}
+
+function applyUserName(name) {
+  const chip = document.getElementById('user-name-chip');
+  if (!chip) return;
+  const trimmed = String(name || '').trim();
+  if (!trimmed) { chip.hidden = true; chip.textContent = ''; return; }
+  chip.hidden = false;
+  chip.textContent = trimmed.toUpperCase();
+}
+
+// Topbar Setup button — re-opens the wizard on demand. Available even
+// after first-run so the user can change WiFi / location / name later.
+document.querySelector('#setup-btn')?.addEventListener('click', () => {
+  if (window._frOpenSetup) window._frOpenSetup();
+});
+
+// Boot-time check — if cfg.setupCompleted is false (or undefined), open
+// the wizard automatically. Always apply the saved user name to the
+// topbar chip, completed or not.
+(async () => {
+  const cfg = await window.dash?.getConfig?.() || {};
+  if (cfg.userName) applyUserName(cfg.userName);
+  if (!cfg.setupCompleted && window._frOpenSetup) {
+    // Defer one tick so the rest of the boot config has applied before
+    // the overlay paints (avoids the wizard flashing over an unstyled UI).
+    setTimeout(() => window._frOpenSetup(), 250);
+  }
+})();
+
 // SFX toggle button — flips the global mute and persists. The document
 // delegate above plays a 'click' first (still-enabled-state), then this
 // handler toggles mute. On re-enable we explicitly play 'confirm' so
@@ -6215,20 +7173,44 @@ document.querySelector('#sfx-btn')?.addEventListener('click', async () => {
 })();
 
 // ── Themes / display toggles ────────────────────────────────────────────────
-// Theme cycle (persists through config). null = default cyan/amber/red.
-const THEMES = [
-  null, 'azure', 'rose', 'ocean', 'pastel', 'meadow', 'citrus',
-  'neon', 'vaporwave', 'matrix', 'volt', 'crimson',
-  // Low-contrast complementary set
-  'dust', 'slate', 'mint', 'lavender', 'harbor',
-  'moss', 'dusk', 'paper', 'storm', 'sage',
-];
+// Default palette + one Cyberpunk section (4 variants). Pretty labels for
+// the topbar chip — the slug (data-theme value) is what gets persisted.
+const THEME_LABELS = {
+  '':             'DEFAULT',
+  'cyber-neon':     'CYBER · NEON',
+  'cyber-moody':    'CYBER · MOODY',
+  'cyber-violet':   'CYBER · VIOLET',
+  'cyber-dark':     'CYBER · DARK',
+  'cyber-runner':   'CYBER · RUNNER',
+  'cyber-2077':     'CYBER · 2077',
+  'cyber-akira':    'CYBER · AKIRA',
+  'cyber-synthwave':'CYBER · SYNTHWAVE',
+  'pastel-bloom': 'PASTEL · BLOOM',
+  'pastel-sky':   'PASTEL · SKY',
+  'pastel-spring':'PASTEL · SPRING',
+  'pastel-sunset':'PASTEL · SUNSET',
+  'pastel-mist':  'PASTEL · MIST',
+  'pastel-lilac': 'PASTEL · LILAC',
+  'pastel-sorbet':'PASTEL · SORBET',
+  'pastel-candy': 'PASTEL · CANDY',
+  'earth-clay':    'MUTED · CLAY',
+  'earth-moss':    'MUTED · MOSS',
+  'earth-sand':    'MUTED · SAND',
+  'earth-stone':   'MUTED · STONE',
+  'earth-paper':   'MUTED · PAPER',
+  'earth-eink':    'MUTED · EINK',
+  'earth-sepia':   'MUTED · SEPIA',
+  'earth-charcoal':'MUTED · CHARCOAL',
+};
+const THEME_SLUGS = new Set(Object.keys(THEME_LABELS).filter(Boolean));
+// Cycle order — default first, then walks every section in dropdown order.
+const THEME_CYCLE = ['', ...Object.keys(THEME_LABELS).filter(Boolean)];
 
 const themeNameEl = document.querySelector('#theme-name');
 function applyTheme(name) {
   if (!name) document.documentElement.removeAttribute('data-theme');
   else       document.documentElement.setAttribute('data-theme', name);
-  if (themeNameEl) themeNameEl.textContent = (name || 'default').toUpperCase();
+  if (themeNameEl) themeNameEl.textContent = THEME_LABELS[name || ''] || 'DEFAULT';
   _themeVersion++;
 }
 
@@ -6268,16 +7250,124 @@ function applyDim(on) {
   document.querySelector('#dim-btn')?.classList.toggle('is-active', !!on);
 }
 
-async function advanceTheme(step = 1) {
-  const cfg = (await window.dash?.getConfig?.()) || {};
-  const cur = cfg.theme ?? null;
-  const idx = THEMES.indexOf(cur);
-  const next = THEMES[((idx + step) % THEMES.length + THEMES.length) % THEMES.length];
-  setUserTheme(next);
-  if (window.dash?.setConfig) await window.dash.setConfig({ theme: next });
+// Theme picker — a small dropdown attached to the topbar #theme-btn. Each
+// .theme-menu-item carries the slug in data-theme-pick (empty string for
+// the default palette). Document-level click closes the menu when the
+// user clicks anywhere else.
+const themePickerEl  = document.getElementById('theme-picker');
+const themeTriggerEl = document.getElementById('theme-name');   // doubles as label + dropdown trigger
+const themeMenuEl    = document.getElementById('theme-menu');
+const themeAutoBtnEl = document.getElementById('theme-auto-btn');
+
+function _themeSetPickerActive(name) {
+  if (!themeMenuEl) return;
+  const slug = name || '';
+  themeMenuEl.querySelectorAll('.theme-menu-item').forEach((b) => {
+    b.classList.toggle('is-active', (b.dataset.themePick || '') === slug);
+  });
 }
 
-document.querySelector('#theme-btn')?.addEventListener('click', () => advanceTheme(1));
+function _themeOpenMenu(open) {
+  if (!themeMenuEl || !themeTriggerEl) return;
+  themeMenuEl.hidden = !open;
+  themeTriggerEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+themeTriggerEl?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  _themeOpenMenu(themeMenuEl?.hidden);
+  playSfx?.('click');
+});
+
+// Cycle button — next theme in THEME_CYCLE, persists. Wraps at end.
+async function advanceTheme(step = 1) {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  const cur = cfg.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : '';
+  const idx = THEME_CYCLE.indexOf(cur);
+  const len = THEME_CYCLE.length;
+  const next = THEME_CYCLE[((idx + step) % len + len) % len];
+  const slug = next || null;
+  setUserTheme(slug);
+  _themeSetPickerActive(slug);
+  if (window.dash?.setConfig) {
+    try { await window.dash.setConfig({ theme: slug }); } catch {}
+  }
+  playSfx?.('click');
+}
+document.querySelector('#theme-cycle-btn')?.addEventListener('click', () => advanceTheme(1));
+
+// Background pattern cycle — one button steps through the 8 variants.
+// Default is 'grid' (no data attribute needed but kept explicit so the
+// cycle index stays stable). Persisted under cfg.bgPattern.
+const BG_PATTERNS = [
+  'grid', 'dots', 'diagonal', 'diamond',
+  'triangles', 'hexagons', 'herringbone', 'circuit',
+];
+function setBgPattern(name) {
+  const slug = BG_PATTERNS.includes(name) ? name : 'grid';
+  document.body.setAttribute('data-bg-pattern', slug);
+  return slug;
+}
+async function cycleBgPattern(step = 1) {
+  const cfg = (await window.dash?.getConfig?.()) || {};
+  const cur = cfg.bgPattern && BG_PATTERNS.includes(cfg.bgPattern) ? cfg.bgPattern : 'grid';
+  const idx = BG_PATTERNS.indexOf(cur);
+  const len = BG_PATTERNS.length;
+  const next = BG_PATTERNS[((idx + step) % len + len) % len];
+  setBgPattern(next);
+  // Update the topbar button's title so the user can see what's active.
+  const btn = document.getElementById('bg-pattern-btn');
+  if (btn) btn.title = `Background · ${next.toUpperCase()}`;
+  if (window.dash?.setConfig) {
+    try { await window.dash.setConfig({ bgPattern: next }); } catch {}
+  }
+  playSfx?.('click');
+}
+document.getElementById('bg-pattern-btn')?.addEventListener('click', () => cycleBgPattern(1));
+
+// Topbar Hz control — steps the global visualizer refresh rate ±5 Hz.
+// Clamped to 10–200 Hz inside stepHz(). Persisted via cfg.audioFrameMs.
+document.querySelector('#hz-down')?.addEventListener('click', () => { stepHz(-5); playSfx?.('click'); });
+document.querySelector('#hz-up')?.addEventListener('click',   () => { stepHz(+5); playSfx?.('click'); });
+
+// Auto-cycle — flip to the next theme every 20s when active. Persisted
+// across launches as cfg.themeAuto so users opt in once.
+const THEME_AUTO_MS = 20000;
+let _themeAutoTimer = null;
+function setThemeAuto(on) {
+  themeAutoBtnEl?.classList.toggle('is-active', !!on);
+  if (_themeAutoTimer) { clearInterval(_themeAutoTimer); _themeAutoTimer = null; }
+  if (on) _themeAutoTimer = setInterval(() => advanceTheme(1), THEME_AUTO_MS);
+}
+themeAutoBtnEl?.addEventListener('click', async () => {
+  const cfg  = (await window.dash?.getConfig?.()) || {};
+  const next = !cfg.themeAuto;
+  setThemeAuto(next);
+  if (window.dash?.setConfig) {
+    try { await window.dash.setConfig({ themeAuto: next }); } catch {}
+  }
+  playSfx?.('click');
+});
+themeMenuEl?.addEventListener('click', async (e) => {
+  const btn = e.target.closest?.('.theme-menu-item');
+  if (!btn) return;
+  const slug = btn.dataset.themePick || '';
+  const next = slug || null;
+  setUserTheme(next);
+  _themeSetPickerActive(next);
+  _themeOpenMenu(false);
+  if (window.dash?.setConfig) {
+    try { await window.dash.setConfig({ theme: next }); } catch {}
+  }
+  playSfx?.('confirm');
+});
+// Click-outside-to-close. Single document handler; the button's own
+// click stops propagation above so it doesn't immediately re-close.
+document.addEventListener('click', (e) => {
+  if (!themeMenuEl || themeMenuEl.hidden) return;
+  if (themePickerEl?.contains(e.target)) return;
+  _themeOpenMenu(false);
+});
 
 // ── UI font cycle ───────────────────────────────────────────────
 // Each entry maps to a body class (or null = default Rajdhani+Tech-Mono)
@@ -6316,13 +7406,14 @@ document.querySelector('#font-btn')?.addEventListener('click', () => advanceUiFo
 // (array of element IDs) and re-applied on load.
 const topbarEl = document.querySelector('.topbar-controls');
 if (topbarEl) {
-  function topbarItems() {
-    return Array.from(topbarEl.children).filter((c) => c.id);
-  }
-  for (const el of topbarItems()) {
+  // All children with an id — used for saved-order persistence and
+  // restore. topbarDraggables() filters out wrappers like #theme-picker
+  // that host their own click handlers; making those draggable would
+  // swallow the button's clicks.
+  function topbarItems()      { return Array.from(topbarEl.children).filter((c) => c.id); }
+  function topbarDraggables() { return topbarItems().filter((c) => c.dataset.noDrag !== 'true'); }
+  for (const el of topbarDraggables()) {
     el.draggable = true;
-    // The button click handlers stop their own clicks from propagating
-    // already; here we just let the browser's native drag take over.
   }
   let _dragged = null;
   topbarEl.addEventListener('dragstart', (e) => {
@@ -6379,7 +7470,12 @@ if (topbarEl) {
     // default. Without this, users who had previously dragged the
     // topbar around would never see new groupings on update.
     const stale = ['restart-btn', 'refresh-btn', 'auto-orient-btn', 'side-arrange-btn', 'eco-mode-btn', 'airplane-btn', 'offline-btn'];
-    if (stale.some((id) => ids.includes(id))) {
+    // Also reset if the saved order pre-dates the introduction of any
+    // of these wrappers — without them slotted in, restore would drop
+    // them at the end of the bar instead of where the HTML places them.
+    const requiredNew = ['theme-picker', 'setup-btn', 'user-name-chip', 'hz-control', 'bg-pattern-btn'];
+    const missing = requiredNew.some((id) => !ids.includes(id) && document.getElementById(id));
+    if (stale.some((id) => ids.includes(id)) || missing) {
       if (window.dash?.setConfig) {
         try { await window.dash.setConfig({ topbarOrder: null }); } catch {}
       }
@@ -6400,21 +7496,7 @@ if (topbarEl) {
   })();
 }
 
-// Auto-cycle: every 25s, advance to next theme. Persisted across reloads.
-const THEME_AUTO_MS = 25000;
-let _themeAutoTimer = null;
-const themeAutoBtn = document.querySelector('#theme-auto-btn');
-function setThemeAuto(on) {
-  themeAutoBtn?.classList.toggle('is-active', !!on);
-  if (_themeAutoTimer) { clearInterval(_themeAutoTimer); _themeAutoTimer = null; }
-  if (on) _themeAutoTimer = setInterval(() => advanceTheme(1), THEME_AUTO_MS);
-}
-themeAutoBtn?.addEventListener('click', async () => {
-  const cfg = (await window.dash?.getConfig?.()) || {};
-  const next = !cfg.themeAuto;
-  setThemeAuto(next);
-  if (window.dash?.setConfig) await window.dash.setConfig({ themeAuto: next });
-});
+// setThemeAuto is defined above with the rest of the theme-picker wiring.
 
 document.querySelector('#invert-btn')?.addEventListener('click', async () => {
   const cfg = (await window.dash?.getConfig?.()) || {};

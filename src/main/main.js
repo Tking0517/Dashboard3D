@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, screen, session, desktopCapturer, utilityProcess, shell, protocol, net } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Menu, clipboard, screen, session, desktopCapturer, utilityProcess, shell, protocol, net } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -119,9 +119,14 @@ function createWindow() {
 }
 
 // ─── YOUTUBE POPOUT ────────────────────────────────────────────────
-// Borderless always-on-top webview pointing at youtube.com. Sign-in
-// persists via the session partition; CSS is injected on /watch URLs to
-// turn it into a video-only PIP.
+// Frameless always-on-top window. No webview, no youtube.com page load —
+// the renderer is a small custom UI (search bars + results list + native
+// <video> element). yt-client (shared with the standalone YouTubePop)
+// resolves stream URLs via bundled yt-dlp and search via InnerTube +
+// Bing + DDG + Google. Result: zero YouTube web-player JS in our
+// process, so there's nothing to inject ads into.
+const yt = require('yt-client');
+
 let _ytWin = null;
 function openYouTubeWindow() {
   if (_ytWin && !_ytWin.isDestroyed()) {
@@ -130,10 +135,6 @@ function openYouTubeWindow() {
     return;
   }
   _ytWin = new BrowserWindow({
-    // Default to 720p so YouTube's initial quality-detection sees a player
-    // big enough to serve 1080p when manually selected. Smaller windows
-    // (e.g., 640x360) make YouTube cap auto-quality at 720p and sometimes
-    // hide higher options entirely.
     width: 1280,
     height: 720,
     minWidth: 480,
@@ -144,21 +145,23 @@ function openYouTubeWindow() {
     title: 'YouTube',
     useContentSize: true,
     // Crucial for zen mode: at 5% opacity Chromium can flag this window
-    // as "occluded" or backgrounded and drop its frame rate to ~1 Hz,
-    // which is the stutter the user was seeing. paintWhenInitiallyHidden
-    // covers the launch case; backgroundThrottling kills runtime throttle.
+    // as "occluded" / backgrounded and drop its frame rate. The cmd-line
+    // switches (CalculateNativeWinOcclusion, disable-renderer-back-
+    // grounding) cover most of this; paintWhenInitiallyHidden +
+    // backgroundThrottling cover the rest.
     paintWhenInitiallyHidden: true,
     webPreferences: {
       preload: path.join(__dirname, 'youtube-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: true,
       backgroundThrottling: false,
     },
   });
   _ytWin.removeMenu();
   // Esc handler: if the dashboard is in zen, leave zen (and let zen's
-  // own teardown restore this window). Otherwise close the window.
+  // own teardown restore this window). Otherwise close. The renderer
+  // intercepts Escape FIRST when the player view is active (returns to
+  // results); main only fires this when the renderer didn't preventDefault.
   const handleEsc = () => {
     if (_zenIsActiveInMain && _audioWin && !_audioWin.isDestroyed()) {
       _audioWin.webContents.send('force-leave-zen');
@@ -166,52 +169,8 @@ function openYouTubeWindow() {
     }
     _ytWin?.close();
   };
-  _ytWin.webContents.on('did-attach-webview', (_e, wvc) => {
-    // Webview is a separate webContents — host-level backgroundThrottling
-    // doesn't propagate. Disable explicitly so video decode keeps full
-    // frame rate when the host window goes transparent in zen.
-    try { wvc.setBackgroundThrottling(false); } catch {}
-    try { wvc.setFrameRate(60); } catch {}
-    // Force a clean Chrome desktop UA — the <webview useragent="..."> attr
-    // doesn't always apply on the very first navigation, and YouTube uses
-    // both the UA string and Sec-CH-UA client hints to gate quality. The
-    // Electron substring in the default UA gets us downgraded to 720p
-    // even on Premium accounts.
-    // Use a specific real Chrome build number (not "0.0.0"). Some
-    // back-end checks compare the UA version to the Sec-CH-UA-Full-Version
-    // value and reject obvious placeholders.
-    const CHROME_FULL = '130.0.6723.92';
-    const CHROME_MAJOR = '130';
-    const CHROME_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_FULL} Safari/537.36`;
-    try { wvc.setUserAgent(CHROME_UA); } catch {}
-    // Override the full Sec-CH-UA family on every request so YouTube's
-    // fingerprint reads as a stock Windows desktop Chrome. Without these
-    // fields YouTube can still detect "embedded client" and downgrade
-    // quality even on Premium accounts.
-    try {
-      wvc.session.webRequest.onBeforeSendHeaders((details, cb) => {
-        const h = details.requestHeaders;
-        h['User-Agent']                  = CHROME_UA;
-        h['sec-ch-ua']                   = `"Chromium";v="${CHROME_MAJOR}", "Google Chrome";v="${CHROME_MAJOR}", "Not?A_Brand";v="99"`;
-        h['sec-ch-ua-mobile']            = '?0';
-        h['sec-ch-ua-platform']          = '"Windows"';
-        h['sec-ch-ua-platform-version']  = '"15.0.0"';
-        h['sec-ch-ua-arch']              = '"x86"';
-        h['sec-ch-ua-bitness']           = '"64"';
-        h['sec-ch-ua-model']             = '""';
-        h['sec-ch-ua-wow64']             = '?0';
-        h['sec-ch-ua-full-version']      = `"${CHROME_FULL}"`;
-        h['sec-ch-ua-full-version-list'] = `"Chromium";v="${CHROME_FULL}", "Google Chrome";v="${CHROME_FULL}", "Not?A_Brand";v="99.0.0.0"`;
-        cb({ requestHeaders: h });
-      });
-    } catch {}
-    wvc.on('before-input-event', (_ev, input) => {
-      if (input.type === 'keyDown' && input.key === 'Escape') handleEsc();
-    });
-  });
   // Lock the *content* to exact 16:9. setAspectRatio is the native lock;
-  // will-resize / resize fallbacks correct any rounding drift on Windows
-  // where the OS occasionally lets a non-conforming size through.
+  // will-resize / resize fallbacks correct rounding drift on Windows.
   _ytWin.setAspectRatio(16 / 9);
   _ytWin.setContentSize(640, 360);
   _ytWin.on('will-resize', (event, newBounds) => {
@@ -241,7 +200,13 @@ function openYouTubeWindow() {
   _ytWin.webContents.on('before-input-event', (_e, input) => {
     if (input.type === 'keyDown' && input.key === 'Escape') handleEsc();
   });
-  _ytWin.on('closed', () => { _ytWin = null; _ytPreZenBounds = null; });
+  _ytWin.on('closed', () => {
+    _ytWin = null;
+    _ytPreZenBounds = null;
+    // Destroy the hidden Google-scrape window (owned by yt-client) so
+    // we don't leak across popout open/close cycles.
+    try { yt.shutdownGoogle(); } catch {}
+  });
 }
 
 // Zen-mode treatment for the YouTube popout: cover the active display at
@@ -265,9 +230,9 @@ function applyYoutubeZenMode(on) {
   if (on) {
     // Save current bounds so we can restore on exit, then expand to fill
     // the display the window is currently on. Smooth playback at 5%
-    // opacity now relies on the anti-throttle stack (no native fullscreen,
-    // backgroundThrottling off on host + webview, occlusion-detection
-    // disabled, document.hidden stubbed in the page).
+    // opacity relies on the anti-throttle stack (no native fullscreen,
+    // backgroundThrottling off, occlusion-detection disabled,
+    // document.hidden stubbed in the page).
     if (!_ytPreZenBounds) _ytPreZenBounds = _ytWin.getBounds();
     const display = screen.getDisplayMatching(_ytWin.getBounds());
     _ytWin.setBounds(display.bounds);
@@ -368,15 +333,14 @@ app.commandLine.appendSwitch('disable-smooth-scrolling');
 // display scaling. On a HiDPI / 200%-scaled monitor this drops the GPU
 // fill cost by ~4× (paints 2560×1440 instead of 5120×2880). UI looks
 // slightly softer than native @2x but the entire compositor — animations,
-// panel pulses, grid overlay, webview, audio canvases — gets cheaper.
+// panel pulses, grid overlay, embedded browser, audio canvases — gets cheaper.
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
 
 // Embedded BROWSER pane dark mode: nativeTheme.themeSource = 'dark' is
 // set in app.whenReady(). Sites that respect prefers-color-scheme go
 // dark. Sites that don't (legacy light-only) stay light — Chromium's
 // WebContentsForceDark feature flag mangles enough sites' stylesheet
-// rendering that we don't enable it. Per-webview CSS injection is the
-// safer future path if force-dark is required.
+// rendering that we don't enable it.
 
 app.whenReady().then(() => {
   // Auto-grant all media-related permissions so the renderer can call
@@ -529,6 +493,41 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('browser-set-reader-mode', (_e, on) => { _readerMode = !!on; return { ok: true, readerMode: _readerMode }; });
 
+  // Pin the main window above every other application window. Used by
+  // the productivity panel's focus modes so the dashboard doesn't get
+  // covered while the user is concentrating on one pane.
+  ipcMain.handle('set-always-on-top', (_e, on) => {
+    if (!_mainWin || _mainWin.isDestroyed()) return { ok: false };
+    try { _mainWin.setAlwaysOnTop(!!on); return { ok: true, alwaysOnTop: !!on }; }
+    catch (err) { return { ok: false, error: err?.message }; }
+  });
+
+  // Dark-mode toggle for embedded pages. Applies/removes the aggressive
+  // invert CSS on every open tab and persists the choice in config so
+  // it sticks across launches. Returns the new state so the renderer
+  // can paint the toggle button correctly without a follow-up roundtrip.
+  ipcMain.handle('browser-set-dark-mode', async (_e, on) => {
+    _bvDarkMode = !!on;
+    try { writeConfig({ browserDarkMode: _bvDarkMode }); } catch {}
+    for (const [id, t] of _bvTabs.entries()) {
+      const wc = t.view.webContents;
+      if (_bvDarkMode) {
+        try {
+          const key = await wc.insertCSS(_PAGE_DARK_INVERT_CSS);
+          _bvDarkCssKeys.set(id, key);
+        } catch {}
+      } else {
+        const key = _bvDarkCssKeys.get(id);
+        if (key) {
+          try { await wc.removeInsertedCSS(key); } catch {}
+          _bvDarkCssKeys.delete(id);
+        }
+      }
+    }
+    return { ok: true, darkMode: _bvDarkMode };
+  });
+  ipcMain.handle('browser-get-dark-mode', () => ({ darkMode: _bvDarkMode }));
+
   // Route every download initiated from a BrowserView into the dashboard's
   // own downloads/ folder so the Explore pane can list it like gallery/docs
   // files. If a file with the target name already exists, append (1), (2),
@@ -548,48 +547,28 @@ app.whenReady().then(() => {
   });
 
   // ── BrowserView tab manager ──────────────────────────────────
-  // We previously used the <webview> tag for embedded pages, but its
-  // shadow-DOM upgrade was failing in our combo-pane layout and dumping
-  // raw <style>/<script> source text into the page. BrowserView is the
-  // stable, well-supported alternative: a real native view attached to
-  // the BrowserWindow, positioned by setBounds, controlled entirely from
-  // the main process. Each "tab" the renderer creates maps to a
-  // BrowserView. The renderer sends a target rectangle and which tab is
-  // active; main handles the rest. Page-load events are forwarded back
-  // over the 'browser-tab-event' channel so the renderer can keep its
-  // chrome (URL bar, title, back/forward enable state) in sync.
+  // Each renderer "tab" maps to a BrowserView. The renderer sends a
+  // target rectangle and which tab is active; main handles the rest.
+  // Page-load events are forwarded back over 'browser-tab-event' so the
+  // renderer can keep its chrome (URL bar, title, back/forward state)
+  // in sync. Trackers are cut at the network layer — we don't touch the
+  // page DOM (an earlier CLEAN_CSS rule was too broad: legitimate
+  // structural classes like "cookie-policy-notice-cmp" got hidden too).
   const _bvTabs = new Map(); // id → { view, url, title, loading, canBack, canFwd }
   let _bvNextId = 1;
   let _bvActiveId = null;
   let _bvBounds = { x: 0, y: 0, width: 0, height: 0 };
-  // (Earlier revisions injected a CLEAN_CSS rule that hid anything with
-  // "cookie" / "consent" / "gdpr" / "newsletter-modal" in its class or id.
-  // Those substrings turned out to be far too broad — frameworks like
-  // Liferay use class names like "cookie-policy-notice-cmp" on real
-  // structural elements, and hiding them broke the page. Trackers are
-  // already cut at the network layer; we no longer touch the DOM.)
 
   function _sendTabEvent(payload) {
     if (_mainWin && !_mainWin.isDestroyed()) {
       _mainWin.webContents.send('browser-tab-event', payload);
     }
   }
-  // App-level catch-all for popup blocking. setWindowOpenHandler on the
-  // BrowserView's top webContents only covers same-frame window.open;
-  // iframes embedded inside the page (Google "Sign in with Google",
-  // YouTube embed widgets, social share buttons, etc) are SEPARATE
-  // webContents with their own popup paths. Without this, a click on a
-  // target=_blank link inside an iframe slips past per-view handlers and
-  // Electron spawns a fresh BrowserWindow. Filtering by session keeps the
-  // policy scoped to the embedded browser — the dashboard's own renderer
-  // (different session) is untouched.
-  // Popup policy: send the URL back to the renderer as a "new tab"
-  // request. Renderer spawns a fresh BrowserView tab so the original
-  // page stays put on its own tab — better UX than navigating in-place,
-  // which loses the context the user came from. Also catches popups
-  // from iframes (Google "Sign in with Google", embed widgets, social
-  // buttons) since those are separate webContents with their own
-  // window-open paths.
+  // Popup policy: route to a fresh tab. App-level catch-all because
+  // per-view setWindowOpenHandler only sees same-frame window.open —
+  // iframes (Google "Sign in with Google", embed widgets, social
+  // buttons) are separate webContents with their own popup paths. Filter
+  // by session so the dashboard's own renderer is untouched.
   function _requestNewTab(url) {
     if (!url) return;
     if (!_mainWin || _mainWin.isDestroyed()) return;
@@ -659,6 +638,36 @@ app.whenReady().then(() => {
     }
     a, a:visited { color: #d4a849 !important; }
   `;
+  // Aggressive dark-mode injection. Applied as a separate insertCSS()
+  // call so we can pull it back out via removeInsertedCSS() when the
+  // user toggles dark mode off — without dropping the base style (which
+  // still kills motion + sets the fallback page color).
+  //
+  // The filter-invert approach reads dark on virtually every site (it
+  // doesn't care about per-element backgrounds the way a color-only
+  // override does), then re-inverts <img>, <video>, <iframe>, etc. so
+  // media stays right-side-up. The 0.92 invert + 180° hue rotate keeps
+  // blacks from snapping to pure white and roughly preserves the warm/
+  // cool relationships in non-image content.
+  const _PAGE_DARK_INVERT_CSS = `
+    html {
+      background: #fff !important;
+      filter: invert(0.92) hue-rotate(180deg) !important;
+    }
+    img, picture, video, iframe, canvas, embed, object, svg,
+    [style*="background-image"]:not(html):not(body) {
+      filter: invert(1) hue-rotate(180deg) !important;
+    }
+    /* Re-invert media nested inside other re-inverted media so the
+       double-invert collapses back to the page filter. */
+    iframe img, iframe video, iframe picture {
+      filter: none !important;
+    }
+  `;
+  // Per-tab key tracking so we can remove the dark CSS on toggle.
+  const _bvDarkCssKeys = new Map(); // id → cssKey
+  // Initialize the dark-mode flag from config; default ON.
+  let _bvDarkMode = (() => { try { return readConfig().browserDarkMode !== false; } catch { return true; } })();
   function _wireBvEvents(id, view) {
     const wc = view.webContents;
     // Halve the compositor's frame budget for embedded pages. With every
@@ -667,8 +676,14 @@ app.whenReady().then(() => {
     // saves real GPU time. The YouTube popout's webContents uses its own
     // setFrameRate(60), unaffected.
     try { wc.setFrameRate(30); } catch {}
-    wc.on('dom-ready', () => {
+    wc.on('dom-ready', async () => {
       try { wc.insertCSS(_PAGE_STYLE_CSS); } catch {}
+      if (_bvDarkMode) {
+        try {
+          const key = await wc.insertCSS(_PAGE_DARK_INVERT_CSS);
+          _bvDarkCssKeys.set(id, key);
+        } catch {}
+      }
     });
     wc.on('did-start-loading', () => {
       const t = _bvTabs.get(id); if (!t) return;
@@ -701,6 +716,56 @@ app.whenReady().then(() => {
     wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
       if (!isMainFrame) return;
       _sendTabEvent({ id, type: 'fail', url, code, desc });
+    });
+    // Right-click → native context menu. Builds a small template based on
+    // what was actually right-clicked (link / image / selection / editable
+    // input). The "Open link in new tab" entry rides the same renderer
+    // signal popups use (_requestNewTab), so the new tab appears in the
+    // dashboard's chrome instead of spawning a top-level Electron window.
+    wc.on('context-menu', (_event, params) => {
+      const items = [];
+      const link = params.linkURL || '';
+      if (link) {
+        items.push({ label: 'Open link in new tab', click: () => _requestNewTab(link) });
+        items.push({ label: 'Copy link address',    click: () => { try { clipboard.writeText(link); } catch {} } });
+        items.push({ type: 'separator' });
+      }
+      if (params.mediaType === 'image' && params.srcURL) {
+        items.push({ label: 'Open image in new tab', click: () => _requestNewTab(params.srcURL) });
+        items.push({ label: 'Copy image address',    click: () => { try { clipboard.writeText(params.srcURL); } catch {} } });
+        items.push({ type: 'separator' });
+      }
+      // Navigation block — only show what's actually usable.
+      const navItems = [];
+      if (wc.canGoBack())     navItems.push({ label: 'Back',    click: () => { try { wc.goBack(); } catch {} } });
+      if (wc.canGoForward())  navItems.push({ label: 'Forward', click: () => { try { wc.goForward(); } catch {} } });
+      navItems.push({ label: 'Reload', click: () => { try { wc.reload(); } catch {} } });
+      if (navItems.length) {
+        items.push(...navItems);
+        items.push({ type: 'separator' });
+      }
+      // Selection / editable. Hand off to standard role-based items so
+      // the OS shortcut + keybindings render right (cmd+c on macOS etc).
+      if (params.selectionText) {
+        items.push({ label: 'Copy', role: 'copy' });
+      }
+      if (params.isEditable) {
+        items.push({ label: 'Cut',   role: 'cut' });
+        items.push({ label: 'Paste', role: 'paste' });
+        items.push({ label: 'Select all', role: 'selectAll' });
+      }
+      // Final fallback if nothing else is available — at minimum offer
+      // the page URL copy so the user can pull it from a chromeless page.
+      if (!items.length) {
+        items.push({ label: 'Copy page URL', click: () => { try { clipboard.writeText(wc.getURL()); } catch {} } });
+      }
+      try {
+        const menu = Menu.buildFromTemplate(items);
+        // No explicit x/y — Electron pops at the current cursor. params.x/y
+        // are BV-relative and would land off-target since the BV is
+        // offset inside the host window.
+        menu.popup({ window: _mainWin || undefined });
+      } catch {}
     });
     // Popup blocking lives in the app-level web-contents-created
     // handler above (covers both this top-level webContents and any
@@ -1165,6 +1230,168 @@ function registerIpc() {
     };
   });
 
+  // ── WiFi (first-run wizard) ─────────────────────────────────────
+  // Shell out to `netsh wlan` because it's already on every Win10/11
+  // box, doesn't need a native module, and works without admin for
+  // scanning + connecting to user profiles. Connecting to a brand-new
+  // SSID with a password generates a profile XML on the fly and runs
+  // `netsh wlan add profile filename=` to import it. Best-effort —
+  // some Group Policy environments lock down profile add, in which
+  // case we surface the netsh stderr verbatim so the user can copy
+  // the network name into Windows Settings instead.
+  ipcMain.handle('wifi-status', async () => {
+    if (process.platform !== 'win32') return { connected: false, ssid: null };
+    try {
+      const r = await runPowerShell('netsh wlan show interfaces');
+      const out = r?.stdout || '';
+      const stateMatch = out.match(/^\s*State\s*:\s*(.+)$/im);
+      const ssidMatch  = out.match(/^\s*SSID\s*:\s*(.+)$/im);
+      const signalMatch= out.match(/^\s*Signal\s*:\s*(.+)$/im);
+      const state = stateMatch ? stateMatch[1].trim() : '';
+      const ssid  = ssidMatch  ? ssidMatch[1].trim()  : '';
+      const sig   = signalMatch? signalMatch[1].trim(): '';
+      return {
+        connected: /connected/i.test(state) && !/disconnect/i.test(state),
+        ssid,
+        signal: sig,
+        state,
+      };
+    } catch (err) {
+      return { connected: false, ssid: null, error: err?.message };
+    }
+  });
+
+  ipcMain.handle('wifi-scan', async () => {
+    if (process.platform !== 'win32') return { networks: [], error: 'unsupported platform' };
+    try {
+      // Trigger a fresh scan first so cached results aren't stale.
+      try { await runPowerShell('netsh wlan show networks mode=bssid'); } catch {}
+      const r = await runPowerShell('netsh wlan show networks mode=bssid');
+      const out = r?.stdout || '';
+      const lines = out.split(/\r?\n/);
+      const networks = [];
+      let current = null;
+      for (const raw of lines) {
+        const line = raw.trimRight();
+        const ssidM = line.match(/^SSID\s+\d+\s*:\s*(.*)$/i);
+        if (ssidM) {
+          if (current) networks.push(current);
+          current = { ssid: ssidM[1].trim(), signal: 0, auth: '', encryption: '' };
+          continue;
+        }
+        if (!current) continue;
+        const authM = line.match(/^\s*Authentication\s*:\s*(.+)$/i);
+        if (authM) current.auth = authM[1].trim();
+        const encM  = line.match(/^\s*Encryption\s*:\s*(.+)$/i);
+        if (encM) current.encryption = encM[1].trim();
+        const sigM  = line.match(/^\s*Signal\s*:\s*(\d+)\s*%/i);
+        if (sigM) current.signal = Math.max(current.signal, parseInt(sigM[1], 10) || 0);
+      }
+      if (current) networks.push(current);
+      // De-dupe by SSID (some routers broadcast multiple BSSIDs per SSID),
+      // keep the strongest signal, and drop hidden (empty) SSIDs.
+      const map = new Map();
+      for (const n of networks) {
+        if (!n.ssid) continue;
+        const prev = map.get(n.ssid);
+        if (!prev || n.signal > prev.signal) map.set(n.ssid, n);
+      }
+      const out2 = [...map.values()].sort((a, b) => b.signal - a.signal);
+      return { networks: out2 };
+    } catch (err) {
+      return { networks: [], error: err?.message };
+    }
+  });
+
+  ipcMain.handle('wifi-connect', async (_e, { ssid, password }) => {
+    if (process.platform !== 'win32') return { ok: false, error: 'unsupported platform' };
+    if (!ssid || typeof ssid !== 'string') return { ok: false, error: 'ssid required' };
+    try {
+      // Escape XML special chars in SSID + password before they land in
+      // the profile XML body. SSID is also re-encoded in hex for the
+      // <hex> field below to support SSIDs containing characters the
+      // <name> string field doesn't handle cleanly.
+      const xmlEsc = (s) => String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+      const ssidHex = Buffer.from(ssid, 'utf8').toString('hex').toUpperCase();
+      const safeSsid = xmlEsc(ssid);
+      const safePass = password ? xmlEsc(password) : '';
+      const auth   = password ? 'WPA2PSK' : 'open';
+      const encr   = password ? 'AES'     : 'none';
+      const sharedKey = password
+        ? `<sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>${safePass}</keyMaterial></sharedKey>`
+        : '';
+      const xml = `<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <name>${safeSsid}</name>
+  <SSIDConfig><SSID><hex>${ssidHex}</hex><name>${safeSsid}</name></SSID></SSIDConfig>
+  <connectionType>ESS</connectionType>
+  <connectionMode>auto</connectionMode>
+  <MSM><security>
+    <authEncryption><authentication>${auth}</authentication><encryption>${encr}</encryption><useOneX>false</useOneX></authEncryption>
+    ${sharedKey}
+  </security></MSM>
+</WLANProfile>`;
+      const tmp = path.join(app.getPath('temp'), `dash3d-wifi-${Date.now()}.xml`);
+      fs.writeFileSync(tmp, xml, 'utf8');
+      const addCmd = `netsh wlan add profile filename="${tmp}" user=current`;
+      const addRes = await runPowerShell(addCmd);
+      try { fs.unlinkSync(tmp); } catch {}
+      if (addRes?.stderr && /error/i.test(addRes.stderr)) {
+        return { ok: false, error: addRes.stderr.trim() };
+      }
+      // Quote the SSID with backticks-escaped quotes because runPowerShell
+      // wraps the command in single quotes — the SSID value itself needs
+      // to be double-quoted inside the netsh argument.
+      const connCmd = `netsh wlan connect name="${ssid.replace(/"/g, '`"')}"`;
+      const connRes = await runPowerShell(connCmd);
+      if (connRes?.stderr && /error/i.test(connRes.stderr)) {
+        return { ok: false, error: connRes.stderr.trim() };
+      }
+      // Poll the interface for up to ~12s waiting for state=connected.
+      const deadline = Date.now() + 12000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const r = await runPowerShell('netsh wlan show interfaces');
+        const out = r?.stdout || '';
+        const stateM = out.match(/^\s*State\s*:\s*(.+)$/im);
+        const ssidM  = out.match(/^\s*SSID\s*:\s*(.+)$/im);
+        if (stateM && /connected/i.test(stateM[1]) && !/disconnect/i.test(stateM[1]) && ssidM && ssidM[1].trim() === ssid) {
+          return { ok: true, ssid };
+        }
+      }
+      return { ok: false, error: 'Timed out waiting for connection — wrong password?' };
+    } catch (err) {
+      return { ok: false, error: err?.message || 'wifi-connect failed' };
+    }
+  });
+
+  // Per-process snapshot for the TASKS pane. Electron's app.getAppMetrics()
+  // returns one entry per child process (Browser / Renderer / GPU /
+  // Utility / Pepper / Zygote / Sandbox helper / …) with CPU + working-set
+  // memory. memory.workingSetSize is reported in kilobytes — caller in the
+  // renderer scales it to MB. uptimeSec lets the pane show "app age"
+  // alongside per-process creationTime.
+  ipcMain.handle('app-metrics', () => {
+    let metrics = [];
+    try { metrics = app.getAppMetrics() || []; } catch {}
+    return {
+      metrics,
+      appName:    app.getName(),
+      appVersion: app.getVersion(),
+      pid:        process.pid,
+      uptimeSec:  process.uptime(),
+      platform:   process.platform,
+      electron:   process.versions.electron,
+      chrome:     process.versions.chrome,
+      node:       process.versions.node,
+    };
+  });
+
   // User-folder paths. Renderer calls these when it needs to write a screenshot
   // / saved doc / generated image into the on-disk folders that ensureUserFolders
   // creates next to the .exe at app start.
@@ -1457,6 +1684,18 @@ function registerIpc() {
     return next;
   });
   ipcMain.handle('set-youtube-zen-mode', (_e, on) => applyYoutubeZenMode(!!on));
+
+  // yt-client bridge — renderer asks; main process owns the yt-dlp
+  // binary + InnerTube/Bing/DDG/Google HTTPS + hidden BrowserWindow.
+  // Errors stringify back so one broken video doesn't crash the popout.
+  const ytHandler = (resultKey, fn) => async (_e, ...args) => {
+    try { return { ok: true, [resultKey]: await fn(...args) }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  };
+  ipcMain.handle('yt:search',         ytHandler('results', (q, o) => yt.search(q, o || {})));
+  ipcMain.handle('yt:search-general', ytHandler('results', (q, o) => yt.searchGeneral(q, o || {})));
+  ipcMain.handle('yt:get-stream',     ytHandler('stream',  (u) => yt.getStreamUrl(u)));
+  ipcMain.handle('yt:get-metadata',   ytHandler('meta',    (u) => yt.getMetadata(u)));
 
   ipcMain.handle('toggle-fullscreen', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -1768,6 +2007,11 @@ async function getTempsInfo() {
     const ctrls = graphics?.controllers || [];
     result.gpus = ctrls.map((c, i) => ({
       index: i,
+      // Vendor lets us route the right fallback data to the right GPU
+      // — nvidia-smi only knows about NVIDIA cards, and on a mixed
+      // Intel iGPU + NVIDIA dGPU system the nvidia-smi result must
+      // not be merged into the Intel row.
+      vendor: (c.vendor || '').toLowerCase(),
       name: c.model || c.vendor || `GPU ${i}`,
       temp: Number.isFinite(c.temperatureGpu) && c.temperatureGpu > 0 ? c.temperatureGpu : null,
       load: Number.isFinite(c.utilizationGpu) ? c.utilizationGpu : null,
@@ -1779,25 +2023,34 @@ async function getTempsInfo() {
     if (result.gpus.some(g => g.temp != null)) result.sources.push('si:gpu');
   } catch {}
 
-  // Fallback 1: nvidia-smi (more reliable than si for NVIDIA cards)
+  // Fallback 1: nvidia-smi (more reliable than si for NVIDIA cards).
+  // Match nv results to the NVIDIA-vendor entries in result.gpus by
+  // enumeration order — NOT by array index. On Intel+NVIDIA systems
+  // result.gpus[0] is the Intel iGPU and merging nv[0] into it would
+  // overwrite the iGPU's (mostly null) fields with the 4090's data,
+  // making both rows identical.
   if (result.gpus.length === 0 || result.gpus.some(g => g.temp == null || g.memUsed == null)) {
     const nv = await tryNvidiaSmi();
     if (nv?.length) {
-      for (let i = 0; i < nv.length; i++) {
-        if (!result.gpus[i]) {
-          result.gpus[i] = {
-            index: i, name: nv[i].name,
-            temp: nv[i].temp, load: nv[i].util,
-            memUsed: nv[i].memUsed, memTotal: nv[i].memTotal,
-            power: nv[i].power,
+      const nvIndices = result.gpus
+        .map((g, i) => /nvidia/i.test(g.vendor) || /nvidia|geforce|quadro|rtx|gtx/i.test(g.name || '') ? i : -1)
+        .filter((i) => i >= 0);
+      for (let j = 0; j < nv.length; j++) {
+        const targetIdx = j < nvIndices.length ? nvIndices[j] : result.gpus.length;
+        if (!result.gpus[targetIdx]) {
+          result.gpus[targetIdx] = {
+            index: targetIdx, vendor: 'nvidia', name: nv[j].name,
+            temp: nv[j].temp, load: nv[j].util,
+            memUsed: nv[j].memUsed, memTotal: nv[j].memTotal,
+            power: nv[j].power,
           };
         } else {
-          if (result.gpus[i].temp     == null) result.gpus[i].temp     = nv[i].temp;
-          if (result.gpus[i].load     == null) result.gpus[i].load     = nv[i].util;
-          if (result.gpus[i].memUsed  == null) result.gpus[i].memUsed  = nv[i].memUsed;
-          if (result.gpus[i].memTotal == null) result.gpus[i].memTotal = nv[i].memTotal;
-          if (result.gpus[i].power    == null) result.gpus[i].power    = nv[i].power;
-          if (!result.gpus[i].name || /unknown/i.test(result.gpus[i].name)) result.gpus[i].name = nv[i].name;
+          if (result.gpus[targetIdx].temp     == null) result.gpus[targetIdx].temp     = nv[j].temp;
+          if (result.gpus[targetIdx].load     == null) result.gpus[targetIdx].load     = nv[j].util;
+          if (result.gpus[targetIdx].memUsed  == null) result.gpus[targetIdx].memUsed  = nv[j].memUsed;
+          if (result.gpus[targetIdx].memTotal == null) result.gpus[targetIdx].memTotal = nv[j].memTotal;
+          if (result.gpus[targetIdx].power    == null) result.gpus[targetIdx].power    = nv[j].power;
+          if (!result.gpus[targetIdx].name || /unknown/i.test(result.gpus[targetIdx].name)) result.gpus[targetIdx].name = nv[j].name;
         }
       }
       result.sources.push('nvidia-smi');

@@ -4,205 +4,386 @@
   <meta charset="utf-8" />
   <title>YouTube</title>
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
-    .yt-header {
+    html, body {
+      margin: 0; padding: 0; height: 100%; background: #000;
+      overflow: hidden; color: #ddd;
+      font-family: 'Share Tech Mono', ui-monospace, Consolas, monospace;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+
+    /* ─── HEADER ─── draggable strip with search + window controls. */
+    .hdr {
       position: fixed; top: 0; left: 0; right: 0;
       height: 26px;
       background: rgba(0, 0, 0, 0.85);
       -webkit-app-region: drag;
-      display: flex; align-items: center; justify-content: flex-end;
-      z-index: 1000;
-      color: #ddd;
-      font-family: 'Share Tech Mono', monospace;
+      display: flex; align-items: center;
+      z-index: 100;
       font-size: 11px;
       letter-spacing: 0.16em;
       transition: opacity 220ms ease;
     }
-    /* Keep pointer-events auto when hidden so mouseenter fires when the
-       cursor moves into the (invisible) top strip. */
-    .yt-header.is-hidden { opacity: 0; }
-    .yt-search {
+    .hdr.is-hidden { opacity: 0; }
+    .hdr .search {
       -webkit-app-region: no-drag;
-      flex: 1;
-      min-width: 0;
+      flex: 1; min-width: 0;
       appearance: none;
       background: rgba(255, 255, 255, 0.06);
-      border: 0;
-      outline: none;
+      border: 0; outline: none;
       color: #ddd;
-      font-family: inherit;
-      font-size: 11px;
-      letter-spacing: 0.16em;
+      font: inherit; letter-spacing: inherit;
       text-transform: uppercase;
-      padding: 0 12px;
-      margin: 0 8px;
-      height: 18px;
-      line-height: 18px;
+      padding: 0 8px;
+      margin: 0 4px;
+      height: 18px; line-height: 18px;
     }
-    .yt-search:focus { background: rgba(255, 255, 255, 0.12); color: #fff; }
-    .yt-search::placeholder { color: #666; letter-spacing: 0.18em; }
-    .yt-header button {
+    .hdr .search:focus { background: rgba(255, 255, 255, 0.12); color: #fff; }
+    .hdr .search::placeholder { color: #666; letter-spacing: 0.16em; }
+    /* Per-source focus accent. */
+    .hdr .search.yt:focus  { box-shadow: inset 0 -2px 0 #ff4444; }
+    .hdr .search.gen:focus { box-shadow: inset 0 -2px 0 #5ccfff; }
+    .hdr button {
       -webkit-app-region: no-drag;
       appearance: none;
-      background: transparent;
-      border: 0;
-      color: #ddd;
-      cursor: pointer;
-      padding: 0 12px;
-      height: 100%;
-      font-family: inherit;
-      font-size: 13px;
+      background: transparent; border: 0;
+      color: #ddd; cursor: pointer;
+      padding: 0 10px; height: 100%;
+      font: inherit; font-size: 13px;
     }
-    .yt-header button:hover { background: rgba(255, 255, 255, 0.1); }
-    .yt-header button.is-active { color: #5ccfff; }
-    .yt-header button.close:hover { background: #c00; color: #fff; }
-    webview {
-      position: absolute;
-      top: 0; left: 0; right: 0; bottom: 0;
+    .hdr button:hover { background: rgba(255, 255, 255, 0.1); }
+    .hdr button.is-active { color: #5ccfff; }
+    .hdr button.close:hover { background: #c00; color: #fff; }
+
+    /* ─── VIEWS ─── results vs player. Only one is `.active` at a time. */
+    .view { position: absolute; inset: 26px 0 0 0; display: none; }
+    .view.active { display: block; }
+    #view-results { overflow-y: auto; padding: 12px; }
+    .results-empty {
+      text-align: center; padding: 40px 16px;
+      color: #555; font-size: 12px; letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .result {
+      display: flex; gap: 12px;
+      padding: 8px;
+      cursor: pointer;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.02);
+      margin-bottom: 8px;
+    }
+    .result:hover { background: rgba(92, 207, 255, 0.12); }
+    .result .thumb {
+      width: 160px; height: 90px;
+      background: #111;
+      object-fit: cover;
+      flex: none;
+    }
+    .result .thumb.favicon {
+      object-fit: scale-down;
+      padding: 30px 60px;
+      background: #181818;
+    }
+    .result .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .result .title {
+      font-size: 13px; line-height: 1.35;
+      color: #eee;
+      letter-spacing: 0.02em;
+      text-transform: none;
+      max-height: 3.5em;
+      overflow: hidden;
+      word-break: break-word;
+    }
+    .result .sub {
+      margin-top: 4px;
+      font-size: 11px;
+      color: #888;
+      letter-spacing: 0.05em;
+    }
+    .result .sub .dot { margin: 0 6px; color: #555; }
+
+    #view-player { background: #000; }
+    #view-player.active { display: flex; flex-direction: column; }
+    video {
       width: 100%; height: 100%;
       background: #000;
+      object-fit: contain;
+    }
+
+    .toast {
+      position: fixed;
+      left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.85);
+      color: #ddd;
+      padding: 12px 20px;
+      border: 1px solid #333;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      z-index: 1000;
+      pointer-events: none;
+    }
+    .toast.err {
+      border-color: #c00; color: #fff;
+      background: rgba(60, 0, 0, 0.92);
     }
   </style>
 </head>
 <body>
-  <div class="yt-header" id="hdr">
-    <input class="yt-search" id="search" type="search" placeholder="SEARCH YOUTUBE…" autocomplete="off" spellcheck="false" />
-    <button id="back" title="Back">&#8592;</button>
-    <button id="home" title="YouTube home">⌂</button>
-    <button id="aot" class="is-active" title="Toggle always on top">⫐</button>
+  <div class="hdr" id="hdr">
+    <input class="search yt"  id="search-yt"  type="search" placeholder="YOUTUBE…"     autocomplete="off" spellcheck="false" />
+    <input class="search gen" id="search-gen" type="search" placeholder="WEB VIDEOS…"  autocomplete="off" spellcheck="false" />
+    <button id="back" title="Back to results">&#8592;</button>
+    <button id="aot" class="is-active" title="Always on top">⫐</button>
     <button id="close" class="close" title="Close">×</button>
   </div>
-  <webview id="wv"
-           src="https://www.youtube.com/"
-           allowpopups
-           partition="persist:youtube"
-           useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.92 Safari/537.36"></webview>
+
+  <div class="view active" id="view-results">
+    <div class="results-empty" id="empty-state">type a search above and press enter</div>
+    <div id="results-list"></div>
+  </div>
+
+  <div class="view" id="view-player">
+    <video id="player" controls preload="auto"></video>
+  </div>
+
   <script>
-    const wv       = document.getElementById('wv');
-    const hdr      = document.getElementById('hdr');
-    const aotBtn   = document.getElementById('aot');
-    const searchEl = document.getElementById('search');
+    const $        = (id) => document.getElementById(id);
+    const hdr      = $('hdr');
+    const searchYt = $('search-yt');
+    const searchGen= $('search-gen');
+    const aotBtn   = $('aot');
+    const backBtn  = $('back');
+    const closeBtn = $('close');
+    const viewResults = $('view-results');
+    const viewPlayer  = $('view-player');
+    const emptyState  = $('empty-state');
+    const resultsList = $('results-list');
+    const player      = $('player');
 
-    document.getElementById('close').onclick = () => window.close();
-    document.getElementById('back').onclick  = () => { try { wv.goBack(); } catch {} };
-    document.getElementById('home').onclick  = () => wv.loadURL('https://www.youtube.com/');
+    let _toast = null;
+    function toast(msg, isErr) {
+      if (_toast) { _toast.remove(); _toast = null; }
+      if (!msg) return;
+      const el = document.createElement('div');
+      el.className = 'toast' + (isErr ? ' err' : '');
+      el.textContent = msg;
+      document.body.appendChild(el);
+      _toast = el;
+      if (!isErr) {
+        setTimeout(() => { if (el === _toast) { el.remove(); _toast = null; } }, 1500);
+      }
+    }
 
-    // Search: Enter triggers a navigation to YouTube's results page so the
-    // user never has to expose YouTube's own search bar / chrome.
-    searchEl.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter') return;
-      const q = searchEl.value.trim();
-      if (!q) return;
-      wv.loadURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`);
-      searchEl.blur();
-    });
-    aotBtn.onclick = async () => {
+    // ─── Zen-mode keep-alive ─────────────────────────────────────────
+    // The dashboard's zen mode drops _ytWin opacity to 5% which can
+    // cause Chromium to mark the document as hidden/occluded and pause
+    // HTML5 media. Stubbing document.hidden / visibilityState +
+    // swallowing visibilitychange + blur keeps the page believing it's
+    // foreground so the <video> keeps decoding through zen.
+    try {
+      Object.defineProperty(document, 'hidden',                { configurable: true, get: () => false });
+      Object.defineProperty(document, 'webkitHidden',          { configurable: true, get: () => false });
+      Object.defineProperty(document, 'visibilityState',       { configurable: true, get: () => 'visible' });
+      Object.defineProperty(document, 'webkitVisibilityState', { configurable: true, get: () => 'visible' });
+      Object.defineProperty(document, 'hasFocus',              { configurable: true, value: () => true });
+      const stop = (e) => { try { e.stopImmediatePropagation(); e.stopPropagation(); } catch {} };
+      document.addEventListener('visibilitychange',       stop, true);
+      document.addEventListener('webkitvisibilitychange', stop, true);
+      window.addEventListener('blur',                     stop, true);
+    } catch {}
+
+    // ─── Window controls ─────────────────────────────────────────────
+    closeBtn.onclick = () => window.close();
+    aotBtn.onclick   = async () => {
       const next = await window.youtubeHost.toggleAlwaysOnTop();
       aotBtn.classList.toggle('is-active', !!next);
     };
+    backBtn.onclick = () => showResults();
 
-    function isWatchUrl(url) { return /youtube\.com\/watch/.test(url || ''); }
-
-    function injectVideoOnlyCSS() {
-      // Hide everything but the player on /watch pages so the window
-      // becomes a true picture-in-picture. On non-watch URLs (home,
-      // signin, search) leave YouTube's UI intact so the user can
-      // navigate and log in.
-      const url = wv.getURL();
-      if (!isWatchUrl(url)) return;
-      wv.insertCSS(`
-        ytd-masthead, #masthead-container, ytd-mini-guide-renderer,
-        ytd-watch-flexy #secondary, #below, #related, ytd-comments,
-        ytd-watch-metadata, ytd-merch-shelf-renderer,
-        ytd-engagement-panel-section-list-renderer,
-        tp-yt-paper-toast, ytd-popup-container { display: none !important; }
-        html, body, ytd-app, ytd-page-manager, ytd-watch-flexy {
-          background: #000 !important;
-          overflow: hidden !important;
-          margin: 0 !important;
-          padding: 0 !important;
-        }
-        ytd-watch-flexy[role="main"] { padding: 0 !important; }
-        /* Fill the window with the full player tree so YouTube's own
-           layout engine recomputes against the window's 16:9. */
-        ytd-watch-flexy #player.ytd-watch-flexy,
-        ytd-watch-flexy[fixed-panels] #player.ytd-watch-flexy,
-        #player-container-id, #player-container-inner, #player-container,
-        #ytd-player {
-          position: fixed !important;
-          inset: 0 !important;
-          width: 100vw !important;
-          height: 100vh !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          max-width: none !important;
-          max-height: none !important;
-        }
-        /* Force the actual video element + player chrome to fill the
-           container with proper aspect-fit. !important beats YouTube's
-           inline width/height/left/top styles. */
-        #movie_player, .html5-video-player {
-          width: 100% !important;
-          height: 100% !important;
-          left: 0 !important;
-          top: 0 !important;
-        }
-        .html5-video-container { width: 100% !important; height: 100% !important; }
-        video.html5-main-video {
-          width: 100% !important;
-          height: 100% !important;
-          left: 0 !important;
-          top: 0 !important;
-          object-fit: contain !important;
-        }
-      `);
-      // After chrome-hide, the player still has its old dimensions cached
-      // in JS. Fire a resize so YouTube recomputes the video frame to fill
-      // the new container. Run a few times since the SPA layout settles
-      // over a couple of frames.
-      const kick = `
-        window.dispatchEvent(new Event('resize'));
-        const v = document.querySelector('video.html5-main-video');
-        if (v) { v.style.left = '0'; v.style.top = '0'; v.style.width = '100%'; v.style.height = '100%'; }
-      `;
-      wv.executeJavaScript(kick).catch(() => {});
-      setTimeout(() => wv.executeJavaScript(kick).catch(() => {}), 250);
-      setTimeout(() => wv.executeJavaScript(kick).catch(() => {}), 800);
+    // ─── Views ───────────────────────────────────────────────────────
+    function showResults() {
+      try { player.pause(); } catch {}
+      player.removeAttribute('src');
+      player.load();
+      viewPlayer.classList.remove('active');
+      viewResults.classList.add('active');
+    }
+    function showPlayer() {
+      viewResults.classList.remove('active');
+      viewPlayer.classList.add('active');
     }
 
-    // Stub document.hidden / visibilityState / hasFocus + swallow any
-    // visibilitychange events. YouTube's player (and most HTML5 video
-    // libs) pause the video when the document goes "hidden" — which
-    // Chromium reports as soon as another window (the zen overlay) sits
-    // on top of ours. This keeps the page believing it's always
-    // foreground/visible so video keeps decoding.
-    function patchVideoKeepAlive() {
-      const js = `
-        (function() {
-          try {
-            Object.defineProperty(document, 'hidden',                  { configurable: true, get: () => false });
-            Object.defineProperty(document, 'webkitHidden',            { configurable: true, get: () => false });
-            Object.defineProperty(document, 'visibilityState',         { configurable: true, get: () => 'visible' });
-            Object.defineProperty(document, 'webkitVisibilityState',   { configurable: true, get: () => 'visible' });
-            Object.defineProperty(document, 'hasFocus',                { configurable: true, value: () => true });
-            const stop = (e) => { try { e.stopImmediatePropagation(); e.stopPropagation(); } catch {} };
-            document.addEventListener('visibilitychange',         stop, true);
-            document.addEventListener('webkitvisibilitychange',   stop, true);
-            window.addEventListener('blur',                       stop, true);
-          } catch (e) { /* shadowed already, fine */ }
-        })();
-      `;
-      wv.executeJavaScript(js).catch(() => {});
+    // ─── Esc handling ────────────────────────────────────────────────
+    // In player view: back to results (preventDefault so main's escape
+    // handler doesn't also fire and close the window). In results view:
+    // pass through to main, which checks zen-mode + closes accordingly.
+    window.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (document.fullscreenElement) return;
+      if (viewPlayer.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
+        showResults();
+      }
+    });
+
+    // ─── Search ──────────────────────────────────────────────────────
+    let _searchSeq = 0;
+    async function runSearch(q, provider) {
+      if (!q) return;
+      const my = ++_searchSeq;
+      toast('searching ' + provider + '…');
+      const call = provider === 'general'
+        ? window.yt.searchGeneral(q, { limit: 100 })
+        : window.yt.search(q, { limit: 100 });
+      const r = await call;
+      if (my !== _searchSeq) return;
+      toast(null);
+      if (!r || !r.ok) {
+        toast(provider + ' search failed: ' + (r && r.error || 'unknown'), true);
+        return;
+      }
+      renderResults(r.results || [], provider);
     }
 
-    wv.addEventListener('did-navigate',         () => { patchVideoKeepAlive(); injectVideoOnlyCSS(); });
-    wv.addEventListener('did-navigate-in-page', () => { patchVideoKeepAlive(); injectVideoOnlyCSS(); });
-    wv.addEventListener('dom-ready',            () => { patchVideoKeepAlive(); injectVideoOnlyCSS(); });
+    function normalizeResult(it, provider) {
+      if (provider === 'general') {
+        const ytM = (it.url || '').match(/[?&]v=([\w-]{11})/) ||
+                    (it.url || '').match(/youtu\.be\/([\w-]{11})/);
+        let thumb, isFavicon = false;
+        if (it.thumbnail) {
+          thumb = it.thumbnail;
+        } else if (ytM) {
+          thumb = 'https://i.ytimg.com/vi/' + ytM[1] + '/mqdefault.jpg';
+        } else {
+          thumb = 'https://external-content.duckduckgo.com/ip3/' + it.source + '.ico';
+          isFavicon = true;
+        }
+        const parts = [it.source];
+        if (it.duration) parts.push(it.duration);
+        return {
+          idOrUrl: it.url,
+          title: it.title,
+          subParts: parts,
+          thumb,
+          isFavicon,
+        };
+      }
+      const parts = [];
+      if (it.channel)   parts.push(it.channel);
+      if (it.duration)  parts.push(it.duration);
+      if (it.viewCount) parts.push(it.viewCount);
+      return {
+        idOrUrl: it.id,
+        title: it.title,
+        subParts: parts,
+        thumb: it.thumbnail || '',
+        isFavicon: false,
+      };
+    }
 
-    // Hover-based reveal: header is invisible until the cursor enters its
-    // top strip, hides when the cursor leaves. Stays visible while the
-    // search input is focused so a typing user can move their mouse off
-    // without losing the field.
+    function renderResults(items, provider) {
+      resultsList.innerHTML = '';
+      if (!items.length) {
+        emptyState.textContent = 'no results';
+        emptyState.style.display = '';
+        return;
+      }
+      emptyState.style.display = 'none';
+      const frag = document.createDocumentFragment();
+      for (const raw of items) {
+        const it = normalizeResult(raw, provider);
+        const row = document.createElement('div');
+        row.className = 'result';
+        const img = document.createElement('img');
+        img.className = 'thumb' + (it.isFavicon ? ' favicon' : '');
+        img.loading = 'lazy';
+        img.src = it.thumb || '';
+        img.onerror = () => { img.style.visibility = 'hidden'; };
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = it.title || '(no title)';
+        const sub = document.createElement('div');
+        sub.className = 'sub';
+        sub.innerHTML = it.subParts
+          .map((p) => `<span>${escapeHtml(p)}</span>`)
+          .join('<span class="dot">·</span>');
+        meta.appendChild(title);
+        meta.appendChild(sub);
+        row.appendChild(img);
+        row.appendChild(meta);
+        row.onclick = () => playVideo(it.idOrUrl);
+        frag.appendChild(row);
+      }
+      resultsList.appendChild(frag);
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    }
+
+    function bindSearch(el, provider) {
+      el.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const q = el.value.trim();
+        if (!q) return;
+        runSearch(q, provider);
+        el.blur();
+      });
+    }
+    bindSearch(searchYt,  'youtube');
+    bindSearch(searchGen, 'general');
+
+    // ─── Playback ────────────────────────────────────────────────────
+    let _playSeq = 0;
+    async function playVideo(videoId) {
+      const my = ++_playSeq;
+      player.dataset.videoId = videoId;
+      toast('loading stream…');
+      const r = await window.yt.getStream(videoId);
+      if (my !== _playSeq) return;
+      toast(null);
+      if (!r || !r.ok) {
+        toast('stream failed: ' + (r && r.error || 'unknown'), true);
+        return;
+      }
+      const s = r.stream;
+      document.title = (s.title || 'YouTube') + ' — YouTube';
+      player.src = s.url;
+      showPlayer();
+      const play = player.play();
+      if (play && play.catch) {
+        play.catch(() => toast('autoplay blocked — click play', true));
+      }
+    }
+
+    // CDN URLs are signed + time-limited (~6 h). Refetch on
+    // network/decode error.
+    player.addEventListener('error', () => {
+      const err = player.error;
+      if (!err) return;
+      if ((err.code === 2 || err.code === 3) && player.src && !player.dataset.refetching) {
+        const id = player.dataset.videoId;
+        if (!id) return;
+        player.dataset.refetching = '1';
+        const t = player.currentTime;
+        window.yt.getStream(id).then((r) => {
+          delete player.dataset.refetching;
+          if (r && r.ok) {
+            player.src = r.stream.url;
+            player.addEventListener('loadedmetadata', () => {
+              try { player.currentTime = t; player.play(); } catch {}
+            }, { once: true });
+          } else {
+            toast('refetch failed: ' + (r && r.error || 'unknown'), true);
+          }
+        });
+      }
+    });
+
+    // ─── Header hover-reveal ─────────────────────────────────────────
     let _hdrFocused = false;
     function showHdr() { hdr.classList.remove('is-hidden'); }
     function maybeHideHdr() {
@@ -212,8 +393,10 @@
     }
     hdr.addEventListener('mouseenter', showHdr);
     hdr.addEventListener('mouseleave', maybeHideHdr);
-    searchEl.addEventListener('focus', () => { _hdrFocused = true; showHdr(); });
-    searchEl.addEventListener('blur',  () => { _hdrFocused = false; maybeHideHdr(); });
+    for (const el of [searchYt, searchGen]) {
+      el.addEventListener('focus', () => { _hdrFocused = true; showHdr(); });
+      el.addEventListener('blur',  () => { _hdrFocused = false; maybeHideHdr(); });
+    }
     hdr.classList.add('is-hidden');
   </script>
 </body>

@@ -32,6 +32,12 @@ xcopy /Y "%ROOT%src\main\default-config.json" "%ROOT%Dashboard3D-win32-x64\resou
 :: services/ holds the platform adapters (win/linux). /E /I /Y mirrors
 :: the whole tree so new files + subdirs land without listing each one.
 xcopy /E /I /Y "%ROOT%src\main\services" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\services" >nul
+:: yt-client is a sibling file-dep at E:\VSCODE\yt-client and lives in
+:: our node_modules. Mirror it into the packaged resources so source
+:: changes in yt-client (engines, yt-dlp wrapper) flow without needing
+:: a full electron-packager rebuild. The bundled yt-dlp binaries are
+:: in bin/ — /E mirrors them too.
+xcopy /E /I /Y "%ROOT%node_modules\yt-client" "%ROOT%Dashboard3D-win32-x64\resources\app\node_modules\yt-client" >nul
 
 if exist "%APP_EXE%" (
   start "" "%APP_EXE%"

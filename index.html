@@ -41,8 +41,6 @@
         </div>
       </div>
 
-      <!-- Floating webcam preview. Hidden until the user clicks the camera
-           button in the top bar. Drag to move; close with the × chip. -->
       <!-- Terminal / diagnostics overlay. Floating, draggable, scrollable.
            Captures console.log/warn/error and uncaught errors/rejections. -->
       <div id="terminal-panel" class="terminal-panel" hidden>
@@ -87,6 +85,8 @@
         <div class="terminal-resize" id="terminal-resize" title="Drag to resize"></div>
       </div>
 
+      <!-- Floating webcam preview. Hidden until the user clicks the camera
+           button in the top bar. Drag to move; close with the × chip. -->
       <div id="webcam-panel" class="webcam-panel" hidden>
         <video id="webcam-video" autoplay playsinline muted></video>
         <!-- Low-res pixelated mirror of the live feed, only painted while
@@ -179,22 +179,79 @@
 
       <div class="topbar-controls">
         <!-- ── Theme / appearance group ─────────────────────────────── -->
-        <span id="version-chip" class="theme-name version-chip" title="Dashboard3D version">v—</span>
-        <span id="theme-name" class="theme-name">DEFAULT</span>
-        <button id="theme-btn" class="topbar-btn" type="button" title="Cycle theme" aria-label="Cycle theme">
+        <span id="user-name-chip" class="theme-name user-name-chip" title="Logged-in user" hidden>—</span>
+        <button id="setup-btn" class="topbar-btn" type="button" title="Run guided setup" aria-label="Run guided setup">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="6"  cy="12" r="3"/>
             <circle cx="12" cy="12" r="3"/>
-            <circle cx="18" cy="12" r="3"/>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 0 1-4 0v-.08a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06A2 2 0 1 1 4.13 17l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 0 1 0-4h.08A1.7 1.7 0 0 0 4.65 9 1.7 1.7 0 0 0 4.31 7.13l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01A1.7 1.7 0 0 0 10 3.08V3a2 2 0 0 1 4 0v.08a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 0 1 0 4h-.08a1.7 1.7 0 0 0-1.56 1.03Z"/>
+          </svg>
+        </button>
+        <span id="version-chip" class="theme-name version-chip" title="Dashboard3D version">v—</span>
+
+        <button id="bg-pattern-btn" class="topbar-btn" type="button" title="Background pattern" aria-label="Background pattern">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7"/>
+            <circle cx="17.5" cy="6.5" r="3.5"/>
+            <path d="M3 17 L7 13 L11 17 Z"/>
+            <path d="M14 14 L21 14 L21 21 L14 21 Z M14 17.5 L21 17.5"/>
           </svg>
         </button>
 
-        <button id="theme-auto-btn" class="topbar-btn" type="button" title="Auto-cycle themes (every 25s)" aria-label="Auto-cycle themes">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="8"/>
-            <path d="M12 8 V12 L15 14"/>
-          </svg>
-        </button>
+        <div class="hz-control" id="hz-control" data-no-drag="true" title="Global refresh rate · 5 Hz step · 10–200 Hz">
+          <button id="hz-down" class="topbar-btn hz-btn" type="button" aria-label="Slower">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 10 L12 16 L17 10 Z"/></svg>
+          </button>
+          <span id="hz-value" class="theme-name hz-value">10 Hz</span>
+          <button id="hz-up" class="topbar-btn hz-btn" type="button" aria-label="Faster">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14 L12 8 L17 14 Z"/></svg>
+          </button>
+        </div>
+
+        <div class="theme-picker" id="theme-picker" data-no-drag="true">
+          <button id="theme-name" class="theme-name theme-name-trigger" type="button" title="Pick a theme" aria-haspopup="true" aria-expanded="false">DEFAULT</button>
+          <button id="theme-auto-btn" class="topbar-btn" type="button" title="Auto-cycle themes every 20s" aria-label="Auto-cycle themes">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"/>
+              <path d="M12 7 V12 L15.5 14"/>
+            </svg>
+          </button>
+          <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next theme (cycle once)" aria-label="Cycle theme">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12 A9 9 0 1 1 12 3"/>
+              <polyline points="21,3 21,9 15,9"/>
+            </svg>
+          </button>
+          <div id="theme-menu" class="theme-menu" hidden>
+            <button type="button" class="theme-menu-item is-active" data-theme-pick="">DEFAULT</button>
+            <div class="theme-menu-section">CYBERPUNK</div>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-neon">NEON</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-moody">MOODY</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-violet">VIOLET</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-dark">DARK</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-runner">RUNNER</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-2077">2077</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-akira">AKIRA</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="cyber-synthwave">SYNTHWAVE</button>
+            <div class="theme-menu-section">PASTEL</div>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-bloom">BLOOM</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-sky">SKY</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-spring">SPRING</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-sunset">SUNSET</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-mist">MIST</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-lilac">LILAC</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-sorbet">SORBET</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="pastel-candy">CANDY</button>
+            <div class="theme-menu-section">MUTED</div>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-clay">CLAY</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-moss">MOSS</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-sand">SAND</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-stone">STONE</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-paper">PAPER</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-eink">EINK</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-sepia">SEPIA</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="earth-charcoal">CHARCOAL</button>
+          </div>
+        </div>
 
         <span id="font-name" class="theme-name">DEFAULT</span>
         <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
@@ -341,15 +398,22 @@
             </header>
             <div class="panel-body clock-body">
 
-              <div class="time-row">
-                <div class="time-meta">
-                  <span class="micro-label">LOCAL</span>
-                  <span class="micro-val accent" id="clock-tz">—</span>
+              <div class="clock-primary-row">
+                <div class="time-row clock-primary-time">
+                  <div class="time-meta">
+                    <span class="micro-label">LOCAL</span>
+                    <span class="micro-val accent" id="clock-tz">—</span>
+                  </div>
+                  <div class="bigvalue bigvalue-primary">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="clock-time">--:--:--</span>
+                    <span class="bigvalue-unit" id="clock-ampm">--</span>
+                  </div>
                 </div>
-                <div class="bigvalue bigvalue-primary">
-                  <span class="caret">&#9656;</span>
-                  <span class="bigvalue-num" id="clock-time">--:--:--</span>
-                  <span class="bigvalue-unit" id="clock-ampm">--</span>
+                <!-- Profile picture slot — user-supplied image goes here. -->
+                <div class="profile-pic" id="profile-pic" title="Profile picture">
+                  <img id="profile-pic-img" class="profile-pic-img" alt="" hidden />
+                  <span class="profile-pic-placeholder">USER</span>
                 </div>
               </div>
 
@@ -370,31 +434,6 @@
                 <label class="micro-label">ALT 1 CITY</label>
                 <input
                   id="alt-city-input"
-                  class="weather-city"
-                  type="text"
-                  placeholder="ENTER CITY · ENTER"
-                  spellcheck="false"
-                  autocomplete="off"
-                />
-              </div>
-
-              <div class="time-row">
-                <div class="time-meta">
-                  <span class="micro-label">ALT ZONE 2</span>
-                  <span class="micro-val accent" id="alt2-name">—</span>
-                  <span class="micro-label" id="alt2-tz">—</span>
-                </div>
-                <div class="bigvalue bigvalue-secondary">
-                  <span class="caret">&#9656;</span>
-                  <span class="bigvalue-num" id="alt2-time">--:--:--</span>
-                  <span class="bigvalue-unit" id="alt2-ampm">--</span>
-                </div>
-              </div>
-
-              <div class="alt-city-row">
-                <label class="micro-label">ALT 2 CITY</label>
-                <input
-                  id="alt2-city-input"
                   class="weather-city"
                   type="text"
                   placeholder="ENTER CITY · ENTER"
@@ -604,6 +643,7 @@
               <button type="button" class="combo-mode-tab" data-mode="explore">EXPLORE</button>
               <button type="button" class="combo-mode-tab" data-mode="visualizer">VISUALIZER</button>
               <button type="button" class="combo-mode-tab" data-mode="browser">BROWSER</button>
+              <button type="button" class="combo-mode-tab" data-mode="tasks">TASKS</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -793,6 +833,11 @@
                       <path d="M4 5 H20 M4 10 H17 M4 15 H20 M4 20 H14"/>
                     </svg>
                   </button>
+                  <button type="button" class="browser-navbtn" id="browser-dark-btn" title="Dark mode (invert page colors)">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/>
+                    </svg>
+                  </button>
                   <button type="button" class="browser-navbtn" id="browser-bookmark-btn" title="Bookmark this page">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 4 H18 V21 L12 16 L6 21 Z"/></svg>
                   </button>
@@ -845,6 +890,83 @@
                   </div>
                   <div class="browser-status" id="browser-status">READY</div>
                 </div>
+              </div>
+
+              <!-- TASKS pane — process / service inspector. Lists every
+                   Electron child process (Browser, Renderer, GPU, Utility…)
+                   with PID, type, CPU %, and resident memory, plus a card
+                   summarising the host services the app depends on. -->
+              <div class="combo-pane combo-pane-tasks">
+                <div class="tasks-toolbar">
+                  <div class="tasks-toolbar-left">
+                    <button type="button" class="tasks-sort-btn is-active" data-tasks-sort="memory">MEM</button>
+                    <button type="button" class="tasks-sort-btn" data-tasks-sort="cpu">CPU</button>
+                    <button type="button" class="tasks-sort-btn" data-tasks-sort="pid">PID</button>
+                    <button type="button" class="tasks-sort-btn" data-tasks-sort="name">NAME</button>
+                  </div>
+                  <div class="tasks-toolbar-right">
+                    <button type="button" class="tasks-action" id="tasks-flush-btn" title="Flush working sets across all accessible processes">FLUSH</button>
+                    <button type="button" class="tasks-action" id="tasks-refresh-btn" title="Refresh now">↻</button>
+                  </div>
+                </div>
+
+                <div class="tasks-hero">
+                  <div class="tasks-hero-row tasks-hero-row-wide">
+                    <span class="tasks-hero-label" data-tasks-line="app">APP</span>
+                    <span class="tasks-hero-value" data-tasks-line="appval">—</span>
+                  </div>
+                  <!-- RAM row: app · other · system -->
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="apprm">APP RAM</span>
+                    <span class="tasks-hero-value" data-tasks-line="apprmval">—</span>
+                  </div>
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="othrm">OTHER RAM</span>
+                    <span class="tasks-hero-value" data-tasks-line="othrmval">—</span>
+                  </div>
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="sysrm">SYS RAM</span>
+                    <span class="tasks-hero-value" data-tasks-line="sysrmval">—</span>
+                  </div>
+                  <!-- CPU row: app · other · system -->
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="appcpu">APP CPU</span>
+                    <span class="tasks-hero-value" data-tasks-line="appcpuval">—</span>
+                  </div>
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="othcpu">OTHER CPU</span>
+                    <span class="tasks-hero-value" data-tasks-line="othcpuval">—</span>
+                  </div>
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="syscpu">SYS CPU</span>
+                    <span class="tasks-hero-value" data-tasks-line="syscpuval">—</span>
+                  </div>
+                  <!-- Meta row -->
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="pid">PID</span>
+                    <span class="tasks-hero-value" data-tasks-line="pidval">—</span>
+                  </div>
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="upt">UPTIME</span>
+                    <span class="tasks-hero-value" data-tasks-line="uptval">—</span>
+                  </div>
+                  <div class="tasks-hero-row">
+                    <span class="tasks-hero-label" data-tasks-line="plat">PLATFORM</span>
+                    <span class="tasks-hero-value" data-tasks-line="platval">—</span>
+                  </div>
+                </div>
+
+                <div class="tasks-section-head">
+                  <span class="tasks-section-title" data-tasks-line="proctitle">PROCESSES</span>
+                  <span class="tasks-section-tag" data-tasks-line="proctag">— / —</span>
+                </div>
+                <ul class="tasks-proc-list" id="tasks-proc-list"></ul>
+
+                <div class="tasks-section-head">
+                  <span class="tasks-section-title" data-tasks-line="svctitle">SERVICES</span>
+                  <span class="tasks-section-tag" data-tasks-line="svctag">—</span>
+                </div>
+                <ul class="tasks-svc-list" id="tasks-svc-list"></ul>
               </div>
 
             </div>
@@ -1072,6 +1194,90 @@
             </footer>
           </section>
 
+        </div>
+      </div>
+    </div>
+
+    <!-- Guided first-run setup. Opens on boot when cfg.setupCompleted is
+         false, and re-openable from the topbar #setup-btn at any time.
+         Three steps: WiFi → Location → Name. -->
+    <div id="first-run-overlay" class="first-run-overlay" hidden>
+      <div class="fr-card">
+        <header class="fr-card-head">
+          <span class="fr-card-title" id="fr-title">GUIDED SETUP</span>
+          <span class="fr-card-code">DASHBOARD3D</span>
+          <button id="fr-close-btn" class="fr-close-btn" type="button" title="Skip setup">×</button>
+        </header>
+
+        <ol class="fr-steps">
+          <li class="fr-step is-active" data-fr-step="wifi"><span class="fr-step-num">1</span><span class="fr-step-label">WIFI</span></li>
+          <li class="fr-step" data-fr-step="location"><span class="fr-step-num">2</span><span class="fr-step-label">LOCATION</span></li>
+          <li class="fr-step" data-fr-step="name"><span class="fr-step-num">3</span><span class="fr-step-label">NAME</span></li>
+        </ol>
+
+        <div class="fr-body">
+          <!-- STEP 1 · WIFI -->
+          <section class="fr-pane is-visible" data-fr-pane="wifi">
+            <div class="fr-pane-title" data-fr-anim>NETWORK CONNECTION</div>
+            <div class="fr-pane-sub"   data-fr-anim id="fr-wifi-sub">CHECKING…</div>
+
+            <div class="fr-wifi-current" id="fr-wifi-current" hidden>
+              <span class="fr-wifi-dot"></span>
+              <div class="fr-wifi-current-text">
+                <span class="fr-wifi-current-label" data-fr-anim>CONNECTED</span>
+                <span class="fr-wifi-current-ssid" id="fr-wifi-current-ssid" data-fr-anim>—</span>
+              </div>
+              <button id="fr-wifi-rescan-btn" class="fr-link-btn" type="button">CHANGE</button>
+            </div>
+
+            <ul class="fr-wifi-list" id="fr-wifi-list" hidden></ul>
+
+            <div class="fr-wifi-password" id="fr-wifi-password-row" hidden>
+              <label class="fr-input-label" data-fr-anim>PASSWORD</label>
+              <input id="fr-wifi-password" class="fr-input" type="password" placeholder="Network password…" spellcheck="false" autocomplete="off" />
+              <div class="fr-wifi-pass-actions">
+                <button id="fr-wifi-cancel-btn"  class="fr-btn fr-btn-ghost" type="button">CANCEL</button>
+                <button id="fr-wifi-connect-btn" class="fr-btn fr-btn-primary" type="button">CONNECT</button>
+              </div>
+            </div>
+
+            <p class="fr-wifi-status" id="fr-wifi-status" hidden></p>
+
+            <div class="fr-pane-actions">
+              <button id="fr-wifi-skip-btn" class="fr-link-btn" type="button">SKIP</button>
+              <button id="fr-wifi-next-btn" class="fr-btn fr-btn-primary" type="button">CONTINUE</button>
+            </div>
+          </section>
+
+          <!-- STEP 2 · LOCATION -->
+          <section class="fr-pane" data-fr-pane="location">
+            <div class="fr-pane-title" data-fr-anim>WHERE ARE YOU?</div>
+            <div class="fr-pane-sub"   data-fr-anim>USED FOR WEATHER · CLOCK · TIME ZONE</div>
+
+            <label class="fr-input-label" data-fr-anim>SEARCH</label>
+            <input id="fr-loc-input" class="fr-input" type="text" placeholder="Type a city (e.g. Boston, Tokyo)…" spellcheck="false" autocomplete="off" />
+            <ul class="fr-loc-results" id="fr-loc-results"></ul>
+            <p class="fr-loc-status" id="fr-loc-status" hidden></p>
+
+            <div class="fr-pane-actions">
+              <button id="fr-loc-back-btn" class="fr-link-btn" type="button">BACK</button>
+              <button id="fr-loc-next-btn" class="fr-btn fr-btn-primary" type="button" disabled>CONTINUE</button>
+            </div>
+          </section>
+
+          <!-- STEP 3 · NAME -->
+          <section class="fr-pane" data-fr-pane="name">
+            <div class="fr-pane-title" data-fr-anim>YOUR NAME</div>
+            <div class="fr-pane-sub"   data-fr-anim>SHOWN IN THE TOPBAR · OPTIONAL</div>
+
+            <label class="fr-input-label" data-fr-anim>NAME</label>
+            <input id="fr-name-input" class="fr-input" type="text" placeholder="What should we call you?" spellcheck="false" autocomplete="off" maxlength="32" />
+
+            <div class="fr-pane-actions">
+              <button id="fr-name-back-btn"   class="fr-link-btn" type="button">BACK</button>
+              <button id="fr-name-finish-btn" class="fr-btn fr-btn-primary" type="button">FINISH</button>
+            </div>
+          </section>
         </div>
       </div>
     </div>
