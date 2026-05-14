@@ -121,15 +121,20 @@ function createWindow() {
   win.on('blur',  () => sendToBottom(win));
   win.on('focus', () => sendToBottom(win));
 
+  // Re-assert bottom Z-order periodically in case another app changes
+  // the window order. 1s was overkill — 5s is plenty for "stay on the
+  // desktop" behavior and avoids waking the wm thread every second.
   const _bottomInterval = setInterval(() => {
     if (win.isDestroyed()) { clearInterval(_bottomInterval); return; }
     sendToBottom(win);
-  }, 1000);
+  }, 5000);
 
-  // Bump the renderer zoom 20% to compensate for force-device-scale-factor=1
-  // making everything render at native pixel sizes (which is too small on a
-  // HiDPI display). Set on every load so it survives renderer reloads.
-  win.webContents.on('did-finish-load', () => win.webContents.setZoomFactor(1.2));
+  // Removed: setZoomFactor(1.2) in tandem with force-device-scale-factor=1.
+  // That combination forced Chromium's compositor to pre-scale every layer
+  // by 1.2× on every paint — at 3200×1800 × 117 Hz that's ~670 megapixels/s
+  // of constant rasterizer work in the GPU process, lighting all cores via
+  // Chromium's parallel tile raster threads. Letting Chromium use native
+  // device pixel ratio is much cheaper.
 
   // Native WASAPI loopback for the default output device. Pushes per-frame
   // RMS levels to the renderer over IPC ('audio-out-level'). readConfig is
@@ -346,16 +351,46 @@ protocol.registerSchemesAsPrivileged([
 // Stop Chromium from detecting "the YouTube window is occluded by the
 // dashboard" and pausing the renderer / freezing media. These need to
 // be set BEFORE app.whenReady fires.
-app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
-// Note: WGC (Windows Graphics Capture) feature flags were tried for
-// the rec-room SOURCE picker (Cinema 4D and other hardware-accelerated
-// windows don't appear in desktopCapturer.getSources by default).
-// They had no effect — Chromium's *window enumerator* filters those
-// windows out before the capturer is involved, so the WGC backend
-// switch doesn't help. Workflow for hardware-accelerated apps: pick
-// a screen and use CROP to focus on the window.
-app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('disable-background-timer-throttling');
+// NOTE: we intentionally do NOT disable IntensiveWakeUpThrottling or
+// the renderer-backgrounding flags here — disabling those keeps every
+// setInterval in the app (clock, system stats, weather, BGM scheduler,
+// terminal telemetry, FPS counter, etc.) firing at full speed even
+// when the window is hidden, which pegs CPU and spins fans.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+// Force Chromium's desktopCapturer onto the Windows Graphics Capture
+// (WGC) backend for both individual windows and full screens. The
+// default GDI BitBlt path cannot read DirectX / OpenGL / Vulkan
+// back-buffers, so any 3D-rendered viewport (Cinema 4D, Blender,
+// games, etc.) shows black in the capture even though the window
+// chrome captures fine. WGC reads directly from the desktop
+// compositor and sees hardware-accelerated content correctly.
+// Requires Windows 10 1903 (May 2019) or newer; older Windows just
+// falls back to GDI silently. Windows will draw a thin yellow border
+// around captured windows while WGC is active — this is OS-side and
+// doesn't appear in the recording.
+// GPU-friendly feature toggles, batched into a single switch so we
+// don't trample the WGC flags above. Effects:
+//   AllowWgcWindowCapturer / AllowWgcScreenCapturer — see comment above.
+//   CanvasOopRasterization — out-of-process canvas raster (frees
+//     renderer from rasterizing big canvases like the music
+//     visualizer / audio waveform on every frame).
+//   AcceleratedVideoDecodeLinuxGL / VaapiVideoDecodeLinuxGL — Linux
+//     hardware-decode hints (harmless on Windows).
+app.commandLine.appendSwitch('enable-features',
+  'AllowWgcWindowCapturer,AllowWgcScreenCapturer,CanvasOopRasterization,' +
+  'AcceleratedVideoDecodeLinuxGL,VaapiVideoDecodeLinuxGL,VaapiVideoEncoder');
+// NOTE: previously force-enabled ignore-gpu-blocklist + enable-gpu-rasterization
+// + enable-zero-copy + enable-accelerated-video-decode here. Those flags pushed
+// Chromium into paths that, on systems with healthy drivers, did NOT speed
+// things up — they introduced constant raster-to-GPU transfers and kept the
+// renderer busy even at idle (multiple Dashboard3D.exe processes pegged at
+// idle, fans spiking). Reverted to Chromium's auto-pick. The ffmpeg export
+// still uses NVENC / QSV / AMF as a separate process — independent of these.
+// Pin to D3D11 ANGLE backend on Windows — most stable for our mix of
+// MediaRecorder + WebGL + filter()-heavy CSS. Default ANGLE picks
+// D3D11 anyway on modern Windows, but being explicit avoids surprise
+// fallbacks on systems where the auto-pick goes to OpenGL.
+app.commandLine.appendSwitch('use-angle', 'd3d11');
 // Per-window autoplay policy instead of a global switch — the dashboard
 // itself needs to autoplay its boot SFX before the user clicks anything
 // (otherwise the CRT power-on tone is silent on startup). The
@@ -459,6 +494,31 @@ app.whenReady().then(() => {
     'hs-scripts.com', 'hs-analytics.net', 'hsforms.net',
     'mktoresp.com', 'mc.yandex.ru',
     'segmentapi.', 'mparticle.com',
+    // Additional ad networks + tracker pixels that slipped through the
+    // baseline. EasyList-equivalent core: these are the highest-traffic
+    // domains in modern programmatic ad chains.
+    'amazon-adsystem.com', 'aax.amazon-adsystem.com', 'adsystem.amazon.',
+    'media.net', 'contextweb.com', 'smartadserver.com', 'sas-pr.com',
+    'adform.net', 'turn.com', 'demdex.net', 'omtrdc.net',
+    'everesttech.net', 'serving-sys.com', '2mdn.net', '3lift.com',
+    'tribalfusion.com', 'exelator.com', 'agkn.com', 'tapad.com',
+    'pippio.com', 'rfihub.com', 'liadm.com', 'pinterest-analytics.',
+    'snapkit.com', 'sc-static.net', 'tiktok.com/i18n/pixel', 'analytics.tiktok',
+    'redditstatic.com/ads', 'reddit.com/api/v2/business',
+    'cloudflareinsights.com', 'static.cloudflareinsights.com',
+    'segment.io', 'cdn.segment.com',
+    'doubleverify.com', 'iasds01.com', 'ias-pub.com', 'moatpixel.com',
+    // Newsletter / lead-capture popup vendors. Their scripts render the
+    // full-page overlay popups that the popup-blocker can't catch (it
+    // only sees window.open, not in-page modals).
+    'sumo.com', 'optinmonster.com', 'app.getsitecontrol.com',
+    'sleeknote.com', 'popupally.com', 'unbounce.com',
+    // Push-notification / web-push prompt scripts.
+    'subscribers.com', 'cdn.signalize.com', 'cleverpush.com',
+    // Session-replay / heatmap (privacy-invasive, heavy DOM listeners).
+    'logrocket.com', 'cdn.logrocket.com', 'inspectlet.com',
+    'smartlook.com', 'rec.smartlook.com',
+    'glassbox.com', 'contentsquare.com', 'cs.contentsquare.net',
   ];
   const browserSession = session.fromPartition(_BROWSER_PARTITION);
 
@@ -525,6 +585,7 @@ app.whenReady().then(() => {
   // during its initial load.
   let _adsBlocked = 0;
   let _imagesBlocked = 0;
+  let _popupsBlocked = 0;
   let _statsDirty = false;
   let _statsTimer = null;
   function _broadcastBrowserStats() {
@@ -535,8 +596,9 @@ app.whenReady().then(() => {
       _statsDirty = false;
       for (const w of BrowserWindow.getAllWindows()) {
         if (!w.isDestroyed()) w.webContents.send('browser-stats', {
-          adsBlocked: _adsBlocked,
+          adsBlocked:    _adsBlocked,
           imagesBlocked: _imagesBlocked,
+          popupsBlocked: _popupsBlocked,
         });
       }
     }, 250);
@@ -565,13 +627,18 @@ app.whenReady().then(() => {
     }
     callback({});
   });
-  ipcMain.handle('browser-get-stats', () => ({ adsBlocked: _adsBlocked, imagesBlocked: _imagesBlocked }));
+  ipcMain.handle('browser-get-stats', () => ({
+    adsBlocked:    _adsBlocked,
+    imagesBlocked: _imagesBlocked,
+    popupsBlocked: _popupsBlocked,
+  }));
   ipcMain.handle('browser-reset-stats', () => {
     _adsBlocked = 0;
     _imagesBlocked = 0;
+    _popupsBlocked = 0;
     _statsDirty = true;
     _broadcastBrowserStats();
-    return { adsBlocked: 0, imagesBlocked: 0 };
+    return { adsBlocked: 0, imagesBlocked: 0, popupsBlocked: 0 };
   });
   ipcMain.handle('browser-set-reader-mode', (_e, on) => { _readerMode = !!on; return { ok: true, readerMode: _readerMode }; });
 
@@ -786,13 +853,33 @@ app.whenReady().then(() => {
   }
   app.on('web-contents-created', (_event, contents) => {
     if (contents.session !== browserSession) return;
-    contents.setWindowOpenHandler(({ url }) => {
-      _requestNewTab(url);
+    // Distinguish user-initiated tabs (middle-click, Ctrl+click, target=
+    // "_blank" on an explicit anchor) from scripted ad popups. Electron
+    // tells us via `disposition`:
+    //   foreground-tab / background-tab → user click  → route to new tab
+    //   new-window / save-to-disk / other → scripted   → block + count
+    // This stops the in-page modal scripts from spawning a fresh tab
+    // every time the user mouses over an ad zone, while keeping middle-
+    // click-to-open-in-new-tab working on every regular link.
+    contents.setWindowOpenHandler(({ url, disposition }) => {
+      if (disposition === 'foreground-tab' || disposition === 'background-tab') {
+        _requestNewTab(url);
+        return { action: 'deny' };
+      }
+      _popupsBlocked++;
+      _statsDirty = true;
+      _broadcastBrowserStats();
       return { action: 'deny' };
     });
     contents.on('did-create-window', (newWin, details) => {
+      // Belt-and-suspenders: if a window slipped through (rare —
+      // certain HTML target="_blank" links with rel="noopener" can
+      // bypass setWindowOpenHandler on some Electron builds), close it
+      // immediately and count it as blocked.
       try { newWin.close(); } catch {}
-      _requestNewTab(details && details.url);
+      _popupsBlocked++;
+      _statsDirty = true;
+      _broadcastBrowserStats();
     });
   });
 
@@ -1198,14 +1285,15 @@ app.whenReady().then(() => {
   // JSON endpoint with that token to get the actual result list.
   async function _browserSearchVideos(q, page) {
     try {
-      const html = await _browserFetch(`https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=videos&ia=videos`);
+      // kp=-2 turns DDG SafeSearch off on the initial token-grab page;
+      // f=,,,,,&p=-2 carries the same intent through to the v.js endpoint
+      // (DDG's filter spec accepts the safe-level as the `p` slot here).
+      const html = await _browserFetch(`https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=videos&ia=videos&kp=-2`);
       const m = html.match(/vqd=(?:["']([\d-]+)["']|([\d-]+))/);
       const vqd = m ? (m[1] || m[2]) : null;
       if (!vqd) return { ok: false, kind: 'videos', error: 'NO VQD TOKEN' };
-      // v.js uses the same query-shape as i.js. Page size on DDG's video
-      // endpoint is roughly 60; offset = (page-1) * 60.
       const start = (Math.max(1, page || 1) - 1) * 60;
-      const apiUrl = `https://duckduckgo.com/v.js?l=us-en&o=json&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}&f=,,,,,&p=1&s=${start}`;
+      const apiUrl = `https://duckduckgo.com/v.js?l=us-en&o=json&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}&f=,,,,,&p=-2&s=${start}`;
       const body = await _browserFetch(apiUrl, {
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': 'https://duckduckgo.com/',
@@ -1229,15 +1317,14 @@ app.whenReady().then(() => {
 
   async function _browserSearchImages(q, page) {
     try {
-      const html = await _browserFetch(`https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images`);
-      // Token formats DDG has shipped: vqd='3-1234-5678', vqd="3-1234",
-      // vqd=3-1234. Match the most common shape.
+      // kp=-2 on the token request + p=-2 on i.js disable SafeSearch
+      // across the full DDG image pipeline.
+      const html = await _browserFetch(`https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images&kp=-2`);
       const m = html.match(/vqd=(?:["']([\d-]+)["']|([\d-]+))/);
       const vqd = m ? (m[1] || m[2]) : null;
       if (!vqd) return { ok: false, kind: 'images', error: 'NO VQD TOKEN' };
-      // DDG's i.js paginates with s=N (start index, 100 per page).
       const start = (Math.max(1, page || 1) - 1) * 100;
-      const apiUrl = `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}&f=,,,,,&p=1&v7exp=a&s=${start}`;
+      const apiUrl = `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}&f=,,,,,&p=-2&v7exp=a&s=${start}`;
       const body = await _browserFetch(apiUrl, {
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': 'https://duckduckgo.com/',
@@ -1269,26 +1356,58 @@ app.whenReady().then(() => {
   // pages use each engine's native offset param (start= for Google, etc).
   // DDG's html endpoint officially uses POST for paging but accepts GET
   // with s=offset as an undocumented fallback.
+  // Per-engine page URLs. Each engine's result-per-page param tuned to
+  // its server-side cap. Google's `num` is honored up to 100 for
+  // unauthenticated queries; Bing's `count` works up to ~50; Brave
+  // accepts `count`. DDG always returns 30; Yahoo stays at its default
+  // ~10. Higher counts here drop the number of pages we need to fetch
+  // to reach a useful result set.
+  // SafeSearch param per engine:
+  //   ddg     → kp=-2  (-2 off, -1 moderate, 1 strict)
+  //   bing    → adlt=off
+  //   brave   → safesearch=off
+  //   yahoo   → vm=r   (raw / relaxed / off)
+  //   google  → safe=off & filter=0  (filter=0 also kills "Showing results for X — search instead for Y" rewriting)
+  // These are passed on every request, including paginated load-more.
   const _WEB_ENGINES = {
-    ddg:    (q, p) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}` + (p > 1 ? `&s=${(p-1)*30}&dc=${(p-1)*30+1}` : ''),
-    bing:   (q, p) => `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=20&first=${(p-1)*20+1}&form=QBLH`,
-    brave:  (q, p) => `https://search.brave.com/search?q=${encodeURIComponent(q)}&source=web&offset=${p-1}`,
-    yahoo:  (q, p) => `https://search.yahoo.com/search?p=${encodeURIComponent(q)}&b=${(p-1)*10+1}&fr=yfp-t&fp=1`,
-    google: (q, p) => `https://www.google.com/search?q=${encodeURIComponent(q)}&num=20&start=${(p-1)*10}&hl=en`,
+    ddg:    (q, p) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kp=-2` + (p > 1 ? `&s=${(p-1)*30}&dc=${(p-1)*30+1}` : ''),
+    bing:   (q, p) => `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=50&first=${(p-1)*50+1}&adlt=off&form=QBLH`,
+    brave:  (q, p) => `https://search.brave.com/search?q=${encodeURIComponent(q)}&source=web&count=20&safesearch=off&offset=${p-1}`,
+    yahoo:  (q, p) => `https://search.yahoo.com/search?p=${encodeURIComponent(q)}&b=${(p-1)*10+1}&vm=r&fr=yfp-t&fp=1`,
+    google: (q, p) => `https://www.google.com/search?q=${encodeURIComponent(q)}&num=100&start=${(p-1)*100}&hl=en&safe=off&filter=0`,
   };
   async function _browserSearchWebHybrid(q, page) {
     const keys = Object.keys(_WEB_ENGINES);
     const headers = { 'Accept': 'text/html,application/xhtml+xml' };
-    const settled = await Promise.allSettled(
-      keys.map(k => _browserFetch(_WEB_ENGINES[k](q, page), headers)),
-    );
-    const html = {};
-    const errors = {};
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      if (settled[i].status === 'fulfilled') html[k] = settled[i].value;
-      else errors[k] = String(settled[i].reason?.message || settled[i].reason);
+    // On the first page, fan-fetch pages 1 + 2 in parallel per engine and
+    // concatenate the HTML — gives the renderer ~2× the DOM to parse
+    // without any contract change. For load-more requests (page > 1) we
+    // fall back to a single page per engine to keep the wire small.
+    const pagesToFetch = page === 1 ? [1, 2] : [page];
+    const tasks = [];
+    for (const k of keys) {
+      for (const p of pagesToFetch) {
+        tasks.push(
+          _browserFetch(_WEB_ENGINES[k](q, p), headers)
+            .then((html) => ({ k, p, html, ok: true }))
+            .catch((err) => ({ k, p, err, ok: false }))
+        );
+      }
     }
+    const settled = await Promise.all(tasks);
+    // Bucket the HTML by engine in page order. We join the pages with a
+    // newline so each engine's parser still sees one DOM blob; existing
+    // parsers iterate every matching node in the document so they pick
+    // up every result entry across the concatenated pages.
+    const buckets = {};
+    const errors = {};
+    for (const k of keys) buckets[k] = [];
+    for (const r of settled) {
+      if (r.ok && r.html) buckets[r.k].push(r.html);
+      else if (!r.ok)    errors[r.k] = String(r.err && r.err.message || r.err);
+    }
+    const html = {};
+    for (const k of keys) html[k] = buckets[k].join('\n');
     return { ok: true, kind: 'web', page, html, errors };
   }
 
@@ -1524,6 +1643,53 @@ function registerIpc() {
   // counted as 'failed'.
   ipcMain.handle('flush-ram', () => systemService.flushRam());
 
+  // Put the host machine to sleep (suspend to RAM). Confirmed via the
+  // native message dialog so a stray click can't drop the user's session.
+  //   Windows  → rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+  //   Linux    → systemctl suspend
+  //   macOS    → pmset sleepnow
+  // SetSuspendState's args:   1st: hibernate flag (0 = sleep)
+  //                           2nd: forceCritical (1 = force; ignored on modern Win)
+  //                           3rd: disableWakeEvent (0 = let wake events through)
+  ipcMain.handle('system-sleep', async (_e) => {
+    const win = _mainWin || BrowserWindow.fromWebContents(_e.sender);
+    try {
+      const { dialog } = require('electron');
+      const r = await dialog.showMessageBox(win || undefined, {
+        type: 'question',
+        buttons: ['Sleep', 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Sleep',
+        message: 'Put this PC to sleep?',
+        detail: 'The dashboard will stay running and resume when the system wakes.',
+      });
+      if (r.response !== 0) return { ok: false, cancelled: true };
+    } catch {}
+    return await new Promise((resolve) => {
+      let cmd, args;
+      if (process.platform === 'win32') {
+        cmd = 'rundll32.exe';
+        args = ['powrprof.dll,SetSuspendState', '0,1,0'];
+      } else if (process.platform === 'linux') {
+        cmd = 'systemctl';
+        args = ['suspend'];
+      } else if (process.platform === 'darwin') {
+        cmd = 'pmset';
+        args = ['sleepnow'];
+      } else {
+        return resolve({ ok: false, error: `unsupported platform: ${process.platform}` });
+      }
+      const proc = spawn(cmd, args, { windowsHide: true, detached: true, stdio: 'ignore' });
+      proc.on('error', (err) => resolve({ ok: false, error: err.message }));
+      // SetSuspendState returns immediately; the OS schedules the sleep.
+      // No 'close' event needed — fire-and-forget. proc.unref() lets the
+      // child outlive us if the OS sleep tears down the renderer first.
+      try { proc.unref(); } catch {}
+      setTimeout(() => resolve({ ok: true }), 100);
+    });
+  });
+
   // App version — pulled from package.json by Electron at app start, so the
   // topbar chip stays in sync with the manifest without a renderer rebuild.
   ipcMain.handle('app-version', () => app.getVersion());
@@ -1723,7 +1889,10 @@ function registerIpc() {
       const target = path.resolve(root, String(subdir || ''));
       if (!target.startsWith(root)) return { error: 'path outside root' };
       try {
-        const entries = fs.readdirSync(target, { withFileTypes: true });
+        const entries = fs.readdirSync(target, { withFileTypes: true })
+          // Hide our managed .trash dir from listings — undo is the
+          // visible interface for it, not a folder the user navigates.
+          .filter((d) => d.name !== '.trash');
         const out = entries.map((d) => {
           const full = path.join(target, d.name);
           let size = 0, mtime = 0;
@@ -1968,21 +2137,110 @@ function registerIpc() {
     }
   });
 
-  // Move a file or folder to the OS trash. We use shell.trashItem rather
-  // than fs.rmSync so the user can recover from a misclick from Explorer's
-  // Recycle Bin without us having to maintain our own undo state.
+  // Move a file or folder to our own managed `.trash` directory under
+  // its root (gallery/.trash, docs/.trash, downloads/.trash). The
+  // renderer keeps a session undo stack of these moves so the user can
+  // restore a misclicked delete with one click. After the session ends
+  // an explicit `explore-empty-trash` IPC (or a manual cleanup) sends
+  // the contents to the OS Recycle Bin for long-term recovery.
+  function _trashDirFor(rootPath) {
+    return path.join(rootPath, '.trash');
+  }
+  function _trashFileName(srcBase) {
+    // Timestamp + random suffix keeps siblings distinguishable when
+    // the same name is deleted twice in a row.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const rand  = Math.random().toString(36).slice(2, 7);
+    return `${stamp}_${rand}_${srcBase}`;
+  }
   ipcMain.handle('explore-delete', async (_e, abs) => {
     const p = path.resolve(String(abs || ''));
     if (!_pathInsideManagedRoot(p)) return { ok: false, error: 'path outside managed roots' };
     if (p === galleryFolderPath() || p === docsFolderPath()) {
       return { ok: false, error: 'cannot delete the managed root itself' };
     }
+    // Don't recursively trash items already inside a .trash directory.
+    if (p.split(path.sep).includes('.trash')) {
+      return { ok: false, error: 'already in trash' };
+    }
+    const root = _managedRootFor(p);
+    if (!root) return { ok: false, error: 'no managed root for path' };
+    const trashDir = _trashDirFor(root);
     try {
-      await shell.trashItem(p);
-      return { ok: true };
+      fs.mkdirSync(trashDir, { recursive: true });
+      const trashPath = path.join(trashDir, _trashFileName(path.basename(p)));
+      // Try fs.rename first (same volume, instant). Fall back to copy
+      // + unlink if rename fails (cross-device / EXDEV).
+      try {
+        fs.renameSync(p, trashPath);
+      } catch (err) {
+        if (err.code === 'EXDEV') {
+          fs.cpSync(p, trashPath, { recursive: true });
+          fs.rmSync(p, { recursive: true, force: true });
+        } else { throw err; }
+      }
+      return { ok: true, trashPath, origPath: p, name: path.basename(p) };
     } catch (err) {
       return { ok: false, error: err.message };
     }
+  });
+
+  // Move a trashed file back to its original location. If the
+  // original path now has another file (the user kept working after
+  // the delete), append " (restored)" to the basename so the existing
+  // file isn't overwritten.
+  ipcMain.handle('explore-restore', async (_e, opts) => {
+    const trashPath = path.resolve(String(opts?.trashPath || ''));
+    const origPath  = path.resolve(String(opts?.origPath  || ''));
+    if (!_pathInsideManagedRoot(trashPath) || !_pathInsideManagedRoot(origPath)) {
+      return { ok: false, error: 'path outside managed roots' };
+    }
+    if (!trashPath.split(path.sep).includes('.trash')) {
+      return { ok: false, error: 'source is not in trash' };
+    }
+    if (!fs.existsSync(trashPath)) return { ok: false, error: 'trash file missing' };
+    let target = origPath;
+    if (fs.existsSync(target)) {
+      const dir = path.dirname(target);
+      const ext = path.extname(target);
+      const stem = path.basename(target, ext);
+      let n = 1;
+      do {
+        target = path.join(dir, `${stem} (restored${n > 1 ? ' ' + n : ''})${ext}`);
+        n++;
+      } while (fs.existsSync(target) && n < 1000);
+    }
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      try {
+        fs.renameSync(trashPath, target);
+      } catch (err) {
+        if (err.code === 'EXDEV') {
+          fs.cpSync(trashPath, target, { recursive: true });
+          fs.rmSync(trashPath, { recursive: true, force: true });
+        } else { throw err; }
+      }
+      return { ok: true, path: target };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Send everything in every managed-root .trash to the OS Recycle Bin
+  // for final disposal. Called manually by the user; not automatic.
+  ipcMain.handle('explore-empty-trash', async () => {
+    let count = 0;
+    const errors = [];
+    for (const root of [galleryFolderPath(), docsFolderPath(), downloadsFolderPath()]) {
+      const trashDir = _trashDirFor(root);
+      if (!fs.existsSync(trashDir)) continue;
+      for (const name of fs.readdirSync(trashDir)) {
+        const full = path.join(trashDir, name);
+        try { await shell.trashItem(full); count++; }
+        catch (err) { errors.push(`${name}: ${err.message}`); }
+      }
+    }
+    return { ok: errors.length === 0, count, errors };
   });
 
   ipcMain.handle('set-power-profile', async (_e, opts) => {
@@ -2331,9 +2589,11 @@ $out | ConvertTo-Json -Compress
       available: !!result.stdout,
       hasNvenc:     /\sh264_nvenc\s/.test(result.stdout),
       hasHevcNvenc: /\shevc_nvenc\s/.test(result.stdout),
+      hasQsv:       /\sh264_qsv\s/.test(result.stdout),   // Intel QuickSync
+      hasAmf:       /\sh264_amf\s/.test(result.stdout),   // AMD AMF
       hasMp4:       true, // ffmpeg can always mux mp4
     };
-    console.log('[ffmpeg] probe ok:', { available: _ffmpegInfo.available, hasNvenc: _ffmpegInfo.hasNvenc, path: _ffmpegBin });
+    console.log('[ffmpeg] probe ok:', { available: _ffmpegInfo.available, hasNvenc: _ffmpegInfo.hasNvenc, hasQsv: _ffmpegInfo.hasQsv, hasAmf: _ffmpegInfo.hasAmf, path: _ffmpegBin });
     return _ffmpegInfo;
   }
   // Kick off the probe immediately so it's ready by the time the user
@@ -2341,6 +2601,32 @@ $out | ConvertTo-Json -Compress
   _probeFfmpeg().catch(() => {});
   ipcMain.handle('ffmpeg-info', async () => {
     return _ffmpegInfo || await _probeFfmpeg();
+  });
+
+  // GPU diagnostic — surfaces Chromium's GPU-feature-status block to
+  // the renderer so we can confirm hardware acceleration is on. Maps
+  // to the same data chrome://gpu shows. Triggered from the renderer
+  // (e.g., from the diag overlay or a one-shot console call).
+  ipcMain.handle('gpu-info', async () => {
+    try {
+      const status = app.getGPUFeatureStatus(); // { gpu_compositing, ... }
+      const info   = await app.getGPUInfo('complete');
+      // Trim to the parts that matter for our perf debugging — full
+      // info is huge and noisy.
+      return {
+        ok: true,
+        features: status,
+        device: info?.gpuDevice?.[0] || info?.auxAttributes || null,
+        glRenderer: info?.auxAttributes?.glRenderer
+                 || info?.basicInfo?.glRenderer
+                 || null,
+        glVersion: info?.auxAttributes?.glVersion
+                || info?.basicInfo?.glVersion
+                || null,
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 
   // ── FFMPEG: stitch snaps → video (GPU/NVENC fast path) ─────────────
@@ -2405,9 +2691,32 @@ $out | ConvertTo-Json -Compress
 
     // Scale filter: lock width to even (yuv420p requires it). -2 keeps
     // aspect ratio while forcing even dimensions.
-    const vf = outH > 0
-      ? `scale=-2:${outH}:flags=lanczos,format=yuv420p`
-      : 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p';
+    const vfBase = outH > 0
+      ? `scale=-2:${outH}:flags=lanczos`
+      : 'scale=trunc(iw/2)*2:trunc(ih/2)*2';
+    // Optional color/blur/denoise pass from the rec-room EDIT panel's
+    // shared filter state. Same math as edit-export-video so both
+    // entry points produce a consistent look. All segments are no-ops
+    // when the slider is at default.
+    const filt = opts?.filters || {};
+    const sld = filt.sliders || {};
+    let fB = Number(sld.brightness ?? 100);
+    let fC = Number(sld.contrast   ?? 100);
+    let fS = Number(sld.saturation ?? 100);
+    const fH = Number(sld.hue ?? 0);
+    const fBl = Number(sld.blur ?? 0);
+    if (filt.auto) { fC = Math.min(200, fC + 15); fS = Math.min(200, fS + 10); }
+    const extra = [];
+    const eqB = ((fB - 100) / 100).toFixed(3);
+    const eqC = (fC / 100).toFixed(3);
+    const eqS = (fS / 100).toFixed(3);
+    if (eqB !== '0.000' || eqC !== '1.000' || eqS !== '1.000') {
+      extra.push(`eq=brightness=${eqB}:contrast=${eqC}:saturation=${eqS}`);
+    }
+    if (fH !== 0)    extra.push(`hue=h=${fH}`);
+    if (fBl > 0.01)  extra.push(`boxblur=${fBl.toFixed(2)}:1`);
+    if (filt.denoise) extra.push('hqdn3d=1.5:1.5:6:6');
+    const vf = [vfBase, ...extra, 'format=yuv420p'].join(',');
 
     const args = [
       '-hide_banner', '-y',
@@ -2482,6 +2791,306 @@ $out | ConvertTo-Json -Compress
     }
   });
 
+  // ── §rec-edit ── FFMPEG: trim + filter a recorded clip ────────────
+  // Used by the rec-room EDIT panel. Builds an ffmpeg invocation with
+  // -ss / -to (trim) and a -vf chain assembled from the editor's
+  // brightness / contrast / saturation / hue / blur / auto-contrast /
+  // denoise state. Auto contrast = slight contrast+saturation boost
+  // (matches the CSS preview). Denoise = hqdn3d=1.5:1.5:6:6.
+  // Output is gallery/recordings/<USER NNNN>.mp4 (h264_nvenc when
+  // available, libx264 otherwise — keeps it broadly playable).
+  ipcMain.handle('edit-export-video', async (_e, opts) => {
+    const info = _ffmpegInfo || await _probeFfmpeg();
+    if (!info?.available) return { ok: false, error: 'ffmpeg not available' };
+    const srcPath = String(opts?.srcPath || '');
+    if (!srcPath || !fs.existsSync(srcPath)) return { ok: false, error: 'source not found' };
+    const trimIn  = Math.max(0, Number(opts?.trimIn)  || 0);
+    const trimOut = Math.max(trimIn + 0.05, Number(opts?.trimOut) || (trimIn + 0.05));
+    const s = opts?.sliders || {};
+    // Build the -vf chain. ffmpeg's `eq=` takes 0..1 delta-style values
+    // for brightness and float multipliers for contrast/saturation.
+    let brightness = Number(s.brightness ?? 100);
+    let contrast   = Number(s.contrast   ?? 100);
+    let saturation = Number(s.saturation ?? 100);
+    const hue      = Number(s.hue        ?? 0);
+    const blur     = Number(s.blur       ?? 0);
+    const sharpen  = Number(s.sharpen    ?? 0);   // 0..200 → unsharp amount
+    const vignette = Number(s.vignette   ?? 0);   // 0..100 → vignette strength
+    const speed    = Math.max(25, Math.min(400, Number(s.speed ?? 100))); // %
+    const volume   = Math.max(0,  Math.min(400, Number(s.volume ?? 100))); // %
+    if (opts?.auto) { contrast = Math.min(200, contrast + 15); saturation = Math.min(200, saturation + 10); }
+    const filters = [];
+    // 1) Crop FIRST so subsequent filters operate on the cropped region
+    //    only (avoids wasted CPU on pixels we're throwing away).
+    if (opts?.crop && Number.isFinite(opts.crop.w) && opts.crop.w > 0.001) {
+      const c = opts.crop;
+      const cx = Math.max(0, Math.min(1, c.x));
+      const cy = Math.max(0, Math.min(1, c.y));
+      const cw = Math.max(0.001, Math.min(1 - cx, c.w));
+      const ch = Math.max(0.001, Math.min(1 - cy, c.h));
+      filters.push(`crop=iw*${cw.toFixed(4)}:ih*${ch.toFixed(4)}:iw*${cx.toFixed(4)}:ih*${cy.toFixed(4)}`);
+    }
+    // 2) Rotate — ffmpeg uses transpose for 90° steps. transpose=1 is
+    //    90 CW, transpose=2 is 90 CCW. 180 = two transposes.
+    if (opts?.rotate === 90)  filters.push('transpose=1');
+    else if (opts?.rotate === 180) filters.push('transpose=1,transpose=1');
+    else if (opts?.rotate === 270) filters.push('transpose=2');
+    if (opts?.flipH) filters.push('hflip');
+    if (opts?.flipV) filters.push('vflip');
+    // 3) Color pass.
+    const eqB = ((brightness - 100) / 100).toFixed(3);
+    const eqC = (contrast / 100).toFixed(3);
+    const eqS = (saturation / 100).toFixed(3);
+    if (eqB !== '0.000' || eqC !== '1.000' || eqS !== '1.000') {
+      filters.push(`eq=brightness=${eqB}:contrast=${eqC}:saturation=${eqS}`);
+    }
+    if (hue !== 0)   filters.push(`hue=h=${hue}`);
+    if (blur > 0.01) filters.push(`boxblur=${blur.toFixed(2)}:1`);
+    if (sharpen > 0) {
+      // unsharp=lx:ly:la — luma matrix 5x5, amount from 0..2 ~ sharpen/100
+      const amt = (sharpen / 100).toFixed(2);
+      filters.push(`unsharp=5:5:${amt}:5:5:0`);
+    }
+    if (vignette > 0) {
+      // ffmpeg's vignette takes an angle in radians for the inner ring.
+      // Strength is mapped via PI/5 .. PI/3 — gentle to heavy.
+      const angle = (Math.PI / 5 + (vignette / 100) * (Math.PI / 3 - Math.PI / 5)).toFixed(3);
+      filters.push(`vignette=angle=${angle}`);
+    }
+    if (opts?.bw)     filters.push('hue=s=0');
+    if (opts?.sepia)  filters.push('colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131');
+    if (opts?.invert) filters.push('negate');
+    if (opts?.denoise) filters.push('hqdn3d=1.5:1.5:6:6');
+    // 4) Speed change — apply LAST so trim is consumed in real seconds.
+    //    setpts adjusts video timing; atempo adjusts audio. atempo only
+    //    accepts 0.5..2.0 per pass, so chain two passes for >2× / <0.5×.
+    let speedFactor = speed / 100;
+    if (Math.abs(speedFactor - 1) > 0.005) {
+      filters.push(`setpts=PTS/${speedFactor.toFixed(3)}`);
+    }
+    if (opts?.reverse) filters.push('reverse');
+    // Audio filter chain — separate from -vf.
+    const aFilters = [];
+    let aFactor = speedFactor;
+    while (aFactor > 2.0) { aFilters.push('atempo=2.0'); aFactor /= 2.0; }
+    while (aFactor < 0.5) { aFilters.push('atempo=0.5'); aFactor /= 0.5; }
+    if (Math.abs(aFactor - 1) > 0.005) aFilters.push(`atempo=${aFactor.toFixed(3)}`);
+    if (opts?.reverse) aFilters.push('areverse');
+    if (volume !== 100) aFilters.push(`volume=${(volume / 100).toFixed(3)}`);
+    // Output codec — prefer NVENC h264 for fast export, fall back to
+    // libx264 which is universally available. Tuned for SPEED here
+    // (NVENC p2/preset-fast) since the user wants exports fast; the
+    // bitrate is generous enough that quality stays good. Profile
+    // and level are pinned so the result plays in Chromium <video>.
+    let vcodec, preset;
+    if (info.hasNvenc) {
+      vcodec = 'h264_nvenc';
+      // p2 = fast NVENC preset (p1 is fastest, p7 is slowest/quality).
+      // CQ 21 ≈ near-visually-lossless at this resolution.
+      preset = ['-preset', 'p2', '-tune', 'hq', '-rc', 'vbr', '-cq', '21'];
+    } else if (info.hasQsv) {
+      vcodec = 'h264_qsv';
+      preset = ['-preset', 'veryfast'];
+    } else if (info.hasAmf) {
+      vcodec = 'h264_amf';
+      preset = ['-quality', 'speed'];
+    } else {
+      vcodec = 'libx264';
+      preset = ['-preset', 'veryfast', '-crf', '20'];
+    }
+    // Profile / level pinned to a combo Chromium's <video> always
+    // accepts. NVENC default sometimes emits a level Chromium chokes
+    // on; explicit -profile/-level is harmless on every backend.
+    const profileFlags = ['-profile:v', 'high', '-level', '4.1'];
+    const dir = path.join(galleryFolderPath(), 'recordings');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const { full: outPath, name: outName } = await _nextUserSeqName(dir, '.mp4');
+    // Build the input list. Each clip is either a video (trim/concat
+    // straight from the file) or an image (loop the still for N
+    // seconds via `-loop 1 -t N -i image.png`, with silent audio
+    // synthesized in the filter graph so concat sees uniform streams).
+    //
+    // Normalize the extras into [{path, kind, duration}] regardless of
+    // whether the caller sent strings (legacy) or objects (new).
+    const rawExtras = Array.isArray(opts?.extraClips) ? opts.extraClips : [];
+    const extras = rawExtras
+      .map((c) => (typeof c === 'string')
+        ? { path: c, kind: 'video', duration: 5 }
+        : { path: String(c?.path || ''),
+            kind: (c?.kind === 'image') ? 'image' : 'video',
+            duration: Math.max(0.1, Number(c?.duration) || 5) })
+      .filter((c) => c.path && fs.existsSync(c.path));
+    const anchorKind = (opts?.anchorKind === 'image') ? 'image' : 'video';
+    const anchorDur  = Math.max(0.1, Number(opts?.anchorDuration) || 3);
+    // Normalize V2 image overlays — each entry positions a still on
+    // top of the V1 output for [start, start+duration). Fractions are
+    // converted to pixels using the project resolution.
+    const projW = Math.max(2, Number(opts?.projectWidth)  || 1920);
+    const projH = Math.max(2, Number(opts?.projectHeight) || 1080);
+    const projFps = Math.max(15, Math.min(120, Number(opts?.projectFps) || 30));
+    const v2Overlays = Array.isArray(opts?.v2Overlays) ? opts.v2Overlays : [];
+    const overlays = v2Overlays
+      .map((o) => ({
+        path: String(o?.path || ''),
+        start: Math.max(0, Number(o?.start) || 0),
+        duration: Math.max(0.05, Number(o?.duration) || 3),
+        x: Math.max(0, Math.min(1, Number(o?.x) ?? 0.25)),
+        y: Math.max(0, Math.min(1, Number(o?.y) ?? 0.25)),
+        w: Math.max(0.02, Math.min(1, Number(o?.w) ?? 0.5)),
+        h: Math.max(0.02, Math.min(1, Number(o?.h) ?? 0.5)),
+      }))
+      .filter((o) => o.path && fs.existsSync(o.path));
+    const hasOverlays = overlays.length > 0;
+    const isMulti = extras.length > 0 || anchorKind === 'image' || hasOverlays;
+    const args = ['-hide_banner', '-y'];
+    // Helper — push the per-input flags for one clip onto args, and
+    // return a label suffix indicating whether it carried an audio
+    // stream (image inputs don't, so we synthesize silence later).
+    function pushInput(clip) {
+      if (clip.kind === 'image') {
+        args.push('-loop', '1', '-framerate', '30', '-t', clip.dur.toFixed(3), '-i', clip.path);
+        return false;
+      }
+      // Video: trim applied at the input level if this is the anchor.
+      if (clip.isAnchor) {
+        args.push('-ss', clip.trimIn.toFixed(3), '-to', clip.trimOut.toFixed(3), '-i', clip.path);
+      } else {
+        args.push('-i', clip.path);
+      }
+      return true;
+    }
+    if (!isMulti) {
+      // Single video clip — fastest path, in-place trim via -ss/-to.
+      args.push('-ss', trimIn.toFixed(3), '-to', trimOut.toFixed(3), '-i', srcPath);
+      if (filters.length)  args.push('-vf', filters.join(','));
+      if (aFilters.length) args.push('-af', aFilters.join(','));
+    } else {
+      // Anchor + extras (V1 track) first as concat inputs.
+      const anchor = {
+        path: srcPath,
+        kind: anchorKind,
+        dur: anchorKind === 'image' ? Math.max(0.1, trimOut - trimIn || anchorDur) : 0,
+        trimIn, trimOut, isAnchor: true,
+      };
+      const allClips = [anchor, ...extras];
+      const hasAudioFlags = allClips.map(pushInput);
+      // V2 overlay inputs append AFTER all V1 inputs so their stream
+      // indices are n, n+1, n+2, …
+      const nV1 = allClips.length;
+      for (const o of overlays) {
+        args.push('-loop', '1', '-framerate', String(projFps),
+                  '-t', o.duration.toFixed(3), '-i', o.path);
+      }
+      // Build filter_complex. Stage 1: per-clip PTS normalize +
+      // silent-audio synth for image clips.
+      let fc = '';
+      const concatLabels = [];
+      for (let i = 0; i < nV1; i++) {
+        fc += `[${i}:v]setpts=PTS-STARTPTS,scale=${projW}:${projH}:force_original_aspect_ratio=decrease,pad=${projW}:${projH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v${i}];`;
+        if (hasAudioFlags[i]) {
+          fc += `[${i}:a]asetpts=PTS-STARTPTS[a${i}];`;
+        } else {
+          const dur = allClips[i].dur;
+          fc += `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${dur.toFixed(3)}[a${i}];`;
+        }
+        concatLabels.push(`[v${i}][a${i}]`);
+      }
+      // Stage 2: concat the V1 chain into [cv]/[ca].
+      fc += `${concatLabels.join('')}concat=n=${nV1}:v=1:a=1[cv][ca]`;
+      // Stage 3: overlay each V2 image onto the running [cv]. We pipe
+      // each overlay through a scale to the desired pixel size first,
+      // then composite with `enable='between(t,start,end)'` so it only
+      // shows during its time range.
+      let chainLabel = 'cv';
+      for (let j = 0; j < overlays.length; j++) {
+        const o = overlays[j];
+        const idx = nV1 + j;        // ffmpeg input index for this overlay
+        const ovW = Math.max(2, Math.round(projW * o.w));
+        const ovH = Math.max(2, Math.round(projH * o.h));
+        const ovX = Math.round(projW * o.x);
+        const ovY = Math.round(projH * o.y);
+        const endT = (o.start + o.duration).toFixed(3);
+        fc += `;[${idx}:v]scale=${ovW}:${ovH}[ov${j}]`;
+        const outLabel = `cv${j + 1}`;
+        fc += `;[${chainLabel}][ov${j}]overlay=${ovX}:${ovY}:enable='between(t,${o.start.toFixed(3)},${endT})'[${outLabel}]`;
+        chainLabel = outLabel;
+      }
+      // Stage 4: final color/transform chain → [outv]; audio chain → [outa].
+      if (filters.length)  fc += `;[${chainLabel}]${filters.join(',')}[outv]`;
+      else                 fc += `;[${chainLabel}]null[outv]`;
+      if (aFilters.length) fc += `;[ca]${aFilters.join(',')}[outa]`;
+      else                 fc += `;[ca]anull[outa]`;
+      args.push('-filter_complex', fc, '-map', '[outv]', '-map', '[outa]');
+    }
+    args.push(
+      '-c:v', vcodec,
+      ...profileFlags,
+      ...preset,
+      '-pix_fmt', 'yuv420p',
+      '-r', String(projFps),
+    );
+    if (opts?.mute) args.push('-an');
+    else            args.push('-c:a', 'aac', '-b:a', '160k');
+    // -progress pipe:2 streams machine-parsable progress on stderr;
+    // we sniff it and forward to the renderer for the progress bar.
+    args.push('-progress', 'pipe:2');
+    args.push(
+      '-movflags', '+faststart',
+      outPath,
+    );
+    // Estimate total output duration so we can compute percent. With
+    // overlays + concat there's no easy single source; use the max of
+    // (V1 concat duration, last overlay end).
+    const v1Dur = (anchorKind === 'image'
+        ? Math.max(0.1, trimOut - trimIn || anchorDur)
+        : Math.max(0.1, trimOut - trimIn))
+      + extras.reduce((s, c) => s + c.duration, 0);
+    const overlaysEnd = overlays.reduce((m, o) => Math.max(m, o.start + o.duration), 0);
+    const totalDur = Math.max(v1Dur, overlaysEnd, 0.1);
+    const sender = _e?.sender;
+    return await new Promise((resolve) => {
+      const proc = spawn(info.path, args, { windowsHide: true });
+      let stderr = '';
+      let lastPct = -1;
+      proc.stderr?.on('data', (chunk) => {
+        const s = chunk.toString('utf8');
+        stderr += s;
+        if (stderr.length > 16384) stderr = stderr.slice(-16384);
+        // ffmpeg -progress emits lines like `out_time_ms=12345678` +
+        // `fps=29.97` + `progress=continue`. Parse and forward as
+        // percent / fps.
+        const tmMatch = s.match(/out_time_ms=(\d+)/);
+        const fpsMatch = s.match(/fps=([\d.]+)/);
+        if (tmMatch) {
+          const tSec = Number(tmMatch[1]) / 1_000_000;
+          const pct = Math.max(0, Math.min(99, (tSec / totalDur) * 100));
+          if (Math.abs(pct - lastPct) >= 0.5) {
+            lastPct = pct;
+            try {
+              sender?.send?.('edit-export-progress', {
+                percent: pct,
+                fps: fpsMatch ? Number(fpsMatch[1]) : null,
+                encoder: vcodec,
+              });
+            } catch {}
+          }
+        }
+      });
+      proc.on('error', (err) => resolve({ ok: false, error: err.message }));
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          try { fs.unlinkSync(outPath); } catch {}
+          resolve({ ok: false, error: `ffmpeg exit ${code}: ${stderr.split('\n').slice(-6).join(' | ')}` });
+          return;
+        }
+        try { sender?.send?.('edit-export-progress', { percent: 100, fps: null, encoder: vcodec }); } catch {}
+        let size = 0;
+        try { size = fs.statSync(outPath).size; } catch {}
+        resolve({ ok: true, path: outPath, name: outName, size, encoder: vcodec });
+      });
+    });
+  });
+
   // ── §generate ── COMFYUI workflow front-end ───────────────────────
   // Three responsibilities here:
   //   1. comfy-list-workflows: scan the configured directory for
@@ -2552,13 +3161,38 @@ $out | ConvertTo-Json -Compress
   // Save a generated output to gallery/generated/<kind>/. bytes is a
   // Uint8Array (Buffer-like) handed back from the renderer; ext is the
   // file extension WITH leading dot ('.png', '.mp4', '.wav', etc.).
-  ipcMain.handle('comfy-save-output', async (_e, kind, bytes, ext) => {
+  ipcMain.handle('comfy-save-output', async (_e, kind, bytes, ext, nameHint) => {
     try {
       const safeKind = ['image', 'video', 'audio'].includes(kind) ? kind : 'image';
       const safeExt = /^\.[A-Za-z0-9]{2,5}$/.test(ext) ? ext : '.png';
       const dir = path.join(galleryFolderPath(), 'generated', safeKind);
       fs.mkdirSync(dir, { recursive: true });
-      const { full, name } = await _nextUserSeqName(dir, safeExt);
+      let full, name;
+      // If the caller suggested a filename (e.g. a creative AI-style
+      // tag for audio outputs), sanitize and use that — falling back
+      // to the sequential USER NNNN naming if the hint is empty,
+      // unsafe, or collides with an existing file we can't resolve.
+      const sanitized = (typeof nameHint === 'string')
+        ? nameHint.replace(/[^A-Za-z0-9 _\-]/g, '').trim().slice(0, 64)
+        : '';
+      if (sanitized) {
+        let base = sanitized;
+        let candidate = path.join(dir, `${base}${safeExt}`);
+        let n = 2;
+        // De-collide by appending " 2", " 3", … if the basename is
+        // already taken.
+        while (fs.existsSync(candidate)) {
+          base = `${sanitized} ${n++}`;
+          candidate = path.join(dir, `${base}${safeExt}`);
+          if (n > 999) { base = ''; break; }
+        }
+        if (base) { full = candidate; name = `${base}${safeExt}`; }
+      }
+      if (!full) {
+        const seq = await _nextUserSeqName(dir, safeExt);
+        full = seq.full;
+        name = seq.name;
+      }
       fs.writeFileSync(full, Buffer.from(bytes));
       const size = fs.statSync(full).size;
       return { ok: true, path: full, name, size };
@@ -2634,23 +3268,34 @@ $out | ConvertTo-Json -Compress
     });
   });
 
-  // ── SCREEN RECORD: stream MediaRecorder chunks to a .mkv file ─────
+  // ── SCREEN RECORD: stream MediaRecorder chunks to a temp file,
+  // transcode to MP4 on stop ────────────────────────────────────────
   // The renderer owns the MediaRecorder (it has the MediaStream).
   // Each ondataavailable Blob gets sent here as a Uint8Array and
-  // appended to a write stream — that way long recordings don't blow
-  // renderer memory. Chromium outputs a WebM container, but WebM is
-  // EBML/Matroska and modern players (VLC, MPV, Windows Media) handle
-  // a .mkv extension on those bytes without complaint.
-  const _screenrecs = new Map(); // id → { stream, path }
-  ipcMain.handle('screenrec-start', async () => {
+  // appended to a write stream — long recordings don't blow renderer
+  // memory. Chromium emits a WebM container; on stop we run ffmpeg
+  // to remux + re-encode that into a proper H.264/AAC .mp4 (which is
+  // what gallery / external tools / share targets all expect).
+  const _screenrecs = new Map(); // id → { stream, tmpPath, name, finalPath, mime, isMp4 }
+  ipcMain.handle('screenrec-start', async (_e, opts) => {
     try {
       const dir = path.join(galleryFolderPath(), 'recordings');
       fs.mkdirSync(dir, { recursive: true });
-      const { full, name } = await _nextUserSeqName(dir, '.mkv');
-      const stream = fs.createWriteStream(full);
+      // Detect what the renderer's MediaRecorder is producing. If it's
+      // MP4 (hardware H.264) we write straight to the final .mp4 and
+      // skip the transcode on stop — saves CPU AND wall-time. If it's
+      // WebM (software VP8/VP9), we keep the existing temp-then-
+      // transcode flow.
+      const mime  = String(opts?.mime || '');
+      const isMp4 = /^video\/mp4/.test(mime);
+      const { full, name } = await _nextUserSeqName(dir, '.mp4');
+      const tmpPath = isMp4
+        ? full // write straight to the final file
+        : full.replace(/\.mp4$/i, '') + '.tmp.webm';
+      const stream = fs.createWriteStream(tmpPath);
       const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      _screenrecs.set(id, { stream, path: full, name });
-      return { ok: true, id, path: full, name };
+      _screenrecs.set(id, { stream, tmpPath, finalPath: full, name, mime, isMp4 });
+      return { ok: true, id, path: tmpPath, name, encoder: isMp4 ? 'hw-h264' : 'sw-vp8/9' };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -2722,7 +3367,7 @@ while ($true) {
     }
     $prev[$i] = $down
   }
-  Start-Sleep -Milliseconds 20
+  Start-Sleep -Milliseconds 60
 }
 `;
     try {
@@ -2757,24 +3402,20 @@ while ($true) {
       return { ok: false, error: err.message };
     }
   }
-  // Pre-warm shortly after the main window shows so PowerShell's
-  // Add-Type JIT has finished by the time the user clicks KEYS.
-  // Privacy: spawned process polls GetAsyncKeyState constantly but
-  // events are only forwarded to the renderer once _keyHookEnabled is
-  // flipped on (i.e. after the user toggles KEYS in the UI).
-  setTimeout(() => { try { _spawnKeyHook(); } catch {} }, 2000);
+  // NOTE: no pre-warm. The previous version spawned a PowerShell child
+  // process 2s after launch that polled GetAsyncKeyState on 256 keys
+  // every 20ms — ~5% constant CPU even when the user never opened the
+  // KEYS overlay. Now we lazy-spawn on first keycapture-start and tear
+  // down on keycapture-stop so idle CPU stays low.
 
   ipcMain.handle('keycapture-start', () => {
     _keyHookEnabled = true;
-    // If pre-warm hasn't fired yet (rare — e.g. user clicked KEYS in
-    // the first 2 s), spawn now.
     if (!_keyHookProc) _spawnKeyHook();
     return { ok: true };
   });
   ipcMain.handle('keycapture-stop', () => {
-    // Gate-off only; keep the process alive so re-enabling is instant.
-    // Kill happens at app quit via the before-quit hook.
     _keyHookEnabled = false;
+    _stopKeyHook();
     return { ok: true };
   });
 
@@ -2782,16 +3423,84 @@ while ($true) {
     const rec = _screenrecs.get(id);
     if (!rec) return { ok: false, error: 'unknown recording id' };
     _screenrecs.delete(id);
-    return await new Promise((resolve) => {
-      rec.stream.end(() => {
-        try {
-          const size = fs.statSync(rec.path).size;
-          resolve({ ok: true, path: rec.path, name: rec.name, size });
-        } catch (err) {
-          resolve({ ok: false, error: err.message });
+    // Step 1 — close the temp file so anything else can read it.
+    await new Promise((r) => rec.stream.end(r));
+    // Fast path: recorder was already producing MP4 bytes (hardware
+    // H.264). The file IS the final .mp4 — no transcode needed.
+    if (rec.isMp4) {
+      let size = 0;
+      try { size = fs.statSync(rec.finalPath).size; } catch {}
+      return { ok: true, path: rec.finalPath, name: rec.name, size, encoder: 'hw-h264-mediarecorder' };
+    }
+    // Slow path: WebM → MP4 transcode (software-encoded VP8/9 input).
+    const info = _ffmpegInfo || await _probeFfmpeg();
+    const tmpPath   = rec.tmpPath;
+    const finalPath = rec.finalPath;
+    if (!info?.available) {
+      try { fs.renameSync(tmpPath, finalPath); }
+      catch (err) { return { ok: false, error: 'no ffmpeg and rename failed: ' + err.message }; }
+      let size = 0;
+      try { size = fs.statSync(finalPath).size; } catch {}
+      return { ok: true, path: finalPath, name: rec.name, size, encoder: 'webm-passthrough' };
+    }
+    const vcodec = info.hasNvenc ? 'h264_nvenc' : 'libx264';
+    // Pin to High profile + Level 4.1 — broadest Chromium <video>
+    // compatibility. NVENC's default ("High" profile) sometimes
+    // emits a Level Chromium chokes on; libx264 defaults to High@auto
+    // which is fine but be explicit anyway.
+    const profileFlags = ['-profile:v', 'high', '-level', '4.1'];
+    const preset = info.hasNvenc
+      ? ['-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '23']
+      : ['-preset', 'medium', '-crf', '20'];
+    const args = [
+      '-hide_banner', '-y',
+      '-i', tmpPath,
+      // Re-encode video to H.264 yuv420p so it's universally playable.
+      '-c:v', vcodec,
+      ...profileFlags,
+      ...preset,
+      '-pix_fmt', 'yuv420p',
+      // Re-encode audio to AAC; if the WebM had no audio, ffmpeg
+      // silently drops the missing stream rather than erroring.
+      '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart',
+      finalPath,
+    ];
+    const result = await new Promise((resolve) => {
+      const proc = spawn(info.path, args, { windowsHide: true });
+      let stderr = '';
+      proc.stderr?.on('data', (chunk) => {
+        stderr += chunk.toString('utf8');
+        if (stderr.length > 16384) stderr = stderr.slice(-16384);
+      });
+      proc.on('error', (err) => resolve({ ok: false, error: err.message }));
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          resolve({ ok: false, error: `ffmpeg exit ${code}: ${stderr.split('\n').slice(-6).join(' | ')}` });
+          return;
         }
+        let size = 0;
+        try { size = fs.statSync(finalPath).size; } catch {}
+        resolve({ ok: true, path: finalPath, name: rec.name, size, encoder: vcodec });
       });
     });
+    if (result.ok) {
+      // Transcode succeeded — drop the temp WebM.
+      try { fs.unlinkSync(tmpPath); } catch {}
+    } else {
+      // Failed — keep the temp as a fallback so the user doesn't lose
+      // the recording entirely. Rename it to the final path so it
+      // shows up in the captures list.
+      try {
+        if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+        fs.renameSync(tmpPath, finalPath);
+        let size = 0; try { size = fs.statSync(finalPath).size; } catch {}
+        return { ok: true, path: finalPath, name: rec.name, size, encoder: 'webm-fallback', warning: result.error };
+      } catch (err) {
+        return { ok: false, error: result.error };
+      }
+    }
+    return result;
   });
 
   ipcMain.handle('youtube-set-opacity', (_e, opacity) => {
@@ -2813,6 +3522,132 @@ while ($true) {
   ipcMain.handle('yt:search-general', ytHandler('results', (q, o) => yt.searchGeneral(q, o || {})));
   ipcMain.handle('yt:get-stream',     ytHandler('stream',  (u) => yt.getStreamUrl(u)));
   ipcMain.handle('yt:get-metadata',   ytHandler('meta',    (u) => yt.getMetadata(u)));
+
+  // yt:scrape-page — point yt-dlp at any URL and have it enumerate every
+  // video on / linked from that page (works for YouTube channels,
+  // playlists, search results, Vimeo lists, Reddit threads, plain
+  // <video>-tag pages — anything yt-dlp's ~1800 extractors recognize).
+  // `--match-filter "duration>=N"` runs server-side so videos shorter
+  // than minDurationSec are dropped before metadata is fully resolved,
+  // keeping the wire payload small even for huge channels. Live streams
+  // (is_live=true) are excluded — their "duration" is meaningless until
+  // they end, and the user is filtering by "> 10 min", which implicitly
+  // means finished/recorded content.
+  ipcMain.handle('yt:scrape-page', async (_e, opts) => {
+    const url    = opts && opts.url;
+    const minDur = Math.max(0, (opts && opts.minDurationSec) | 0 || 600);
+    if (!url) return { ok: false, error: 'no url' };
+    let bin;
+    try { bin = yt.resolveBin ? yt.resolveBin() : null; } catch (err) { return { ok: false, error: err.message }; }
+    if (!bin) return { ok: false, error: 'yt-dlp binary not found' };
+    return await new Promise((resolve) => {
+      const args = [
+        '--dump-json',
+        '--no-warnings',
+        '--ignore-errors',
+        '--no-call-home',
+        '--match-filter', `duration >= ${minDur} & !is_live`,
+        url,
+      ];
+      const proc = spawn(bin, args, { windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (b) => { stdout += b.toString('utf8'); });
+      proc.stderr.on('data', (b) => { stderr += b.toString('utf8'); });
+      proc.on('error', (err) => resolve({ ok: false, error: err.message }));
+      proc.on('close', () => {
+        const items = [];
+        for (const line of stdout.split('\n')) {
+          const s = line.trim();
+          if (!s) continue;
+          try {
+            const o = JSON.parse(s);
+            if (!Number.isFinite(o.duration) || o.duration < minDur) continue;
+            if (o.is_live) continue;
+            items.push({
+              id:        o.id || '',
+              title:     o.title || o.id || 'untitled',
+              url:       o.webpage_url || o.original_url || url,
+              duration:  o.duration,
+              thumbnail: o.thumbnail || null,
+              channel:   o.uploader || o.channel || '',
+            });
+          } catch {}
+        }
+        if (items.length === 0 && stderr) {
+          // Surface yt-dlp's own diagnostic when zero videos came back —
+          // makes "this site isn't supported" failures debuggable instead
+          // of mysterious empty results.
+          return resolve({ ok: true, items: [], note: stderr.trim().slice(-300) });
+        }
+        resolve({ ok: true, items });
+      });
+    });
+  });
+
+  // yt:download — download one video to gallery/downloads/. Progress
+  // events are streamed back to the calling renderer via
+  // 'yt:download-progress' (downloadId + percent + speed + eta) so
+  // multiple parallel downloads can update their own rows independently.
+  ipcMain.handle('yt:download', async (_e, opts) => {
+    const url = opts && opts.url;
+    const downloadId = (opts && opts.downloadId) || `dl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (!url) return { ok: false, error: 'no url', downloadId };
+    let bin;
+    try { bin = yt.resolveBin ? yt.resolveBin() : null; } catch (err) { return { ok: false, error: err.message, downloadId }; }
+    if (!bin) return { ok: false, error: 'yt-dlp binary not found', downloadId };
+    ensureUserFolders();
+    const outDir = downloadsFolderPath();
+    return await new Promise((resolve) => {
+      const args = [
+        '--no-warnings',
+        '--no-call-home',
+        '--no-playlist',
+        '-f', 'bv*+ba/b',
+        '--merge-output-format', 'mp4',
+        '-o', path.join(outDir, '%(title).200B [%(id)s].%(ext)s'),
+        // Custom progress format that's trivial to parse line-by-line.
+        // %(progress.downloaded_bytes)s is in bytes; total may be 0 on
+        // some streams when yt-dlp doesn't know the size up front.
+        '--progress-template', 'PROG|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s|%(progress.eta)s',
+        '--newline',
+        url,
+      ];
+      const proc = spawn(bin, args, { windowsHide: true });
+      let stderr = '';
+      let outPath = null;
+      proc.stdout.on('data', (b) => {
+        const text = b.toString('utf8');
+        for (const line of text.split('\n')) {
+          if (line.startsWith('PROG|')) {
+            const parts = line.split('|');
+            const downloaded = parseInt(parts[1], 10) || 0;
+            const total      = parseInt(parts[2], 10) || 0;
+            const speed      = parseFloat(parts[3]) || 0;
+            const eta        = parseFloat(parts[4]) || 0;
+            const percent    = total > 0 ? Math.min(100, (downloaded / total) * 100) : 0;
+            try { _e.sender.send('yt:download-progress', { downloadId, downloaded, total, speed, eta, percent }); } catch {}
+            continue;
+          }
+          // Capture the final on-disk filename for the response.
+          let m = line.match(/\[download\] Destination: (.+)$/);
+          if (m) outPath = m[1].trim();
+          m = line.match(/\[Merger\] Merging formats into "(.+)"/);
+          if (m) outPath = m[1].trim();
+        }
+      });
+      proc.stderr.on('data', (b) => { stderr += b.toString('utf8'); });
+      proc.on('error', (err) => resolve({ ok: false, error: err.message, downloadId }));
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try { _e.sender.send('yt:download-progress', { downloadId, percent: 100, done: true }); } catch {}
+          resolve({ ok: true, path: outPath, downloadId });
+        } else {
+          resolve({ ok: false, error: stderr.trim().slice(-300) || `yt-dlp exit ${code}`, downloadId });
+        }
+      });
+    });
+  });
 
   ipcMain.handle('toggle-fullscreen', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);

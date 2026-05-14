@@ -40,7 +40,10 @@ function getDefaultSinkName() {
 
 let child = null;
 let leftover = Buffer.alloc(0);
-const fft = createFftEngine({ sampleRate: SAMPLE_RATE });
+// Linux worker still chunks at 512 frames per tick → ~94 Hz callbacks at
+// 48 kHz. fftEvery: 4 keeps the renderer-side output at ~23 Hz, matching
+// what Windows now produces natively from its 2048-sample buffer.
+const fft = createFftEngine({ sampleRate: SAMPLE_RATE, fftEvery: 4 });
 
 function start() {
   const sink = getDefaultSinkName();
@@ -87,14 +90,15 @@ function start() {
       const samples = new Float32Array(block.buffer, block.byteOffset, FRAMES_PER_TICK * CHANNELS);
       fft.feed(samples, CHANNELS);
       const result = fft.tick();
+      // Only post when bands are present (every FFT_EVERY-th tick = ~23 Hz).
+      // RMS-only off-frames are ignored by the renderer; posting them was
+      // ~94 messages/sec across worker → main → renderer. Dropped.
       if (result.bands) {
         process.parentPort.postMessage({
           rms: result.rms,
           bands: result.bands,
           deviceName,
         });
-      } else {
-        process.parentPort.postMessage({ rms: result.rms, deviceName });
       }
     }
   });

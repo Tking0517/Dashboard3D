@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.9.0-alpha.2] — 2026-05-15
+
+**Performance overhaul, zen-mode rewrite, browser scraper + filter chips, inline media viewer, sleep button, theme/sensor polish.**
+
+### Performance — renderer + main + audio worker
+- **Global rAF cap at 60 Hz** (`app.js`): every `requestAnimationFrame` callback fires at most every ~16.6 ms regardless of monitor refresh rate. On a 117 Hz / 144 Hz display this halves JS work, DOM writes, and GC pressure for every animation loop. `cancelAnimationFrame` stays correct via a user-id → native-id map.
+- **FPS counter gated on diag-on**: the always-on rAF that drove the diagnostic FPS readout now only runs while the diag overlay is visible. That single change was the biggest fan-spike contributor at idle (kept the compositor + GPU thread + V8 alive at full display rate 24/7).
+- **Audio worker buffer 512 → 4096 samples**: WASAPI loopback callback fires at ~12 Hz now (was ~94 Hz). FFT compute drops to match. IPC traffic worker → main → renderer dropped from ~564 events/sec to ~12. The synchronized all-core GC bursts visible in Task Manager are gone.
+- **`audio-fft.js` `fftEvery` configurable per worker**: Windows worker uses 1 (native 12 Hz from 4096 buffer), Linux still uses 4 (chunked at 512 frames).
+- **CPU sparkline fill via `transform: translateY` + CSS variable** instead of `style.height = '%'`: dropped per-refresh Layout work from ~672 passes to 0 (transform is pure compositor). Same fix applied to `.gpu-bar-fill` and the peak markers.
+- **`will-change: opacity` on breathing panels + meter rows**: pre-promotes them to GPU compositor layers so the slow opacity pulse doesn't create/destroy layers each cycle.
+- **`contain: layout style paint` on every `.panel`**: style/layout changes inside one panel can't propagate to siblings. Drops Recalculate Style time when many panels tick independently.
+- **Brightness-filter pulses → opacity pulses**: `panel-pulse`, `element-pulse`, `bg-grid-pulse` all swapped from `filter: brightness()` (per-pixel GPU compute every frame) to `opacity` (single alpha-channel multiply). Visually similar against the dark grid; compositor cost goes from dominant to essentially free.
+- **Bg-cell flicker removed entirely**: ~170 `<div>` cells each running a 2.5 s opacity transition were the single biggest source of "Layerize" time. Function reduced to a no-op; container cleared on boot. The static grid pattern in `.bg-grid` is unchanged.
+- **Bg-grid pattern moved to `.bg-grid::after`**: the solid `background-color: var(--bg)` stays on `.bg-grid` so the invert wallpaper still gets a bright inverted backdrop. The dots/lines + pulse animation live on the pseudo-element. Opacity animation now fades only the pattern, not the page background. All 12 alternate patterns retargeted to `::after`.
+- **Audio bar count cap**: per-bar pixel target raised to 10 px, max 72 bars. On a typical-width strip the audio panel went from ~110 bars per redraw to ~55.
+- **Music meter visualizer**: bar count target 6 px / cap 128 (was 3 px / 384). `_bgmDrawMeter` now stops requesting rAF when the music tab isn't visible — music keeps playing through the audio graph, only the canvas redraw pauses.
+- **Chromium GPU flag set tuned**: removed `ignore-gpu-blocklist`, `enable-gpu-rasterization`, `enable-zero-copy`, `enable-accelerated-video-decode`, `disable-renderer-backgrounding`, `disable-background-timer-throttling`, `setZoomFactor(1.2)`, and `IntensiveWakeUpThrottling` from disable-features. The combo was forcing per-paint scaling at 3200×1800 × 117 Hz and disabling all background throttling. Kept WGC capture, CanvasOopRasterization, ANGLE D3D11, and `force-device-scale-factor=1`.
+- **Keyhook PowerShell pre-warm removed**: KEYS-overlay child process now only spawns when the user actually toggles KEYS on. Idle CPU drops by ~3-5% on bare-stock machines.
+- **`UI_REFRESH_MS` 5 s → 10 s**: refreshSystem, netLoop, diskLoop, mute-state poll, and diag tick all run half as often.
+- **Bottom-Z-order tick 1 s → 5 s**: `wmService.sendToBottom` queues a `SetWindowPos` every 5 s instead of every second.
+
+### Zen mode rewrite
+- **Manual only**: removed the 5-minute idle auto-enter. `armZenTimer` still exits zen on any input but never queues an idle-enter `setTimeout`.
+- **Theme stays put**: zen no longer randomizes a pastel theme on entry or cycles palettes every 25 s. The user's saved theme persists.
+- **All panels actually hide**: rule is now `body.is-zen .panel, body.is-zen .panel-stack { opacity: 0 !important; pointer-events: none !important; visibility: hidden; }` with a delayed `visibility` transition so the fade is still visible. The `!important` beats any per-panel rule (alert pulses, fold states, etc.) that was holding opacity at 1. Webcam + terminal panels also fully fade instead of dimming to 50%.
+- **Audio visualizers at full opacity** in zen: split the zen-overlay dim rule so `.audio-grid` stays at opacity 1.
+
+### Browser
+- **Splash simplified**: removed the `WEB / IMAGES / VIDEOS` chip row from the splash. Address + search inputs only; default search is web.
+- **Result-page filter chips**: `ALL · IMAGES · VIDEOS · LINKS · NEWS`. Active chip syncs to the current result kind; clicks re-run the search with that kind.
+- **More search results**: per-engine result counts raised (Google `num=100`, Bing `count=50`, Brave `count=20`), and first-page searches now fan-fetch pages 1 + 2 in parallel per engine and concatenate the HTML. Upfront result count roughly doubled.
+- **SafeSearch off** across all engines: Google `&safe=off&filter=0`, Bing `&adlt=off`, Brave `&safesearch=off`, DuckDuckGo `&kp=-2` (also wired through to DDG's image + video JSON endpoints), Yahoo `&vm=r`.
+- **Popup blocker tightened**: `setWindowOpenHandler` inspects `disposition` — `foreground-tab` / `background-tab` (user click, middle-click, target=_blank) routes to a new tab; scripted `new-window` popups are blocked and counted. Splash `POPUPS BLOCKED` chip is now wired through.
+- **Tracker blocklist expanded** by ~25 high-traffic domains: Amazon ad system, AppNexus chain, TikTok / Snap / Reddit ad pixels, popup-modal vendors (Sumo, OptinMonster, Sleeknote), session-replay (LogRocket, Smartlook, ContentSquare), web-push prompt scripts.
+- **Video scraper tool**: new 📹 button in the toolbar runs yt-dlp against the active tab's URL, filters to videos `>= 300 s` (5 min), and shows a results overlay with thumbnail, title, channel, duration. Per-row ⇩ download + DOWNLOAD ALL (sequential, 250 ms stagger). Each row has a live progress bar driven by `yt-dlp --progress-template`. Saves to `gallery/downloads/<title> [<id>].mp4`.
+
+### Explore — inline media viewer
+- **Double-click an image or video** in Gallery / Docs / Downloads to play it in an inline viewer that covers the file list. Native `<video controls>` for seek / volume / fullscreen / picture-in-picture.
+- **⛶ button + F key** toggle browser-level fullscreen on the viewer.
+- **⇱ pop-out** falls back to the frameless overlay window (images) or the OS default app (videos).
+- **× / Esc** closes the viewer; the video decoder is released on close so no idle CPU lingers.
+
+### Rec-room editor
+- **Disabled for the session** behind a one-line revert in `_refreshEditBtn`. The EDIT button is hidden + disabled and `_openEditor` returns immediately. Pane / state / wiring left in place so re-enabling is a one-line change.
+
+### Visualizer / Network / Drive I/O / Music — visual unification
+- **Bell-curve falloff** on audio in/out and the music meter: tallest at center, ~30% at edges. `0.30 + 0.70 * cos(dist * π/2)`. Replaces the prior "smile" that exaggerated edges.
+- **Music meter split palette**: left half uses `--accent` (audio-out color), right half `--amber` (audio-in color). Hard split at midpoint.
+- **Network + Drive I/O sparklines** now use the same segmented LED-cell rendering as the audio bars (dim → bright gradient per segment, peak markers in `--red`). Time-series, so no bell curve.
+- **Spark bar pixel width** doubled (4 px → 8 px) for chunkier readout.
+- **`.audio-grid` matches `.panel` transparency** — both use `background: var(--panel-bg)` so themes (especially inverted) render the audio panels and data panels with identical fill.
+
+### System / UX
+- **Sleep button** in the topbar (crescent-moon icon). Confirms via native dialog, then `rundll32 powrprof.dll,SetSuspendState 0,1,0` on Windows / `systemctl suspend` on Linux / `pmset sleepnow` on macOS. Child spawned detached + `proc.unref()`'d so it survives renderer teardown.
+- **Boot SFX +30% louder**: all five startup procedural sounds routed through a single master gain at `BOOT_SFX_GAIN = 1.3`.
+- **Honest temperature label**: when systeminformation's Intel DTS path succeeds the label reads `INTEL DTS`; when it falls back to ACPI it reads `ACPI ZONE`; when the ACPI sensor is stuck (4 identical readings in a row — a common Z790 BIOS quirk) the label switches to `EST CPU` and the value is derived from CPU load with a tooltip explaining the fallback.
+- **Honest CPU watts label**: when Windows RAPL stops reporting (common when Turbo Boost is set to Disabled in the power plan), the W readout falls back to a load-derived estimate prefixed with `~` and a tooltip explains how to restore the live reading.
+
+### Removed / dead code
+- `scheduleBgCell`, `BG_CELL` constant, `buildBgCells` resize handler, and the per-cell flicker loop body.
+- `ZEN_THEMES`, `_zenIdx`, `_zenCycleTimer`, `ZEN_CYCLE_MS` (auto-cycle removed).
+- `.bg-grid-cell` CSS rule (no elements created any more).
+- Stale `applyTheme(ZEN_THEMES[...])` call sites in `enterZen`.
+
 ## [0.9.0-alpha.1] — 2026-05-14
 
 **Feature drop — GENERATE room (ComfyUI), background music, RETRO CRT theme, LHM-free sensor stack, rec-room overhaul.**

@@ -353,6 +353,12 @@
           </svg>
         </button>
 
+        <button id="sleep-btn" class="topbar-btn" type="button" title="Sleep — suspend this PC to RAM (asks to confirm)" aria-label="Sleep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 13 A9 9 0 1 1 11 3 A7 7 0 0 0 21 13 Z"/>
+          </svg>
+        </button>
+
         <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
           <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
@@ -842,6 +848,22 @@
                   </header>
                   <ul class="explore-list" id="explore-downloads-list"></ul>
                 </div>
+                <!-- Inline media viewer for the EXPLORE pane.
+                     Covers the file list when active; closes via × or
+                     Esc. Video element keeps native controls so seek /
+                     volume / fullscreen / PiP are all built-in. -->
+                <div class="explore-viewer" id="explore-viewer" hidden>
+                  <div class="explore-viewer-head">
+                    <span class="explore-viewer-name" id="explore-viewer-name">—</span>
+                    <button type="button" class="explore-viewer-action" id="explore-viewer-fs-btn" title="Fullscreen (or press F)">⛶</button>
+                    <button type="button" class="explore-viewer-action" id="explore-viewer-popout-btn" title="Pop out to a separate window">⇱</button>
+                    <button type="button" class="explore-viewer-action explore-viewer-close" id="explore-viewer-close-btn" title="Close (Esc)">×</button>
+                  </div>
+                  <div class="explore-viewer-stage" id="explore-viewer-stage">
+                    <img   id="explore-viewer-img" class="explore-viewer-img" hidden alt="" />
+                    <video id="explore-viewer-vid" class="explore-viewer-vid" hidden controls preload="metadata"></video>
+                  </div>
+                </div>
               </div>
 
               <!-- REC ROOM pane (screen mirror + snap + screen-record studio) -->
@@ -873,38 +895,291 @@
                     </div>
                   </div>
                 </div>
+                <!-- EDIT mode pane. Hidden until user clicks EDIT on a video.
+                     Layout: dual-video preview (original / edited), shared
+                     scrubbable timeline with trim handles, filter panel,
+                     export controls. Filters are a JS object that's both
+                     used as a CSS `filter:` string for the live preview
+                     and shipped to ffmpeg on EXPORT. -->
+                <div class="visualizer-edit-pane" id="visualizer-edit-pane" hidden>
+                  <div class="vis-edit-head">
+                    <span class="vis-edit-title" title="Scroll-wheel zoom · drag to pan · double-click to reset">EDIT · <em id="vis-edit-name">—</em></span>
+                    <!-- Spacer eats left-side empty space so the actions
+                         end up centred between title and icons. -->
+                    <span class="vis-edit-head-spacer"></span>
+                    <!-- Centre cluster: edit actions (reset / export). -->
+                    <div class="vis-edit-head-group vis-edit-head-actions">
+                      <button type="button" class="explore-action vis-edit-reset" id="vis-edit-reset" title="Reset filters and trim to defaults">RESET</button>
+                      <button type="button" class="explore-action vis-edit-export" id="vis-edit-export" title="Export the edited clip">▶ EXPORT</button>
+                    </div>
+                    <span class="vis-edit-head-spacer"></span>
+                    <!-- Right cluster: view + file actions (snapshot / expand / close). -->
+                    <div class="vis-edit-head-group vis-edit-head-icons">
+                      <button type="button" class="explore-action vis-edit-icon-btn" id="vis-edit-snap" title="Save the current frame as a PNG">📷</button>
+                      <button type="button" class="explore-action vis-edit-icon-btn" id="vis-edit-expand" title="Expand editor over the whole combo panel">⛶</button>
+                      <button type="button" class="explore-action vis-edit-icon-btn" id="vis-edit-close" title="Close editor">×</button>
+                    </div>
+                  </div>
+                  <div class="vis-edit-split" id="vis-edit-split">
+                    <div class="vis-edit-side" id="vis-edit-side-orig">
+                      <span class="vis-edit-side-label">ORIGINAL</span>
+                      <video id="vis-edit-orig" class="vis-edit-video" preload="metadata" muted></video>
+                      <img   id="vis-edit-orig-img" class="vis-edit-still" alt="" hidden>
+                    </div>
+                    <div class="vis-edit-side" id="vis-edit-side-out">
+                      <span class="vis-edit-side-label">EDITED</span>
+                      <video id="vis-edit-out"  class="vis-edit-video" preload="metadata" muted></video>
+                      <img   id="vis-edit-out-img"  class="vis-edit-still" alt="" hidden>
+                      <!-- V2 overlays — each active overlay clip
+                           renders here on top of the EDITED video. -->
+                      <div class="vis-edit-overlays" id="vis-edit-overlays"></div>
+                      <!-- Crop drag-rect overlay. Hidden until CROP tool
+                           toggled on. 8 handles + drag-anywhere-in-body. -->
+                      <div class="vis-edit-crop" id="vis-edit-crop" hidden>
+                        <div class="vis-edit-crop-rect" id="vis-edit-crop-rect">
+                          <span class="vis-edit-crop-handle is-h-nw" data-chandle="nw"></span>
+                          <span class="vis-edit-crop-handle is-h-n"  data-chandle="n"></span>
+                          <span class="vis-edit-crop-handle is-h-ne" data-chandle="ne"></span>
+                          <span class="vis-edit-crop-handle is-h-e"  data-chandle="e"></span>
+                          <span class="vis-edit-crop-handle is-h-se" data-chandle="se"></span>
+                          <span class="vis-edit-crop-handle is-h-s"  data-chandle="s"></span>
+                          <span class="vis-edit-crop-handle is-h-sw" data-chandle="sw"></span>
+                          <span class="vis-edit-crop-handle is-h-w"  data-chandle="w"></span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- Scrubbable timeline. Two trim handles (in / out) +
+                       a playhead. The whole bar is click-to-seek. -->
+                  <div class="vis-edit-timeline" id="vis-edit-timeline">
+                    <div class="vis-edit-trim-range" id="vis-edit-trim-range"></div>
+                    <div class="vis-edit-trim-handle is-in"  id="vis-edit-trim-in"  data-handle="in"  title="Drag to set start of clip"></div>
+                    <div class="vis-edit-trim-handle is-out" id="vis-edit-trim-out" data-handle="out" title="Drag to set end of clip"></div>
+                    <div class="vis-edit-playhead" id="vis-edit-playhead"></div>
+                  </div>
+                  <!-- Multi-track timeline (DaVinci-style). Three tracks
+                       — V2 (overlay video), V1 (main video), A1 (audio).
+                       Drag a capture from the list below onto any track
+                       to add a clip; drag clips along the time axis to
+                       reposition. Project settings (FPS, resolution)
+                       drive the export pipeline; px/sec drives layout. -->
+                  <div class="vis-edit-tl">
+                    <div class="vis-edit-tl-project">
+                      <label class="vis-edit-tl-proj-lbl">FPS
+                        <select id="vis-edit-tl-fps">
+                          <option value="24">24</option>
+                          <option value="25">25</option>
+                          <option value="30" selected>30</option>
+                          <option value="50">50</option>
+                          <option value="60">60</option>
+                        </select>
+                      </label>
+                      <label class="vis-edit-tl-proj-lbl">RES
+                        <select id="vis-edit-tl-res">
+                          <option value="1280x720">720p</option>
+                          <option value="1920x1080" selected>1080p</option>
+                          <option value="2560x1440">1440p</option>
+                          <option value="3840x2160">2160p</option>
+                        </select>
+                      </label>
+                      <label class="vis-edit-tl-proj-lbl">ZOOM
+                        <input type="range" id="vis-edit-tl-zoom" min="20" max="200" step="5" value="50" title="Pixels per second of timeline">
+                      </label>
+                      <span class="vis-edit-tl-proj-hint">Drag a recording from the list below onto a track.</span>
+                    </div>
+                    <div class="vis-edit-tl-body">
+                      <div class="vis-edit-tl-headers" id="vis-edit-tl-headers">
+                        <div class="vis-edit-tl-head-spacer"></div>
+                        <div class="vis-edit-tl-head" data-track="V2"><span>V2</span><span class="vis-edit-tl-head-meta">video</span></div>
+                        <div class="vis-edit-tl-head" data-track="V1"><span>V1</span><span class="vis-edit-tl-head-meta">video</span></div>
+                        <div class="vis-edit-tl-head" data-track="A1"><span>A1</span><span class="vis-edit-tl-head-meta">audio</span></div>
+                      </div>
+                      <div class="vis-edit-tl-scroll" id="vis-edit-tl-scroll">
+                        <div class="vis-edit-tl-content" id="vis-edit-tl-content">
+                          <div class="vis-edit-tl-ruler" id="vis-edit-tl-ruler"></div>
+                          <div class="vis-edit-tl-track" data-track="V2" id="vis-edit-tl-track-V2"></div>
+                          <div class="vis-edit-tl-track" data-track="V1" id="vis-edit-tl-track-V1"></div>
+                          <div class="vis-edit-tl-track is-audio" data-track="A1" id="vis-edit-tl-track-A1"></div>
+                          <div class="vis-edit-tl-playhead" id="vis-edit-tl-playhead"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="vis-edit-time-row">
+                    <button type="button" class="explore-action" id="vis-edit-play" title="Play / pause">▶</button>
+                    <span class="vis-edit-time" id="vis-edit-time">0:00 / 0:00</span>
+                    <!-- Preview volume — drives the ORIGINAL/EDITED video
+                         elements' .volume so the user can hear the clip
+                         while editing without un-muting them globally. -->
+                    <button type="button" class="explore-action vis-edit-vol-btn" id="vis-edit-vol-btn" title="Toggle preview mute">🔊</button>
+                    <input type="range" class="vis-edit-vol" id="vis-edit-vol" min="0" max="100" step="1" value="80" title="Preview volume">
+                    <span class="vis-edit-trim-times" id="vis-edit-trim-times">TRIM 0:00 → 0:00</span>
+                  </div>
+                  <!-- Tabbed tool panel. COLOR holds the sliders; TRANSFORM
+                       has crop/rotate/flip; EFFECTS holds presets + speed +
+                       audio. Each tab fills the remaining pane height so the
+                       editor's lower half isn't dead space. -->
+                  <div class="vis-edit-tabs" id="vis-edit-tabs">
+                    <button type="button" class="vis-edit-tab is-active" data-tab="color">COLOR</button>
+                    <button type="button" class="vis-edit-tab" data-tab="transform">TRANSFORM</button>
+                    <button type="button" class="vis-edit-tab" data-tab="effects">EFFECTS</button>
+                    <button type="button" class="vis-edit-tabs-collapse" id="vis-edit-tabs-collapse" title="Hide / show the tool panel">▾</button>
+                  </div>
+                  <div class="vis-edit-tabbody" id="vis-edit-tabbody">
+                    <!-- COLOR tab -->
+                    <div class="vis-edit-tabpane is-active" data-tabpane="color">
+                      <div class="vis-edit-filters">
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">BRIGHTNESS</span>
+                          <input type="range" id="vis-edit-brightness" min="0" max="200" step="1" value="100">
+                          <span class="vis-edit-filter-val" data-for="brightness">100%</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">CONTRAST</span>
+                          <input type="range" id="vis-edit-contrast" min="0" max="200" step="1" value="100">
+                          <span class="vis-edit-filter-val" data-for="contrast">100%</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">SATURATION</span>
+                          <input type="range" id="vis-edit-saturation" min="0" max="200" step="1" value="100">
+                          <span class="vis-edit-filter-val" data-for="saturation">100%</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">HUE</span>
+                          <input type="range" id="vis-edit-hue" min="-180" max="180" step="1" value="0">
+                          <span class="vis-edit-filter-val" data-for="hue">0°</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">BLUR</span>
+                          <input type="range" id="vis-edit-blur" min="0" max="20" step="0.1" value="0">
+                          <span class="vis-edit-filter-val" data-for="blur">0.0 px</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">SHARPEN</span>
+                          <input type="range" id="vis-edit-sharpen" min="0" max="200" step="1" value="0">
+                          <span class="vis-edit-filter-val" data-for="sharpen">0%</span>
+                        </div>
+                        <div class="vis-edit-filter-row vis-edit-toggle-row">
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-auto" title="Boost contrast + saturation for a quick punch-up">AUTO CONTRAST</button>
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-denoise" title="Spatial+temporal denoiser (applied on EXPORT via ffmpeg hqdn3d)">DENOISE</button>
+                        </div>
+                      </div>
+                    </div>
+                    <!-- TRANSFORM tab -->
+                    <div class="vis-edit-tabpane" data-tabpane="transform">
+                      <div class="vis-edit-filters">
+                        <div class="vis-edit-filter-row vis-edit-toggle-row">
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-crop-toggle" title="Drag the rect on the EDITED preview to set the crop region">CROP</button>
+                          <button type="button" class="explore-action explore-action-wide" id="vis-edit-crop-reset" title="Reset crop to the full frame">CROP RESET</button>
+                          <button type="button" class="explore-action explore-action-wide" id="vis-edit-rotate" title="Rotate by 90° each click">↻ ROTATE 0°</button>
+                        </div>
+                        <div class="vis-edit-filter-row vis-edit-toggle-row">
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-flip-h" title="Mirror horizontally">⇄ FLIP H</button>
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-flip-v" title="Mirror vertically">⇅ FLIP V</button>
+                        </div>
+                        <div class="vis-edit-help">
+                          Drag the crop rectangle's body to move, drag the
+                          edges/corners to resize. Crop region is applied
+                          to the exported video at native resolution.
+                        </div>
+                      </div>
+                    </div>
+                    <!-- EFFECTS tab -->
+                    <div class="vis-edit-tabpane" data-tabpane="effects">
+                      <div class="vis-edit-filters">
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">SPEED</span>
+                          <input type="range" id="vis-edit-speed" min="25" max="400" step="5" value="100">
+                          <span class="vis-edit-filter-val" data-for="speed">1.00×</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">VIGNETTE</span>
+                          <input type="range" id="vis-edit-vignette" min="0" max="100" step="1" value="0">
+                          <span class="vis-edit-filter-val" data-for="vignette">0%</span>
+                        </div>
+                        <div class="vis-edit-filter-row">
+                          <span class="vis-edit-filter-label">VOLUME</span>
+                          <input type="range" id="vis-edit-volume" min="0" max="200" step="1" value="100">
+                          <span class="vis-edit-filter-val" data-for="volume">100%</span>
+                        </div>
+                        <div class="vis-edit-filter-row vis-edit-toggle-row">
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-bw"     title="Black &amp; white">B&amp;W</button>
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-sepia"  title="Sepia tone">SEPIA</button>
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-invert" title="Invert colors">INVERT</button>
+                        </div>
+                        <div class="vis-edit-filter-row vis-edit-toggle-row">
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-reverse" title="Reverse the clip on export (video + audio)">⏪ REVERSE</button>
+                          <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-edit-mute" title="Mute exported audio entirely">🔇 MUTE</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="vis-edit-status" id="vis-edit-status"></div>
+                </div>
+                <!-- Drag handle that resizes the player/edit area against
+                     the captures list below. Updates --rec-split-pct on
+                     the combo-pane via JS; CSS reads that to set heights. -->
+                <div class="visualizer-split" id="visualizer-split" title="Drag to resize" role="separator" aria-orientation="horizontal"></div>
                 <div class="visualizer-list-head">
                   <span class="visualizer-list-title">CAPTURES</span>
                   <span class="visualizer-list-now" id="visualizer-now">—</span>
-                  <button type="button" class="explore-action" id="visualizer-prev-btn" title="Previous">
-                    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2" height="14"/><path d="M20 5 L8 12 L20 19 Z"/></svg>
-                  </button>
-                  <button type="button" class="explore-action" id="visualizer-playpause-btn" title="Play / pause">
-                    <svg class="vis-play-icon"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
-                    <svg class="vis-pause-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
-                  </button>
-                  <button type="button" class="explore-action" id="visualizer-next-btn" title="Next">
-                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5 L16 12 L4 19 Z"/><rect x="18" y="5" width="2" height="14"/></svg>
-                  </button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-mute-btn" title="Mute playback audio (recording and mirror)">SOUND</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-mirror-btn" title="Mirror the currently-playing video (YouTube popout, browser tabs, any media)">MIRROR</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-source-btn" title="Choose which window or screen to mirror">SOURCE</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-fit-btn" title="Fill the rec-room player with just the cropped region (only effective while CROP is on)">FIT</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-crop-btn" title="Free capture — define a draggable rectangle and record only inside it">CROP</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-keys-btn" title="Overlay pressed keys onto the recording (recording-only; not visible on this screen)">KEYS</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-osd-btn" title="On-screen display: time, date, and live FPS overlays (recording-only)">OSD</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-quality-btn" title="Recording quality and resolution presets / custom bitrate">Q:MED</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-screencap-btn" title="Save a JPEG to gallery/screencap on each keystroke or mouse click (throttled)">SNAP</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-screenrec-btn" title="Continuous video record of the mirror source to gallery/recordings/*.mkv">REC</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-process-btn" title="Stitch the selected snaps into a video (shift/ctrl click to multi-select in the screencap folder)" disabled>PROCESS</button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-delete-btn" title="Move the selected captures (or the currently-playing item) to the Recycle Bin" disabled>DELETE</button>
-                  <button type="button" class="explore-action" id="visualizer-refresh-btn"   title="Refresh">↻</button>
+                  <!-- Transport: prev / play-pause / next -->
+                  <div class="vis-btn-group" data-group="transport">
+                    <button type="button" class="explore-action" id="visualizer-prev-btn" title="Previous">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2" height="14"/><path d="M20 5 L8 12 L20 19 Z"/></svg>
+                    </button>
+                    <button type="button" class="explore-action" id="visualizer-playpause-btn" title="Play / pause">
+                      <svg class="vis-play-icon"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
+                      <svg class="vis-pause-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+                    </button>
+                    <button type="button" class="explore-action" id="visualizer-next-btn" title="Next">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5 L16 12 L4 19 Z"/><rect x="18" y="5" width="2" height="14"/></svg>
+                    </button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mute-btn" title="Mute playback audio (recording and mirror)">SOUND</button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <!-- Source / capture configuration -->
+                  <div class="vis-btn-group" data-group="source">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mirror-btn" title="Mirror the currently-playing video (YouTube popout, browser tabs, any media)">MIRROR</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-source-btn" title="Choose which window or screen to mirror">SOURCE</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-fit-btn" title="Fill the rec-room player with just the cropped region (only effective while CROP is on)">FIT</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-crop-btn" title="Free capture — define a draggable rectangle and record only inside it">CROP</button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <!-- Recording overlays + quality -->
+                  <div class="vis-btn-group" data-group="overlays">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-keys-btn" title="Overlay pressed keys onto the recording (recording-only; not visible on this screen)">KEYS</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-osd-btn" title="On-screen display: time, date, and live FPS overlays (recording-only)">OSD</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-quality-btn" title="Recording quality and resolution presets / custom bitrate">Q:MED</button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <!-- Capture actions -->
+                  <div class="vis-btn-group" data-group="capture">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-screencap-btn" title="Save a JPEG to gallery/screencap on each keystroke or mouse click (throttled)">SNAP</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-screenrec-btn" title="Continuous video record of the mirror source to gallery/recordings/*.mkv">REC</button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <!-- Edit + output -->
+                  <div class="vis-btn-group" data-group="output">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-edit-btn" title="Open the editor: trim, color, blur, denoise, auto-contrast on a video; split-view original vs edited" disabled>EDIT</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-process-btn" title="Stitch the selected snaps into a video (shift/ctrl click to multi-select in the screencap folder)" disabled>PROCESS</button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <!-- File actions -->
+                  <div class="vis-btn-group" data-group="file">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-delete-btn" title="Move the selected captures (or the currently-playing item) to the Recycle Bin" disabled>DELETE</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-undo-btn" title="Restore the most recently deleted item" disabled>UNDO</button>
+                    <button type="button" class="explore-action" id="visualizer-refresh-btn"   title="Refresh">↻</button>
+                  </div>
                 </div>
                 <!-- Popover: capture source picker. Populated on open via desktopCapturer. -->
                 <div class="visualizer-source-picker" id="visualizer-source-picker" hidden>
                   <div class="visualizer-source-picker-head">
                     <span>CAPTURE SOURCE</span>
                     <button type="button" class="explore-action" id="visualizer-source-close" title="Close">×</button>
+                  </div>
+                  <div class="visualizer-source-hint">
+                    Minimized windows aren't listed — Windows hides them from capture. Restore the window first.
                   </div>
                   <ul class="visualizer-source-list" id="visualizer-source-list"></ul>
                 </div>
@@ -947,6 +1222,42 @@
                       <input type="range" id="visualizer-process-speed" min="100" max="3000" step="50" value="200">
                       <span id="visualizer-process-speed-val" class="visualizer-process-speed-val">200%</span>
                     </div>
+                    <!-- Optional color/filter pass applied during the
+                         snap-stitch ffmpeg invocation. Reuses the same
+                         filter object the EDIT panel writes, so the user
+                         only learns one set of controls. -->
+                    <details class="visualizer-process-filters">
+                      <summary>FILTERS · color, blur, denoise</summary>
+                      <div class="vis-edit-filter-row">
+                        <span class="vis-edit-filter-label">BRIGHTNESS</span>
+                        <input type="range" id="vis-proc-brightness" min="0" max="200" step="1" value="100">
+                        <span class="vis-edit-filter-val" data-for="proc-brightness">100%</span>
+                      </div>
+                      <div class="vis-edit-filter-row">
+                        <span class="vis-edit-filter-label">CONTRAST</span>
+                        <input type="range" id="vis-proc-contrast" min="0" max="200" step="1" value="100">
+                        <span class="vis-edit-filter-val" data-for="proc-contrast">100%</span>
+                      </div>
+                      <div class="vis-edit-filter-row">
+                        <span class="vis-edit-filter-label">SATURATION</span>
+                        <input type="range" id="vis-proc-saturation" min="0" max="200" step="1" value="100">
+                        <span class="vis-edit-filter-val" data-for="proc-saturation">100%</span>
+                      </div>
+                      <div class="vis-edit-filter-row">
+                        <span class="vis-edit-filter-label">HUE</span>
+                        <input type="range" id="vis-proc-hue" min="-180" max="180" step="1" value="0">
+                        <span class="vis-edit-filter-val" data-for="proc-hue">0°</span>
+                      </div>
+                      <div class="vis-edit-filter-row">
+                        <span class="vis-edit-filter-label">BLUR</span>
+                        <input type="range" id="vis-proc-blur" min="0" max="20" step="0.1" value="0">
+                        <span class="vis-edit-filter-val" data-for="proc-blur">0.0 px</span>
+                      </div>
+                      <div class="vis-edit-filter-row vis-edit-toggle-row">
+                        <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-proc-auto"     title="Auto contrast boost">AUTO CONTRAST</button>
+                        <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-proc-denoise"  title="ffmpeg hqdn3d denoise on the export pass">DENOISE</button>
+                      </div>
+                    </details>
                     <div class="visualizer-process-actions">
                       <button type="button" id="visualizer-process-preview" class="visualizer-process-preview" title="Play a lightweight live preview of the current time-crunch speed in the slot below">▶ PREVIEW</button>
                       <button type="button" id="visualizer-process-go" class="visualizer-process-go">PROCESS</button>
@@ -1065,6 +1376,12 @@
                   </button>
                   <button type="button" class="browser-navbtn browser-opacity-btn is-active" id="browser-opaque-btn" title="Opaque (default)">100%</button>
                   <button type="button" class="browser-navbtn browser-opacity-btn" id="browser-seethru-btn" title="60% transparent — see the zen dashboard through the page">SEE THRU</button>
+                  <button type="button" class="browser-navbtn" id="browser-scrape-btn" title="Scrape videos from this page — finds anything 5+ min and lets you download to gallery/downloads">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <rect x="3" y="6" width="14" height="12" rx="1.5"/>
+                      <polygon points="17,10 22,7 22,17 17,14" fill="currentColor"/>
+                    </svg>
+                  </button>
                   <button type="button" class="browser-navbtn browser-navbtn-warn" id="browser-clear-btn" title="Clear cache + history (keeps sign-ins)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
                       <path d="M5 7 H19"/>
@@ -1094,6 +1411,18 @@
                     <ul class="browser-history-list" id="browser-bookmarks-list"></ul>
                     <p class="browser-history-empty" id="browser-bookmarks-panel-empty" hidden>NO BOOKMARKS · CLICK THE FLAG ON A PAGE TO SAVE IT</p>
                   </div>
+                  <!-- Video scraper results — populated by SCRAPE button.
+                       Closed via × and re-opened on the next SCRAPE click;
+                       its visibility is independent of history/bookmarks. -->
+                  <div class="browser-history browser-scrape" id="browser-scrape-panel" hidden>
+                    <div class="browser-history-head">
+                      <span class="browser-history-title" id="browser-scrape-title">VIDEOS FOUND</span>
+                      <button type="button" class="browser-scrape-download-all" id="browser-scrape-dl-all-btn" title="Download every video in this list">⇩ DOWNLOAD ALL</button>
+                      <button type="button" class="browser-history-close" id="browser-scrape-close-btn" title="Close">×</button>
+                    </div>
+                    <ul class="browser-history-list browser-scrape-list" id="browser-scrape-list"></ul>
+                    <p class="browser-history-empty" id="browser-scrape-status">CLICK SCRAPE TO SEARCH THE CURRENT PAGE</p>
+                  </div>
                   <div class="browser-splash" id="browser-splash">
                     <div class="browser-splash-title">PRIVATE BROWSING</div>
                     <form class="browser-splash-form" id="browser-splash-address-form" autocomplete="off">
@@ -1104,12 +1433,11 @@
                       <label class="browser-splash-label" for="browser-splash-search">SEARCH</label>
                       <div class="browser-splash-search-row">
                         <input id="browser-splash-search" class="browser-splash-input" type="text" placeholder="Type a query…" spellcheck="false" />
-                        <div class="browser-splash-kind" role="tablist">
-                          <button type="button" class="browser-splash-kind-btn is-active" data-kind="web">WEB</button>
-                          <button type="button" class="browser-splash-kind-btn" data-kind="images">IMAGES</button>
-                          <button type="button" class="browser-splash-kind-btn" data-kind="videos">VIDEOS</button>
-                        </div>
                       </div>
+                      <!-- Kind picker (WEB / IMAGES / VIDEOS) used to live here.
+                           Moved to the results header so the splash stays clean
+                           — every search starts as WEB; user filters by type
+                           AFTER they see results. -->
                     </form>
                     <div class="browser-splash-stats">
                       <div class="browser-splash-stat">
@@ -1130,6 +1458,18 @@
                     <div class="browser-results-head">
                       <span class="browser-results-label" id="browser-results-label">RESULTS</span>
                       <span class="browser-results-count" id="browser-results-count">—</span>
+                      <!-- Result-type filter row. Default ALL = web hybrid;
+                           IMAGES/VIDEOS hit dedicated extractors; LINKS/NEWS
+                           fall back to the web backend with their kind label
+                           routed through so a future news/links provider can
+                           plug in without touching the renderer. -->
+                      <div class="browser-results-filters" role="tablist">
+                        <button type="button" class="browser-results-filter is-active" data-kind="web"    title="All web results">ALL</button>
+                        <button type="button" class="browser-results-filter"           data-kind="images" title="Images only">IMAGES</button>
+                        <button type="button" class="browser-results-filter"           data-kind="videos" title="Videos only">VIDEOS</button>
+                        <button type="button" class="browser-results-filter"           data-kind="links"  title="Web links list (no thumbnails)">LINKS</button>
+                        <button type="button" class="browser-results-filter"           data-kind="news"   title="News results">NEWS</button>
+                      </div>
                     </div>
                     <ul class="browser-results-list" id="browser-results-list"></ul>
                     <div class="browser-results-grid" id="browser-results-grid"></div>
@@ -1294,7 +1634,24 @@
                   <div class="gen-output-main">
                     <img    id="gen-output-img"   class="gen-output-img"   alt="" hidden>
                     <video  id="gen-output-video" class="gen-output-video" controls preload="metadata" hidden></video>
-                    <audio  id="gen-output-audio" class="gen-output-audio" controls preload="metadata" hidden></audio>
+                    <!-- Native audio element is the playback engine but
+                         stays invisible; the themed widget below owns the
+                         UI (play, scrub, time, fluid waveform). -->
+                    <audio  id="gen-output-audio" class="gen-output-audio" preload="metadata" hidden></audio>
+                    <div class="gen-audio-player" id="gen-audio-player" hidden>
+                      <canvas class="gen-audio-viz" id="gen-audio-viz" width="800" height="120"></canvas>
+                      <div class="gen-audio-controls">
+                        <button type="button" class="gen-audio-play" id="gen-audio-play" title="Play / pause">
+                          <svg class="gen-audio-icon-play"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
+                          <svg class="gen-audio-icon-pause" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+                        </button>
+                        <div class="gen-audio-bar" id="gen-audio-bar">
+                          <div class="gen-audio-progress" id="gen-audio-progress"></div>
+                          <div class="gen-audio-knob" id="gen-audio-knob"></div>
+                        </div>
+                        <span class="gen-audio-time" id="gen-audio-time">0:00 / 0:00</span>
+                      </div>
+                    </div>
                   </div>
                   <div class="gen-output-thumbs" id="gen-output-thumbs"></div>
                 </div>

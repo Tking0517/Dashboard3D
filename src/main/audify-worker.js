@@ -73,25 +73,38 @@ function start() {
     // of OS.
     const fftEngine = createFftEngine({ sampleRate });
 
+    // 4096-sample buffer: callback fires at 48000/4096 ≈ 12 Hz, matching
+    // the renderer's typical visualization rate (user's hz toggle is set
+    // to 10 Hz). Earlier values:
+    //   512  → ~94 Hz: way more FFTs than the renderer could draw
+    //   2048 → ~23 Hz: still 2× faster than display rate
+    //   4096 → ~12 Hz: ≈ display rate, no wasted FFTs
+    // FFT itself is unchanged (1024-point); we just call it half as often.
+    // Net: ~2× less always-on CPU in the worker process AND ~2× less IPC
+    // traffic across worker → main → renderer (worst-of-three was GC bursts
+    // spreading across all cores via the parallel scavenger).
     rt.openStream(
       null,
       { deviceId: dev.id, nChannels: channels, firstChannel: 0 },
       RtAudioFormat.RTAUDIO_FLOAT32,
       sampleRate,
-      512,
+      4096,
       'dash3d-loopback',
       (pcm) => {
         const samples = new Float32Array(pcm.buffer, pcm.byteOffset, pcm.byteLength / 4);
         fftEngine.feed(samples, channels);
         const result = fftEngine.tick();
+        // Only post when bands are present (every FFT_EVERY-th tick = ~23 Hz).
+        // The renderer explicitly ignores RMS-only off-frames; posting them
+        // was ~94 IPC messages/sec across worker → main → renderer, each
+        // allocating serialization buffers and triggering GC bursts across
+        // all cores. Dropping them is pure win.
         if (result.bands) {
           process.parentPort.postMessage({
             rms: result.rms,
             bands: result.bands,
             deviceName: dev.name,
           });
-        } else {
-          process.parentPort.postMessage({ rms: result.rms, deviceName: dev.name });
         }
         // PCM forwarding: copy this callback's samples into a fresh
         // Float32Array (the audify buffer gets reused) and batch

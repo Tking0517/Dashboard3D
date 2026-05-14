@@ -1,5 +1,43 @@
 import './styles.css';
 
+// ── Global rAF throttle ──────────────────────────────────────────────
+// Cap renderer animation callbacks at 60 Hz regardless of monitor refresh
+// rate. On a 117 Hz / 144 Hz display the native rAF fires at the panel's
+// rate, which doubles JS work and GC pressure for the dashboard's many
+// always-on loops (audio bars, BGM meter, audio waveform, FPS counter).
+// We wrap requestAnimationFrame so the callback only runs when ≥ ~16.6 ms
+// have elapsed since the last invocation; in-between native ticks just
+// re-queue. The native compositor still wakes at display rate, but our JS
+// payload + the DOM/canvas writes it causes drop to 60 fps. cancelAnimationFrame
+// stays correct via a user-id → native-id map.
+(() => {
+  const _nativeRAF = window.requestAnimationFrame.bind(window);
+  const _nativeCAF = window.cancelAnimationFrame.bind(window);
+  const TARGET_MS = 1000 / 60;
+  const _pending = new Map();
+  let _lastT = 0;
+  let _nextId = 1;
+  window.requestAnimationFrame = function (cb) {
+    const userId = _nextId++;
+    const tick = (t) => {
+      if (!_pending.has(userId)) return; // cancelled mid-flight
+      if (t - _lastT >= TARGET_MS - 0.5) {
+        _pending.delete(userId);
+        _lastT = t;
+        cb(t);
+      } else {
+        _pending.set(userId, _nativeRAF(tick));
+      }
+    };
+    _pending.set(userId, _nativeRAF(tick));
+    return userId;
+  };
+  window.cancelAnimationFrame = function (id) {
+    const nativeId = _pending.get(id);
+    if (nativeId != null) { _nativeCAF(nativeId); _pending.delete(id); }
+  };
+})();
+
 // Module-scope ref to the productivity panel's header repaint function.
 // Assigned by the panel-combo init block; called from the boot-status
 // fade-out path to restore the mode-driven subtitle/tag after the
@@ -405,7 +443,10 @@ let _themeVersion = 0;
 //   - refreshTemps / refreshStorage (already match or exceed this)
 //   - weather (already 10 min)
 //   - audio bars (real-time visualization; runs at ~15–23 Hz)
-const UI_REFRESH_MS = 5000;
+// 10 s refresh cadence drives refreshSystem, netLoop, diskLoop, mute-state
+// poll, and the diag telemetry tick. Halved the per-second wakeup pressure
+// on the i9-13900KS where bursty short polls keep cores from staying parked.
+const UI_REFRESH_MS = 10000;
 
 // Background diagnostics overlay counters. Hoisted so the audio
 // visualizer's renderToTarget can bump the draw counter without
@@ -506,11 +547,23 @@ function setSfxEnabled(on) {
 // sounds are procedurally generated so there are no audio file assets
 // to ship. Routed through the same `_sfxEnabled` flag and AudioContext
 // so user mute state and the audio-context resume logic still apply.
+// Single multiplier applied to every boot-time sound effect. Set to 1.3
+// = +30% over the original procedural levels. Centralized here so future
+// volume tweaks are a one-line change instead of hunting through every
+// individual oscillator's gain ramps.
+const BOOT_SFX_GAIN = 1.3;
 function playBootSfx(kind) {
   if (!_sfxEnabled) return;
   const ctx = _sfxGetCtx();
   if (!ctx) return;
   const t = ctx.currentTime;
+  // Master gain for this sound event. Every oscillator / noise source
+  // below connects through here instead of straight to ctx.destination,
+  // so the BOOT_SFX_GAIN multiplier (and any future master fades) applies
+  // to all of them uniformly.
+  const master = ctx.createGain();
+  master.gain.value = BOOT_SFX_GAIN;
+  master.connect(ctx.destination);
 
   switch (kind) {
     case 'boot-power': {
@@ -518,7 +571,7 @@ function playBootSfx(kind) {
       // then fades. The "thunk" of the dashboard waking up.
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.connect(gain).connect(ctx.destination);
+      osc.connect(gain).connect(master);
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(50, t);
       osc.frequency.exponentialRampToValueAtTime(110, t + 0.4);
@@ -535,7 +588,7 @@ function playBootSfx(kind) {
       // many can stack without becoming noise.
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.connect(gain).connect(ctx.destination);
+      osc.connect(gain).connect(master);
       const freq = 800 + Math.random() * 1800;
       osc.type = 'square';
       osc.frequency.setValueAtTime(freq, t);
@@ -561,7 +614,7 @@ function playBootSfx(kind) {
       // (1) Sub-bass — very low sine, nearly stationary
       const sub = ctx.createOscillator();
       const subGain = ctx.createGain();
-      sub.connect(subGain).connect(ctx.destination);
+      sub.connect(subGain).connect(master);
       sub.type = 'sine';
       sub.frequency.setValueAtTime(45, t);
       sub.frequency.linearRampToValueAtTime(60, t + tdur);
@@ -575,7 +628,7 @@ function playBootSfx(kind) {
       // (2) Mid body — sine octave above the sub
       const body = ctx.createOscillator();
       const bodyGain = ctx.createGain();
-      body.connect(bodyGain).connect(ctx.destination);
+      body.connect(bodyGain).connect(master);
       body.type = 'sine';
       body.frequency.setValueAtTime(90, t);
       body.frequency.linearRampToValueAtTime(120, t + tdur);
@@ -597,7 +650,7 @@ function playBootSfx(kind) {
       noise.buffer = buf;
       const nFilter = ctx.createBiquadFilter();
       const nGain = ctx.createGain();
-      noise.connect(nFilter).connect(nGain).connect(ctx.destination);
+      noise.connect(nFilter).connect(nGain).connect(master);
       nFilter.type = 'lowpass';
       nFilter.Q.value = 1;
       nFilter.frequency.setValueAtTime(200, t);
@@ -624,7 +677,7 @@ function playBootSfx(kind) {
         const f = b.base * (0.92 + Math.random() * 0.16);
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.connect(gain).connect(ctx.destination);
+        osc.connect(gain).connect(master);
         osc.type = 'square';
         osc.frequency.setValueAtTime(f, t + b.off);
         gain.gain.setValueAtTime(0.022, t + b.off);
@@ -657,7 +710,7 @@ function playBootSfx(kind) {
         // Fundamental — sine, very fast attack, long exponential decay
         const osc1 = ctx.createOscillator();
         const g1 = ctx.createGain();
-        osc1.connect(g1).connect(ctx.destination);
+        osc1.connect(g1).connect(master);
         osc1.type = 'sine';
         osc1.frequency.setValueAtTime(f, t + p.off);
         g1.gain.setValueAtTime(0.0001, t + p.off);
@@ -670,7 +723,7 @@ function playBootSfx(kind) {
         // decays faster, gives the "real glass" shimmer.
         const osc2 = ctx.createOscillator();
         const g2 = ctx.createGain();
-        osc2.connect(g2).connect(ctx.destination);
+        osc2.connect(g2).connect(master);
         osc2.type = 'sine';
         osc2.frequency.setValueAtTime(f * 2.51, t + p.off);
         g2.gain.setValueAtTime(0.0001, t + p.off);
@@ -765,52 +818,14 @@ if (!IS_ELECTRON) {
   };
 }
 
-// Background is now a pure CSS flat grid with a slow pulse animation —
-// no WebGL scene needed.
-
-// ── Background random-darkening overlay ─────────────────────────────────────
-// One <div> per major (200px) grid cell. Each cell schedules its own
-// independent timer to fade between 0 and a random dark opacity, giving the
-// background a roving "blinds-and-spotlights" feel.
-const BG_CELL = 200;
+// Background is a pure CSS flat grid with a slow pulse animation — no
+// WebGL, no per-cell DOM. Earlier versions painted one <div> per 200 px
+// grid cell with a randomized opacity flicker, but every opacity change
+// triggered a GPU layer promotion and the compositor spent most of its
+// budget rebuilding the layer tree. Removed entirely; the `.bg-grid`
+// element keeps the visual grid pattern (see styles.css §3).
 const BG_OVERLAY = document.querySelector('#bg-grid-overlay');
-
-function buildBgCells() {
-  if (!BG_OVERLAY) return;
-  BG_OVERLAY.innerHTML = '';
-  const cols = Math.ceil(window.innerWidth  / BG_CELL) + 1;
-  const rows = Math.ceil(window.innerHeight / BG_CELL) + 1;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const cell = document.createElement('div');
-      cell.className = 'bg-grid-cell';
-      cell.style.left = `${c * BG_CELL}px`;
-      cell.style.top  = `${r * BG_CELL}px`;
-      BG_OVERLAY.appendChild(cell);
-      scheduleBgCell(cell, true);
-    }
-  }
-}
-
-function scheduleBgCell(cell, immediate) {
-  const apply = () => {
-    if (!cell.isConnected) return;
-    const dark = Math.random() < 0.32;
-    cell.style.opacity = dark ? (0.2 + Math.random() * 0.5).toFixed(2) : '0';
-    scheduleBgCell(cell, false);
-  };
-  if (immediate) apply();
-  else setTimeout(apply, 1500 + Math.random() * 5000);
-}
-
-buildBgCells();
-
-// Rebuild on resize — only when the cell count would actually change.
-let _bgResizeTimer = null;
-window.addEventListener('resize', () => {
-  clearTimeout(_bgResizeTimer);
-  _bgResizeTimer = setTimeout(buildBgCells, 200);
-});
+if (BG_OVERLAY) BG_OVERLAY.innerHTML = '';
 
 // ── HUD: Clock ───────────────────────────────────────────────────────────────
 const clockTimeEl   = document.querySelector('#clock-time');
@@ -1083,7 +1098,13 @@ const METRIC_PEAK_DECAY = 30;
 function setMetricBar(fill, pct) {
   if (!fill) return;
   pct = Math.max(0, Math.min(100, +pct || 0));
-  fill.style.height = `${pct.toFixed(0)}%`;
+  // Set a CSS variable instead of style.height. The CSS rule reads it via
+  // transform: translateY(calc((100 - var(--bar-pct)) * 1%)), which moves
+  // the bar on the compositor without triggering Layout. The 0.35 s height
+  // transition formerly fired 21 Layouts per bar per refresh × 32 cores =
+  // ~672 Layouts per refresh — visible as ~120 ms "Layout" in the profile.
+  // Variable writes don't trigger Layout; transform transitions don't either.
+  fill.style.setProperty('--bar-pct', pct.toFixed(0));
   const track = fill.parentElement;
   if (!track) return;
   const peakClass = fill.classList.contains('gpu-bar-fill') ? 'gpu-bar-peak' : 'core-bar-peak';
@@ -1108,7 +1129,9 @@ function setMetricBar(fill, pct) {
   else pk = Math.max(pct, pk - METRIC_PEAK_DECAY);
   track.dataset.peak = pk.toFixed(2);
   track.dataset.peakHold = hold;
-  peak.style.bottom = `${pk.toFixed(0)}%`;
+  // Same Layout-avoidance trick for the peak marker. The CSS rule uses
+  // transform translateY off the bottom edge instead of `bottom: X%`.
+  peak.style.setProperty('--peak-pct', pk.toFixed(0));
 }
 
 // Mirror grid for the zen overlay (no labels, smaller).
@@ -1294,6 +1317,10 @@ async function refreshSystem() {
       cpuLoad = Math.min(1, (info.loadavg?.[0] || 0) / Math.max(1, info.cpuCount));
     }
     lastCpuTimes = info.cpuTimes;
+    // Expose last load fraction to refreshTemps so it can estimate CPU
+    // wattage when Windows' RAPL energy meter is not reporting (common
+    // when Turbo Boost is disabled, see paintPower comment below).
+    window._lastCpuLoadFrac = cpuLoad;
 
     const cpuPct = cpuLoad * 100;
     sysCpuBarEl.style.width = `${cpuPct.toFixed(0)}%`;
@@ -1392,22 +1419,39 @@ const powerGpu0El     = document.querySelector('#power-gpu0');
 const powerGpu1El     = document.querySelector('#power-gpu1');
 const zenCpuTempEl    = document.querySelector('#zen-cpu-temp');
 
-function paintPower(el, watts) {
+function paintPower(el, watts, isEstimate) {
   if (!el) return;
-  el.textContent = Number.isFinite(watts) && watts > 0 ? watts.toFixed(0) : '—';
+  if (!Number.isFinite(watts) || watts <= 0) {
+    el.textContent = '—';
+    el.classList.remove('is-estimate');
+    el.title = '';
+    return;
+  }
+  // Prefix estimates with `~` so the user can tell at a glance which
+  // readout is a hardware measurement and which is a load-derived guess.
+  // Hover tooltip explains the fallback so it doesn't look like a bug.
+  el.textContent = isEstimate ? `~${watts.toFixed(0)}` : watts.toFixed(0);
+  el.classList.toggle('is-estimate', !!isEstimate);
+  el.title = isEstimate
+    ? 'Estimated from CPU load — Windows RAPL energy meter is not reporting. This usually happens when Processor Performance Boost Mode is set to Disabled. Switching it to Aggressive or Efficient Aggressive restores live wattage reporting.'
+    : '';
 }
 const thermalStatusEl = document.querySelector('#thermal-status');
 
 const TEMP_MAX = 100; // °C — bar fill scales 0..TEMP_MAX
 
-function paintTemp(valueEl, barEl, temp) {
+function paintTemp(valueEl, barEl, temp, isEstimate) {
   if (temp == null || !Number.isFinite(temp)) {
     valueEl.textContent = 'N/A';
     barEl.style.width = '0%';
     barEl.classList.remove('warn', 'high');
+    valueEl.classList?.remove('is-estimate');
     return;
   }
-  valueEl.textContent = String(Math.round(temp));
+  // Prefix estimates with ~ so the user can tell at a glance that the
+  // value is derived from load, not a real sensor reading.
+  valueEl.textContent = isEstimate ? `~${Math.round(temp)}` : String(Math.round(temp));
+  valueEl.classList?.toggle('is-estimate', !!isEstimate);
   const pct = Math.max(0, Math.min(100, (temp / TEMP_MAX) * 100));
   barEl.style.width = `${pct.toFixed(0)}%`;
   barEl.classList.toggle('warn', temp >= 70 && temp < 85);
@@ -1594,14 +1638,81 @@ async function refreshTemps() {
   try {
     const t = await window.dash.tempsInfo();
     paintGpuPanel(t.gpus);
-    paintTemp(tempCpuEl, tempCpuBarEl, t.cpu);
-    paintPower(powerCpuEl, t.cpuPower);
+    // Detect ACPI thermal-zone "stuck reading" — many Intel desktop
+    // BIOSes implement MSAcpi_ThermalZoneTemperature as a literal
+    // constant (the chip's TjMax minus an arbitrary delta, or just a
+    // hardcoded value) instead of an actual sensor query. Symptom: the
+    // number never moves regardless of CPU activity. We keep a short
+    // history of recent ACPI readings; if the last 4 are all identical
+    // (~40 s of zero variation at the current 10 s poll cadence), we
+    // assume the sensor is broken and switch to a CPU-load-derived
+    // estimate, same approach as the wattage fallback above.
+    let displayTemp = t.cpu;
+    let isTempEst = false;
+    const isAcpiSource = Array.isArray(t.sources) && t.sources.includes('acpi:cpu');
+    if (isAcpiSource && Number.isFinite(t.cpu)) {
+      window._acpiTempHistory = window._acpiTempHistory || [];
+      window._acpiTempHistory.push(t.cpu);
+      if (window._acpiTempHistory.length > 4) window._acpiTempHistory.shift();
+      const stuck = window._acpiTempHistory.length >= 4 &&
+        window._acpiTempHistory.every((v) => v === window._acpiTempHistory[0]);
+      if (stuck) {
+        // Generic Intel-desktop curve: ~30°C idle, ~65°C at full load
+        // with Turbo Boost disabled (matches a 13900KS on adequate
+        // cooling; for boost-enabled / high-end systems actual temps
+        // run hotter, but the estimate stays in the right ballpark).
+        const load = Number.isFinite(window._lastCpuLoadFrac) ? window._lastCpuLoadFrac : 0;
+        displayTemp = 30 + Math.min(1, Math.max(0, load)) * 35;
+        isTempEst = true;
+      }
+    } else {
+      // Reset history when a non-ACPI source is in play so re-entering
+      // the stuck path requires a fresh streak of identical readings.
+      window._acpiTempHistory = [];
+    }
+    paintTemp(tempCpuEl, tempCpuBarEl, displayTemp, isTempEst);
+    // Estimate CPU watts when Windows RAPL is offline. Common cause:
+    // Turbo Boost disabled in the power plan (Windows stops driving
+    // EnergyEstimation when boost is off). We derive an approximate
+    // wattage from the latest CPU load fraction using a generic curve:
+    //   idle ≈ 20 W, full load ≈ 125 W (matches a boost-disabled 13900KS;
+    //   for boost-enabled high-end CPUs the real number can run hotter
+    //   but the estimate stays in the right ballpark for the dashboard).
+    let displayPower = t.cpuPower;
+    let isPowerEst = false;
+    if (!Number.isFinite(t.cpuPower) || t.cpuPower <= 0) {
+      const load = Number.isFinite(window._lastCpuLoadFrac) ? window._lastCpuLoadFrac : 0;
+      displayPower = 20 + Math.min(1, Math.max(0, load)) * 105;
+      isPowerEst = true;
+    }
+    paintPower(powerCpuEl, displayPower, isPowerEst);
     if (zenCpuTempEl) zenCpuTempEl.textContent = Number.isFinite(t.cpu) ? `${Math.round(t.cpu)}` : '—';
-    tempCpuNameEl.textContent = (t.cpu == null) ? 'NEEDS LHM/OHM' : 'ACPI/SMBUS';
+    // Honest source label — reflects what probe actually succeeded
+    // rather than always claiming "ACPI/SMBUS". systeminformation's
+    // si.cpuTemperature() reads Intel's DTS (per-core on-die sensor)
+    // where available; the native fallback reads ACPI thermal zones
+    // (motherboard-level, typically 5-10°C cooler than DTS for the
+    // same chip). Showing the right label means the gap between this
+    // dashboard's value and a tool reading DTS isn't mysterious.
+    const sourceLabel = (() => {
+      if (t.cpu == null) return 'NEEDS LHM/OHM';
+      if (isTempEst) return 'EST CPU';
+      const srcs = Array.isArray(t.sources) ? t.sources : [];
+      if (srcs.includes('si:cpu'))   return 'INTEL DTS';
+      if (srcs.includes('acpi:cpu')) return 'ACPI ZONE';
+      return 'CPU SENSOR';
+    })();
+    tempCpuNameEl.textContent = sourceLabel;
     if (tempCpuNameEl) {
-      tempCpuNameEl.title = (t.cpu == null)
-        ? 'CPU package temperature is not exposed by Windows. Install LibreHardwareMonitor or OpenHardwareMonitor and run it (admin) — this app reads its WMI namespace automatically.'
-        : '';
+      let title = '';
+      if (t.cpu == null) {
+        title = 'CPU package temperature is not exposed by Windows. Install LibreHardwareMonitor or OpenHardwareMonitor and run it (admin) — this app reads its WMI namespace automatically.';
+      } else if (isTempEst) {
+        title = 'Estimated from CPU load — the motherboard ACPI thermal zone was returning a constant value (a common BIOS bug on Intel desktops). For exact temperatures, install LibreHardwareMonitor / OpenHardwareMonitor / HWiNFO and run it as admin.';
+      } else if (sourceLabel === 'ACPI ZONE') {
+        title = 'Reading from the motherboard ACPI thermal zone — typically 5–10°C cooler than the per-core Intel DTS that tools like HWiNFO show. Both are valid; they\'re different physical sensors on the chip.';
+      }
+      tempCpuNameEl.title = title;
     }
 
     const g0 = t.gpus?.[0];
@@ -1689,7 +1800,12 @@ const SPARK_PEAK_DECAY = 20;
 // Bar count derived from container width: ~4 px per bar (3 px bar + 1 px gap)
 // keeps a dense, readable spectrum that grows with the panel. Clamped so a
 // hidden / collapsed container doesn't render zero bars.
-const SPARK_BAR_PX = 4;
+// 8 px per bar — doubled from the prior 4 to make individual ticks
+// easier to read in the Network / Drive I/O strips. On a typical ~500 px
+// strip that produces ~60 bars (was ~115). Combined with the new
+// segmented-LED rendering this reads as a chunky meter rather than a
+// pixel-dense sparkline.
+const SPARK_BAR_PX = 8;
 function targetSparkBarCount(container, sampleCap) {
   const w = container.clientWidth || (sampleCap * SPARK_BAR_PX);
   return Math.max(8, Math.min(sampleCap, Math.floor(w / SPARK_BAR_PX)));
@@ -1768,38 +1884,70 @@ function renderSpark(container, samples) {
   const H = st.canvas.height / dpr;
   ctx.clearRect(0, 0, W, H);
   if (W <= 0 || H <= 0 || view.length === 0) return;
-  if (!st.grad || st.gradTheme !== _themeVersion) {
+  // Resolve palette (cached per theme). Match the audio bar visualizer
+  // structure: a per-segment ramp from dim→bright in the panel's spark
+  // colour, plus a --red for the peak marker.
+  if (st.gradTheme !== _themeVersion) {
     const cs = getComputedStyle(container);
-    const sparkColor = cs.getPropertyValue('--spark-color').trim() || cs.getPropertyValue('--accent').trim() || '#5fa';
-    const amber      = cs.getPropertyValue('--amber').trim() || '#f3a83b';
-    const red        = cs.getPropertyValue('--red').trim()   || '#ff3b30';
-    const g = ctx.createLinearGradient(0, H, 0, 0);
-    g.addColorStop(0.00, sparkColor);
-    g.addColorStop(0.50, sparkColor);
-    g.addColorStop(0.62, amber);
-    g.addColorStop(0.78, amber);
-    g.addColorStop(0.90, red);
-    g.addColorStop(1.00, red);
-    st.grad = g;
-    st.peakColor = sparkColor;
+    const sparkStr = cs.getPropertyValue('--spark-color').trim()
+                  || cs.getPropertyValue('--accent').trim()
+                  || '#5fa';
+    const redStr   = cs.getPropertyValue('--red').trim() || '#ff3b30';
+    const parseHex = (s) => {
+      let h = (s || '').trim();
+      if (h.startsWith('#')) h = h.slice(1);
+      if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+      if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return null;
+      return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+    };
+    st.bright = parseHex(sparkStr) || [110, 220, 180];
+    st.dim    = [Math.round(st.bright[0]*0.25), Math.round(st.bright[1]*0.25), Math.round(st.bright[2]*0.25)];
+    st.peakColor = redStr;
     st.gradTheme = _themeVersion;
+  }
+  // Segmented LED-cell layout — same shape as the audio-in / audio-out
+  // visualizers. Each bar is a stack of small horizontal "cells" with a
+  // dim→bright gradient up the stack and a single-pixel gap between
+  // cells. Number of segments scales with the strip height so narrow
+  // panels still show 6 cells minimum.
+  const segments = Math.max(6, Math.min(20, Math.floor(H / 4)));
+  const segPitch = H / segments;
+  const cellH    = Math.max(1, segPitch * 0.55);
+  const cellGapY = segPitch - cellH;
+  // Precompute per-segment colours once per draw (cheap; one fillStyle
+  // string per LED row, not per bar).
+  const colors = new Array(segments);
+  for (let s = 0; s < segments; s++) {
+    const t = s / Math.max(1, segments - 1);
+    const r = Math.round(st.dim[0] * (1 - t) + st.bright[0] * t);
+    const g = Math.round(st.dim[1] * (1 - t) + st.bright[1] * t);
+    const b = Math.round(st.dim[2] * (1 - t) + st.bright[2] * t);
+    colors[s] = `rgb(${r},${g},${b})`;
   }
   const gap = 1;
   const barW = Math.max(1, (W - gap * (view.length - 1)) / view.length);
-  ctx.fillStyle = st.grad;
   for (let i = 0; i < view.length; i++) {
     const pct = Math.min(100, (view[i] / max) * 100);
-    const fillH = (pct / 100) * H;
-    if (fillH <= 0) continue;
-    ctx.fillRect(i * (barW + gap), H - fillH, barW, fillH);
+    const cellsLit = Math.min(segments, Math.ceil((pct / 100) * segments));
+    if (cellsLit <= 0) continue;
+    const x = i * (barW + gap);
+    for (let s = 0; s < cellsLit; s++) {
+      ctx.fillStyle = colors[s];
+      const y = H - (s + 1) * segPitch + cellGapY;
+      ctx.fillRect(x, y, barW, cellH);
+    }
   }
-  ctx.fillStyle = st.peakColor || '#fff';
-  ctx.globalAlpha = 0.9;
+  // Peak markers — one cell-height tick in --red sitting at the highest
+  // recent value for each sample column.
+  ctx.fillStyle = st.peakColor;
   for (let i = 0; i < view.length; i++) {
-    const peakY = H - (st.peaks[i] / 100) * H;
-    ctx.fillRect(i * (barW + gap), peakY - 1, barW, 2);
+    const peakPct = Math.min(100, st.peaks[i]);
+    const peakSeg = Math.min(segments, Math.ceil((peakPct / 100) * segments));
+    if (peakSeg <= 0) continue;
+    const x = i * (barW + gap);
+    const y = H - peakSeg * segPitch + cellGapY;
+    ctx.fillRect(x, y, barW, cellH);
   }
-  ctx.globalAlpha = 1;
 }
 
 async function refreshNet() {
@@ -2350,9 +2498,9 @@ const AUDIO_BAND_FMAX = 16000;
 // gone. Persisted under cfg.audioFrameMs. Range 5 ms (200 Hz) – 100 ms
 // (10 Hz) so the topbar arrows can step in 5 Hz increments across the
 // full 10-200 Hz range.
-let AUDIO_FRAME_MS = 100;
+let AUDIO_FRAME_MS = 200;
 const AUDIO_FRAME_MS_MIN = 5;     // 200 Hz
-const AUDIO_FRAME_MS_MAX = 100;   // 10 Hz
+const AUDIO_FRAME_MS_MAX = 500;   // 2 Hz floor — 200 ms (5 Hz) is the default
 function setAudioFrameMs(ms) {
   const clamped = Math.max(AUDIO_FRAME_MS_MIN, Math.min(AUDIO_FRAME_MS_MAX, Math.round(ms)));
   AUDIO_FRAME_MS = clamped;
@@ -2564,7 +2712,11 @@ function createAudioVisualizer({
 
     for (let i = 0; i < barCount; i++) {
       const dist = barCount > 1 ? Math.abs(i / (barCount - 1) - 0.5) * 2 : 0;
-      const scale = 1 + dist * 0.20;  // gentle smile
+      // Bell-curve falloff: bars are tallest at the centre and ease off
+      // smoothly toward the edges. cos(dist*π/2) gives a clean half-
+      // cosine shape; mixing it 0.3..1.0 keeps the edge bars visible
+      // (~30% of centre height) rather than dropping to zero.
+      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
       const value = (displayed[i] / 100) * scale;
       const cellsLit = Math.min(segments, Math.ceil(value * segments));
       const x = stripX + i * (barW + gap);
@@ -2597,7 +2749,9 @@ function createAudioVisualizer({
     targetCtx.fillStyle = _redColor;
     for (let i = 0; i < barCount; i++) {
       const dist = barCount > 1 ? Math.abs(i / (barCount - 1) - 0.5) * 2 : 0;
-      const scale = 1 + dist * 0.20;
+      // Same bell-curve falloff as the bar fill above — keeps the peak
+      // markers in sync with the cell-stack profile they sit on top of.
+      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
       const peakValue = (peaks[i] / 100) * scale;
       const peakSeg = Math.min(segments, Math.ceil(peakValue * segments));
       if (peakSeg <= 0) continue;
@@ -2667,14 +2821,17 @@ function createAudioVisualizer({
     // Without this the warm/hot zones would scale with the fill and you'd
     // never see them at low levels.
     //
-    // Also recompute bar count from the row's width — ~5 px per bar keeps the
-    // spectrum dense at any size. Zen mode forces a different count via
-    // setAdaptiveBars(false).
-    const AUDIO_BAR_PX = 5;
+    // Recompute bar count from the row's width. Was 5 px/bar capped at 160
+    // — on a 550 px panel that produced 110 bars, each redrawn every render.
+    // 10 px/bar capped at 72 cuts that in half (~55 bars per panel × 2 panels
+    // = ~110 canvas rectangles per redraw, down from 220). Still reads as a
+    // dense spectrum at any reasonable panel width; zen mode forces a
+    // different count via setAdaptiveBars(false).
+    const AUDIO_BAR_PX = 10;
     const targetBarCount = () => {
       const w = barsRowEl.clientWidth;
       if (w <= 0) return null;
-      return Math.max(8, Math.min(160, Math.floor(w / AUDIO_BAR_PX)));
+      return Math.max(8, Math.min(72, Math.floor(w / AUDIO_BAR_PX)));
     };
     const updateBars = () => {
       sizeCanvas();
@@ -4409,11 +4566,8 @@ function attachComboFoldButtons(panel) {
   if (!header) return;
   const collapseBtn = header.querySelector('.panel-collapse-btn');
 
-  const halfBtn = document.createElement('button');
-  halfBtn.className = 'panel-collapse-btn panel-fold-btn';
-  halfBtn.type = 'button';
-  halfBtn.title = 'Fold half-down';
-  halfBtn.textContent = '◐';
+  // (Half-down ◐ button removed — full / focus / light cover the same
+  // territory and the user wanted the row simpler.)
 
   const fullBtn = document.createElement('button');
   fullBtn.className = 'panel-collapse-btn panel-fold-btn panel-fold-btn-full';
@@ -4460,11 +4614,20 @@ function attachComboFoldButtons(panel) {
       else             rightMin = Math.min(rightMin, r.left);
     });
     const GAP = 12;
-    // Topbar lives at top: 6px with its own height; query its rect so
-    // the panel sits below the bar even if the bar's contents grow.
-    const topbar = document.querySelector('.topbar-controls');
-    const topbarBottom = topbar ? topbar.getBoundingClientRect().bottom : 60;
-    panel.style.setProperty('--combo-fold-top',   `${Math.round(topbarBottom + GAP)}px`);
+    // Preserve the user's manually-set top: if the panel has an
+    // inline top set (from drag), use that. Otherwise fall back to
+    // sitting just below the topbar like before. This is the
+    // "make the top never move unless I move it" rule.
+    let top;
+    const inlineTop = parseInt(panel.style.top, 10);
+    if (Number.isFinite(inlineTop)) {
+      top = inlineTop;
+    } else {
+      const topbar = document.querySelector('.topbar-controls');
+      const topbarBottom = topbar ? topbar.getBoundingClientRect().bottom : 60;
+      top = Math.round(topbarBottom + GAP);
+    }
+    panel.style.setProperty('--combo-fold-top',   `${top}px`);
     panel.style.setProperty('--combo-fold-left',  `${Math.round(leftMax + GAP)}px`);
     panel.style.setProperty('--combo-fold-right', `${Math.round(vw - rightMin + GAP)}px`);
   }
@@ -4475,7 +4638,6 @@ function attachComboFoldButtons(panel) {
 
   function applyFold(mode) {
     panel.classList.remove('is-fold-half', 'is-fold-full', 'is-fold-screen', 'is-fold-light', 'is-collapsed');
-    halfBtn.classList.toggle('is-active',   mode === 'half');
     fullBtn.classList.toggle('is-active',   mode === 'full');
     screenBtn.classList.toggle('is-active', mode === 'screen');
     lightBtn.classList.toggle('is-active',  mode === 'light');
@@ -4489,30 +4651,23 @@ function attachComboFoldButtons(panel) {
     if (!mode) return;
     if (mode === 'screen') { panel.classList.add('is-fold-screen'); return; }
     if (mode === 'light')  { panel.classList.add('is-fold-light');  return; }
-    // Half / full / collapse modes: re-measure side panels before
-    // applying the class so the fold uses fresh geometry every time.
+    // Full / collapse modes: re-measure side panels before applying
+    // the class so the fold uses fresh geometry every time.
     _updateComboFoldBounds();
-    if (mode === 'half')   { panel.classList.add('is-fold-half');   return; }
     if (mode === 'full')   { panel.classList.add('is-fold-full');   return; }
   }
   // Re-measure on window resize so a viewport change doesn't leave the
   // panel hanging at the old offsets (only applies while a fold is on).
   window.addEventListener('resize', () => {
-    if (panel.classList.contains('is-fold-half') ||
-        panel.classList.contains('is-fold-full') ||
+    if (panel.classList.contains('is-fold-full') ||
         panel.classList.contains('is-collapsed')) {
       _updateComboFoldBounds();
     }
   });
 
-  halfBtn.addEventListener('mousedown',   (e) => e.stopPropagation());
   fullBtn.addEventListener('mousedown',   (e) => e.stopPropagation());
   screenBtn.addEventListener('mousedown', (e) => e.stopPropagation());
   lightBtn.addEventListener('mousedown',  (e) => e.stopPropagation());
-  halfBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    applyFold(panel.classList.contains('is-fold-half') ? null : 'half');
-  });
   fullBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     applyFold(panel.classList.contains('is-fold-full') ? null : 'full');
@@ -4526,13 +4681,12 @@ function attachComboFoldButtons(panel) {
     applyFold(panel.classList.contains('is-fold-light') ? null : 'light');
   });
 
-  // Group all five controls (collapse + half + full + screen + light)
-  // in a single flex wrapper so they hug the right edge of the header
+  // Group all four controls (collapse + full + screen + light) in a
+  // single flex wrapper so they hug the right edge of the header
   // instead of being separated by the grid's auto columns.
   const group = document.createElement('span');
   group.className = 'panel-fold-group';
   if (collapseBtn) group.appendChild(collapseBtn);
-  group.appendChild(halfBtn);
   group.appendChild(fullBtn);
   group.appendChild(screenBtn);
   group.appendChild(lightBtn);
@@ -4557,8 +4711,7 @@ function attachComboFoldButtons(panel) {
   // width can change when the dashboard window is resized). Screen mode
   // is pinned to viewport edges by CSS so it doesn't need re-pinning.
   window.addEventListener('resize', () => {
-    if (panel.classList.contains('is-fold-half'))   { applyFold('half'); return; }
-    if (panel.classList.contains('is-fold-full'))   { applyFold('full'); return; }
+    if (panel.classList.contains('is-fold-full')) { applyFold('full'); return; }
   });
 }
 
@@ -4668,6 +4821,14 @@ if (comboPanel) {
     browserPane   ?.classList.toggle('is-visible', mode === 'browser');
     tasksPane     ?.classList.toggle('is-visible', mode === 'tasks');
     musicPane     ?.classList.toggle('is-visible', mode === 'music');
+    // Music meter visibility — drives whether the rAF redraw chain runs
+    // (see _bgmDrawMeter + window._bgmMaybeStartMeter in the music init
+    // block). When music tab isn't visible we skip canvas work entirely;
+    // music itself keeps playing through the BGM audio graph.
+    window._isMusicTabVisible = (mode === 'music');
+    if (window._isMusicTabVisible) {
+      try { window._bgmMaybeStartMeter?.(); } catch {}
+    }
     generatePane  ?.classList.toggle('is-visible', mode === 'generate');
     comboPanel.querySelectorAll('.combo-mode-tab').forEach(b => {
       b.classList.toggle('is-active', b.dataset.mode === mode);
@@ -4885,6 +5046,9 @@ if (comboPanel) {
       row.dataset.isDir = String(e.isDir);
       row.dataset.name  = e.name;
       row.dataset.which = which;
+      // Relative-to-managed-root path for dash3d-file:// URLs — used by
+      // the inline media viewer below.
+      if (e.rel) row.dataset.rel = e.rel;
       row.title = e.path;
       if (isGallery) {
         const preview = document.createElement('div');
@@ -5054,21 +5218,118 @@ if (comboPanel) {
     const isDir = row.dataset.isDir === 'true';
     const name  = row.dataset.name;
     const abs   = row.dataset.path;
+    const rel   = row.dataset.rel || name;
     if (isDir) {
       navigateInto(which, name);
       return;
     }
-    // Gallery images: open the in-app fullscreen viewer (a frameless,
-    // always-on-top BrowserWindow created by main). For non-image files
-    // and anything in docs, fall back to the OS default app.
-    if (which === 'gallery' && _IMG_RENDER_RE.test(name) && window.dash?.openImageViewer) {
-      window.dash.openImageViewer(abs).catch(() => {
-        window.dash?.shellOpenPath?.(abs).catch(() => {});
-      });
+    // Images + videos play in the inline viewer (cover overlay inside
+    // the explore pane). Native <video controls> gives seek / volume /
+    // fullscreen / PiP for free. Anything else (text, archives, etc.)
+    // falls through to the OS default app.
+    if (_IMG_RENDER_RE.test(name) || _VIDEO_RENDER_RE.test(name)) {
+      _openExploreViewer(which, abs, name, rel);
     } else {
       window.dash?.shellOpenPath?.(abs).catch(() => {});
     }
   }
+
+  // ── Inline media viewer (explore pane) ───────────────────────────
+  // Used by handleExploreRowDblClick. Image or video chosen by extension.
+  const exploreViewerEl       = document.getElementById('explore-viewer');
+  const exploreViewerNameEl   = document.getElementById('explore-viewer-name');
+  const exploreViewerImgEl    = document.getElementById('explore-viewer-img');
+  const exploreViewerVidEl    = document.getElementById('explore-viewer-vid');
+  const exploreViewerStageEl  = document.getElementById('explore-viewer-stage');
+  const exploreViewerCloseBtn = document.getElementById('explore-viewer-close-btn');
+  const exploreViewerFsBtn    = document.getElementById('explore-viewer-fs-btn');
+  const exploreViewerPopoutBtn= document.getElementById('explore-viewer-popout-btn');
+  let _exploreViewerCurrent = null; // { which, abs, name }
+  function _openExploreViewer(which, abs, name, rel) {
+    if (!exploreViewerEl) return;
+    _exploreViewerCurrent = { which, abs, name };
+    if (exploreViewerNameEl) exploreViewerNameEl.textContent = name;
+    const url = `dash3d-file://${which}/${encodeURI(rel || name)}`;
+    const isVid = _VIDEO_RENDER_RE.test(name);
+    if (isVid) {
+      if (exploreViewerImgEl) { exploreViewerImgEl.hidden = true; exploreViewerImgEl.removeAttribute('src'); }
+      if (exploreViewerVidEl) {
+        exploreViewerVidEl.hidden = false;
+        exploreViewerVidEl.src = url;
+        try { exploreViewerVidEl.load(); } catch {}
+        // Auto-play unmuted on click — user intent is clear.
+        exploreViewerVidEl.play?.().catch(() => {});
+      }
+    } else {
+      if (exploreViewerVidEl) {
+        try { exploreViewerVidEl.pause(); } catch {}
+        exploreViewerVidEl.removeAttribute('src');
+        try { exploreViewerVidEl.load(); } catch {}
+        exploreViewerVidEl.hidden = true;
+      }
+      if (exploreViewerImgEl) {
+        exploreViewerImgEl.hidden = false;
+        exploreViewerImgEl.src = url;
+      }
+    }
+    exploreViewerEl.hidden = false;
+  }
+  function _closeExploreViewer() {
+    if (!exploreViewerEl || exploreViewerEl.hidden) return;
+    if (document.fullscreenElement === exploreViewerEl) {
+      try { document.exitFullscreen(); } catch {}
+    }
+    if (exploreViewerVidEl) {
+      try { exploreViewerVidEl.pause(); } catch {}
+      exploreViewerVidEl.removeAttribute('src');
+      try { exploreViewerVidEl.load(); } catch {}
+      exploreViewerVidEl.hidden = true;
+    }
+    if (exploreViewerImgEl) {
+      exploreViewerImgEl.removeAttribute('src');
+      exploreViewerImgEl.hidden = true;
+    }
+    exploreViewerEl.hidden = true;
+    _exploreViewerCurrent = null;
+  }
+  // × button + Esc key close.
+  exploreViewerCloseBtn?.addEventListener('click', _closeExploreViewer);
+  document.addEventListener('keydown', (ev) => {
+    if (!exploreViewerEl || exploreViewerEl.hidden) return;
+    if (ev.key === 'Escape' && !document.fullscreenElement) {
+      _closeExploreViewer();
+    } else if ((ev.key === 'f' || ev.key === 'F') && !ev.metaKey && !ev.ctrlKey) {
+      const tag = (ev.target && ev.target.tagName) || '';
+      // Don't grab F while the user is typing in an input.
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (ev.target && ev.target.isContentEditable)) return;
+      ev.preventDefault();
+      _toggleExploreViewerFullscreen();
+    }
+  });
+  // ⛶ fullscreen — request fullscreen on the viewer wrapper so both
+  // image + video modes get edge-to-edge display. The viewer's CSS
+  // hides the head row inside :fullscreen and stretches the media.
+  function _toggleExploreViewerFullscreen() {
+    if (!exploreViewerEl) return;
+    if (document.fullscreenElement === exploreViewerEl) {
+      try { document.exitFullscreen(); } catch {}
+    } else {
+      try { exploreViewerEl.requestFullscreen?.(); } catch {}
+    }
+  }
+  exploreViewerFsBtn?.addEventListener('click', _toggleExploreViewerFullscreen);
+  // ⇱ pop-out — falls back to the original frameless overlay window
+  // (main.js: open-image-viewer) for images. For videos, hands off to
+  // the OS default app since main's overlay only displays an <img>.
+  exploreViewerPopoutBtn?.addEventListener('click', () => {
+    const cur = _exploreViewerCurrent;
+    if (!cur) return;
+    if (_IMG_RENDER_RE.test(cur.name) && window.dash?.openImageViewer) {
+      window.dash.openImageViewer(cur.abs).catch(() => {});
+    } else {
+      window.dash?.shellOpenPath?.(cur.abs).catch(() => {});
+    }
+  });
 
   // Inline new-folder row — prepends a placeholder row with an input to
   // the top of the list. Enter calls exploreMkdir; Esc / empty-blur drops
@@ -5203,11 +5464,20 @@ if (comboPanel) {
   async function deleteSelectedAll(which) {
     const paths = [..._exploreSelected[which]];
     if (!paths.length) return;
+    const batch = [];
     for (const abs of paths) {
       try {
         const r = await window.dash?.exploreDelete?.(abs);
-        if (!r?.ok) console.warn('[explore] delete failed:', abs, r?.error);
+        if (r?.ok && r.trashPath && r.origPath) {
+          batch.push({ origPath: r.origPath, trashPath: r.trashPath, name: r.name });
+        } else if (!r?.ok) {
+          console.warn('[explore] delete failed:', abs, r?.error);
+        }
       } catch {}
+    }
+    if (batch.length && typeof _visualizerUndoStack !== 'undefined') {
+      _visualizerUndoStack.push({ batch, at: Date.now() });
+      if (typeof _refreshUndoBtn === 'function') _refreshUndoBtn();
     }
     _exploreSelected[which].clear();
     _exploreAnchor[which] = null;
@@ -5379,6 +5649,21 @@ if (comboPanel) {
       row.dataset.isDir = String(e.isDir);
       row.dataset.name  = e.name;
       row.title = e.path;
+      // Make video AND image rows draggable into the editor's
+      // timeline. The custom mime carries the path + a `kind` token so
+      // the drop target knows whether to set up a video or still-image
+      // clip without re-checking the extension.
+      const isVidRow = !e.isDir && _VIDEO_RENDER_RE.test(e.name);
+      const isImgRow = !e.isDir && _IMG_RENDER_RE.test(e.name);
+      if (isVidRow || isImgRow) {
+        row.draggable = true;
+        row.addEventListener('dragstart', (ev) => {
+          ev.dataTransfer.setData('application/x-dash3d-capture', e.path);
+          ev.dataTransfer.setData('application/x-dash3d-kind', isImgRow ? 'image' : 'video');
+          ev.dataTransfer.setData('text/plain', e.name);
+          ev.dataTransfer.effectAllowed = 'copy';
+        });
+      }
       // Lead glyph hints at the type without taking grid space.
       const glyph = e.isDir ? '▣ '
         : _VIDEO_KNOWN_RE.test(e.name) ? '▶ '
@@ -5463,17 +5748,25 @@ if (comboPanel) {
     visualizerWrapEl?.classList.remove('is-still');
     _visualizerCurrent = entry.path;
     const url = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
+    // Setting src on a fresh video element naturally starts it
+    // paused at currentTime=0 — no need to force pause() or
+    // currentTime=0 here (forcing them before metadata had loaded
+    // was leaving the element in a state where the subsequent
+    // play() click from the toolbar would silently reject).
     visualizerVideoEl.src = url;
     // Honour the saved mute preference — without this, the element
     // would inherit the force-mute it picked up during a prior mirror
     // session and recordings would play silently.
     if (typeof _applyMute === 'function') _applyMute(!!_recRoomMutedPref);
-    visualizerVideoEl.play().catch(() => {});
+    // `is-playing` here means "a video is loaded" (toggles the empty
+    // overlay off) — keep adding it even though we're not actively
+    // playing. CSS that depends on it stays correct.
     visualizerWrapEl?.classList.add('is-playing');
     if (visualizerNowEl) visualizerNowEl.textContent = entry.name;
     // Repaint list to highlight the now-playing row.
     renderVisualizerList(_visualizerEntries);
     _refreshDeleteBtn();
+    if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
   }
 
   // Show a still image (snap) in the player wrap. We stop any video
@@ -5543,6 +5836,7 @@ if (comboPanel) {
     if (visualizerNowEl) visualizerNowEl.textContent = entry.name;
     renderVisualizerList(_visualizerEntries);
     _refreshDeleteBtn();
+    if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
   }
 
   // ── Transport controls ──────────────────────────────────────────────
@@ -5559,7 +5853,15 @@ if (comboPanel) {
       if (first) playVisualizerEntry(first);
       return;
     }
-    if (visualizerVideoEl.paused) visualizerVideoEl.play().catch(() => {});
+    if (visualizerVideoEl.paused) {
+      // Log a rejected play() — it used to be silently swallowed,
+      // which made "click play, nothing happens" indistinguishable
+      // from a real bug. Now we'll see the actual reason in dev
+      // tools (autoplay-policy, unsupported codec, etc.).
+      visualizerVideoEl.play().catch((err) => {
+        console.warn('[rec-room] play() rejected:', err?.name, err?.message);
+      });
+    }
     else visualizerVideoEl.pause();
   }
   function playRelative(step) {
@@ -5601,6 +5903,7 @@ if (comboPanel) {
     }
     _refreshProcessBtn();
     _refreshDeleteBtn();
+    if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
   }
   function _refreshProcessBtn() {
     const btn = document.getElementById('visualizer-process-btn');
@@ -5817,6 +6120,19 @@ if (comboPanel) {
   document.getElementById('visualizer-playpause-btn')?.addEventListener('click', togglePlayPause);
   document.getElementById('visualizer-prev-btn')     ?.addEventListener('click', () => playRelative(-1));
   document.getElementById('visualizer-next-btn')     ?.addEventListener('click', () => playRelative(+1));
+  // Session-scoped undo stack for deletions. Each entry remembers the
+  // managed-trash path + original path so a single button-click can
+  // restore the most recent batch. Cleared on app restart (the file
+  // remains in <root>/.trash so it's still recoverable via Empty Trash
+  // → OS Recycle Bin if needed).
+  const _visualizerUndoStack = []; // [{batch: [{origPath, trashPath, name}], ...}, ...]
+  function _refreshUndoBtn() {
+    const btn = document.getElementById('visualizer-undo-btn');
+    if (!btn) return;
+    btn.disabled = _visualizerUndoStack.length === 0;
+    btn.textContent = _visualizerUndoStack.length > 1
+      ? `UNDO (${_visualizerUndoStack.length})` : 'UNDO';
+  }
   document.getElementById('visualizer-delete-btn')   ?.addEventListener('click', async () => {
     const targets = _visualizerSelected.size
       ? [..._visualizerSelected]
@@ -5829,15 +6145,1621 @@ if (comboPanel) {
       visualizerWrapEl?.classList.remove('is-playing', 'is-still');
       if (visualizerNowEl) visualizerNowEl.textContent = '—';
     }
+    const batch = [];
     for (const abs of targets) {
       try {
         const r = await window.dash?.exploreDelete?.(abs);
-        if (!r?.ok) console.warn('[rec-room] delete failed:', abs, r?.error);
-      } catch {}
+        if (r?.ok && r.trashPath && r.origPath) {
+          batch.push({ origPath: r.origPath, trashPath: r.trashPath, name: r.name });
+        } else if (!r?.ok) {
+          console.warn('[rec-room] delete failed:', abs, r?.error);
+        }
+      } catch (err) { console.warn('[rec-room] delete threw:', err); }
+    }
+    if (batch.length) {
+      _visualizerUndoStack.push({ batch, at: Date.now() });
+      _refreshUndoBtn();
+      if (visualizerNowEl) visualizerNowEl.textContent = `DELETED ${batch.length} · UNDO READY`;
     }
     _clearVisualizerSelection();
     await refreshVisualizer();
   });
+  document.getElementById('visualizer-undo-btn')?.addEventListener('click', async () => {
+    const entry = _visualizerUndoStack.pop();
+    if (!entry) return;
+    _refreshUndoBtn();
+    let restored = 0;
+    for (const item of entry.batch) {
+      try {
+        const r = await window.dash?.exploreRestore?.({
+          origPath: item.origPath, trashPath: item.trashPath,
+        });
+        if (r?.ok) restored++;
+        else console.warn('[rec-room] restore failed:', item.name, r?.error);
+      } catch (err) { console.warn('[rec-room] restore threw:', err); }
+    }
+    if (visualizerNowEl) visualizerNowEl.textContent = `RESTORED ${restored}/${entry.batch.length}`;
+    await refreshVisualizer();
+  });
+  _refreshUndoBtn();
+
+  // ── §rec-split ── DRAGGABLE SPLITTER ──────────────────────────────
+  // Slim horizontal bar between the player/edit area and the captures
+  // list. Drag it to give more vertical space to either side. The %
+  // is stored in cfg.recSplitPct so it survives restarts.
+  const recSplitEl = document.getElementById('visualizer-split');
+  const _CLAMP = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+  function _applyRecSplit(pct) {
+    if (!visualizerPane) return;
+    const v = _CLAMP(Number(pct) || 60, 20, 85);
+    visualizerPane.style.setProperty('--rec-split-pct', `${v}%`);
+  }
+  (async () => {
+    try {
+      const cfg = (await window.dash?.getConfig?.()) || {};
+      if (Number.isFinite(cfg.recSplitPct)) _applyRecSplit(cfg.recSplitPct);
+      else _applyRecSplit(60);
+    } catch { _applyRecSplit(60); }
+  })();
+  let _splitDragging = false;
+  let _splitStartY = 0;
+  let _splitStartPct = 60;
+  recSplitEl?.addEventListener('pointerdown', (e) => {
+    if (!visualizerPane) return;
+    _splitDragging = true;
+    _splitStartY = e.clientY;
+    const paneRect = visualizerPane.getBoundingClientRect();
+    const curPctStr = getComputedStyle(visualizerPane).getPropertyValue('--rec-split-pct').trim();
+    _splitStartPct = parseFloat(curPctStr) || 60;
+    recSplitEl.classList.add('is-dragging');
+    recSplitEl.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+  });
+  recSplitEl?.addEventListener('pointermove', (e) => {
+    if (!_splitDragging || !visualizerPane) return;
+    const paneRect = visualizerPane.getBoundingClientRect();
+    if (paneRect.height <= 0) return;
+    const dy = e.clientY - _splitStartY;
+    const deltaPct = (dy / paneRect.height) * 100;
+    const next = _CLAMP(_splitStartPct + deltaPct, 20, 85);
+    visualizerPane.style.setProperty('--rec-split-pct', `${next}%`);
+  });
+  function _endSplitDrag() {
+    if (!_splitDragging) return;
+    _splitDragging = false;
+    recSplitEl?.classList.remove('is-dragging');
+    if (visualizerPane) {
+      const curPctStr = getComputedStyle(visualizerPane).getPropertyValue('--rec-split-pct').trim();
+      const v = parseFloat(curPctStr) || 60;
+      window.dash?.setConfig?.({ recSplitPct: v });
+    }
+  }
+  recSplitEl?.addEventListener('pointerup',     _endSplitDrag);
+  recSplitEl?.addEventListener('pointercancel', _endSplitDrag);
+
+  // ── §rec-edit ── EDIT MODE (trim + filters) ────────────────────
+  // Opens a split-pane editor on the currently-playing video. The
+  // ORIGINAL side plays straight; the EDITED side has a live CSS
+  // `filter:` chain driven by sliders. EXPORT pipes the same params
+  // (plus trim in/out) to ffmpeg in main, producing a new file in
+  // gallery/recordings/ next to the source.
+  const editBtn       = document.getElementById('visualizer-edit-btn');
+  const editPane      = document.getElementById('visualizer-edit-pane');
+  const editOrigVid   = document.getElementById('vis-edit-orig');
+  const editOutVid    = document.getElementById('vis-edit-out');
+  const editNameEl    = document.getElementById('vis-edit-name');
+  const editTimelineEl= document.getElementById('vis-edit-timeline');
+  const editTrimRangeEl= document.getElementById('vis-edit-trim-range');
+  const editTrimInEl  = document.getElementById('vis-edit-trim-in');
+  const editTrimOutEl = document.getElementById('vis-edit-trim-out');
+  const editPlayheadEl= document.getElementById('vis-edit-playhead');
+  const editTimeEl    = document.getElementById('vis-edit-time');
+  const editTrimTimesEl = document.getElementById('vis-edit-trim-times');
+  const editPlayBtn   = document.getElementById('vis-edit-play');
+  const editResetBtn  = document.getElementById('vis-edit-reset');
+  const editExportBtn = document.getElementById('vis-edit-export');
+  const editCloseBtn  = document.getElementById('vis-edit-close');
+  const editAutoBtn   = document.getElementById('vis-edit-auto');
+  const editDenoiseBtn= document.getElementById('vis-edit-denoise');
+  const editStatusEl  = document.getElementById('vis-edit-status');
+
+  // Editor state. trimIn/Out in seconds; duration cached once metadata
+  // loads. All filter values default to identity (no-op CSS string).
+  // sliders[*]:
+  //   brightness/contrast/saturation/hue/blur — CSS filter() chain
+  //   sharpen  — 0..200, unsharp-mask amount on export
+  //   vignette — 0..100, edge darkening strength
+  //   speed    — 25..400, playback rate as %
+  //   volume   — 0..200, audio gain as %
+  // crop is normalized [0..1] x [0..1]; rotate is degrees (0/90/180/270).
+  const _editState = {
+    open: false,
+    src: '',           // absolute file path of the source/anchor video
+    // Optional appended clips. First entry mirrors `src` and is treated
+    // as the anchor — trim handles on the timeline apply to it. The
+    // rest play in full after the anchor. Each: { path, name, duration }.
+    clips: [],
+    duration: 0,
+    trimIn: 0,
+    trimOut: 0,
+    auto: false,
+    denoise: false,
+    bw: false,
+    sepia: false,
+    invert: false,
+    reverse: false,
+    mute: false,
+    flipH: false,
+    flipV: false,
+    rotate: 0,
+    cropOn: false,
+    crop: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 },
+    sliders: {
+      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
+      sharpen: 0, vignette: 0, speed: 100, volume: 100,
+    },
+  };
+  // Mirror process popover filter state — same shape so the same
+  // helpers serialize both into a -vf string.
+  const _procFilterState = {
+    auto: false,
+    denoise: false,
+    sliders: {
+      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
+    },
+  };
+  function _editIsIdentity(s, flags) {
+    return s.brightness === 100 && s.contrast === 100 && s.saturation === 100
+      && s.hue === 0 && s.blur === 0 && !flags.auto && !flags.denoise;
+  }
+  function _editCssFilter(state) {
+    const s = state.sliders;
+    const parts = [];
+    let brightness = s.brightness, contrast = s.contrast, saturation = s.saturation;
+    if (state.auto) { contrast = Math.min(200, contrast + 15); saturation = Math.min(200, saturation + 10); }
+    if (brightness !== 100) parts.push(`brightness(${brightness}%)`);
+    if (contrast   !== 100) parts.push(`contrast(${contrast}%)`);
+    if (saturation !== 100) parts.push(`saturate(${saturation}%)`);
+    if (s.hue !== 0)        parts.push(`hue-rotate(${s.hue}deg)`);
+    if (s.blur > 0)         parts.push(`blur(${s.blur}px)`);
+    // Sharpen has no native CSS filter. The "sharper" look comes from a
+    // contrast nudge in preview; the real unsharp-mask runs in ffmpeg.
+    if (s.sharpen > 0) parts.push(`contrast(${100 + s.sharpen * 0.1}%)`);
+    // Black-and-white / sepia / invert as single-shot toggles.
+    if (state.bw)      parts.push('grayscale(100%)');
+    if (state.sepia)   parts.push('sepia(100%)');
+    if (state.invert)  parts.push('invert(100%)');
+    // CSS approximation of denoise: light blur so the user sees that
+    // SOMETHING happens live. True denoising runs in ffmpeg on export.
+    if (state.denoise) parts.push('blur(0.3px) contrast(102%)');
+    return parts.join(' ') || 'none';
+  }
+  // Pan/zoom view state — applied to BOTH the original and edited
+  // videos in sync so they show the same region. translate is in pixels
+  // relative to the side container; scale is a multiplier. The rotate
+  // + flip from _editState is composed on top of pan/zoom on the
+  // EDITED side only.
+  const _editView = { scale: 1, tx: 0, ty: 0 };
+  function _editCssTransform(state, withRotate) {
+    const parts = [];
+    if (_editView.tx || _editView.ty) parts.push(`translate(${_editView.tx}px, ${_editView.ty}px)`);
+    if (_editView.scale !== 1)        parts.push(`scale(${_editView.scale})`);
+    if (withRotate) {
+      if (state.rotate) parts.push(`rotate(${state.rotate}deg)`);
+      if (state.flipH)  parts.push('scaleX(-1)');
+      if (state.flipV)  parts.push('scaleY(-1)');
+    }
+    return parts.join(' ') || 'none';
+  }
+  function _applyEditPreview() {
+    if (!editOutVid) return;
+    editOutVid.style.filter = _editCssFilter(_editState);
+    editOutVid.style.transform = _editCssTransform(_editState, true);
+    // Mirror pan/zoom (without rotate/flip) on the ORIGINAL side so
+    // both windows show the same region.
+    if (editOrigVid) editOrigVid.style.transform = _editCssTransform(_editState, false);
+    // Mirror the playback rate so the EDITED side previews the speed.
+    const rate = Math.max(0.25, Math.min(4, (_editState.sliders.speed || 100) / 100));
+    if (editOrigVid && Math.abs(editOrigVid.playbackRate - rate) > 0.005) {
+      try { editOrigVid.playbackRate = rate; editOutVid.playbackRate = rate; } catch {}
+    }
+    // Toggle the crop overlay visibility based on cropOn.
+    const cropEl = document.getElementById('vis-edit-crop');
+    if (cropEl) cropEl.hidden = !_editState.cropOn;
+  }
+  function _resetEditView() {
+    _editView.scale = 1;
+    _editView.tx = 0;
+    _editView.ty = 0;
+    _applyEditPreview();
+  }
+  function _fmtTime(t) {
+    if (!Number.isFinite(t) || t < 0) t = 0;
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+  // ── §rec-edit-timeline ── DaVinci-style multi-track timeline ────
+  // Project state — separate from the single-clip _editState because
+  // it's a distinct mental model (a real NLE timeline). Each track
+  // has a list of clips; each clip has its own in/out (trim) and a
+  // start time on the global timeline.
+  const _editProject = {
+    fps: 30,
+    width: 1920,
+    height: 1080,
+    pxPerSec: 50,
+    duration: 30,    // bumped as clips are added/moved
+    tracks: {
+      V2: [],
+      V1: [],
+      A1: [],
+    },
+    selectedClipId: null,
+  };
+  let _editClipSeq = 0;
+
+  // Cap the timeline length at 24h so a bogus duration (Chromium
+  // returns Infinity for some webm clips that have no duration
+  // metadata in the header) can't blow up the ruler render loop.
+  const _EDIT_MAX_DURATION = 24 * 60 * 60;
+  function _safeDur(v, fallback) {
+    if (!Number.isFinite(v) || v < 0) return fallback;
+    return Math.min(v, _EDIT_MAX_DURATION);
+  }
+  function _editTotalDuration() {
+    let max = 30;
+    for (const tid of ['V2', 'V1', 'A1']) {
+      for (const c of _editProject.tracks[tid]) {
+        const start = _safeDur(c.start, 0);
+        const trim  = _safeDur((c.out || 0) - (c.in || 0), 0);
+        const end = start + trim;
+        if (end > max) max = end;
+      }
+    }
+    return Math.ceil(Math.min(max + 5, _EDIT_MAX_DURATION));
+  }
+
+  function _editFmtTC(t) {
+    if (!Number.isFinite(t) || t < 0) t = 0;
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  // Render the time ruler. Tick every second; major tick every 5 s
+  // with a numeric label. Density adapts to pxPerSec so the ruler
+  // doesn't crowd at low zoom.
+  function _renderEditRuler() {
+    const ruler = document.getElementById('vis-edit-tl-ruler');
+    if (!ruler) return;
+    // Hard-clamp every input to finite, sane numbers so a bogus duration
+    // can't generate an infinite loop here.
+    const dur = _safeDur(_editProject.duration, 30);
+    const pps = Math.max(1, Math.min(2000, _editProject.pxPerSec || 50));
+    const w = Math.max(1, Math.min(1_000_000, Math.round(dur * pps)));
+    ruler.innerHTML = '';
+    // Choose tick interval based on zoom — keep labels at least 60px apart.
+    const minLabelPx = 60;
+    let tickSec = 1;
+    while (tickSec * pps < minLabelPx / 5 && tickSec < dur) tickSec *= 2;
+    let labelSec = tickSec * 5;
+    while (labelSec * pps < minLabelPx && labelSec < dur) labelSec *= 2;
+    // Cap the number of ticks generated as a final safety net (e.g. user
+    // sets fps=24 + zooms way out + duration is 12h — still bounded).
+    const MAX_TICKS = 4000;
+    let ticksDrawn = 0;
+    for (let t = 0; t <= dur && ticksDrawn < MAX_TICKS; t += tickSec) {
+      const x = Math.round(t * pps);
+      const isMajor = (Math.round(t / labelSec) * labelSec === Math.round(t));
+      const tick = document.createElement('div');
+      tick.className = 'vis-edit-tl-ruler-tick' + (isMajor ? ' is-major' : '');
+      tick.style.left = `${x}px`;
+      ruler.appendChild(tick);
+      if (isMajor) {
+        const lbl = document.createElement('span');
+        lbl.className = 'vis-edit-tl-ruler-label';
+        lbl.style.left = `${x}px`;
+        lbl.textContent = _editFmtTC(t);
+        ruler.appendChild(lbl);
+      }
+      ticksDrawn++;
+    }
+    const content = document.getElementById('vis-edit-tl-content');
+    if (content) content.style.width = `${w}px`;
+  }
+
+  function _editTrackEl(trackId) {
+    return document.getElementById(`vis-edit-tl-track-${trackId}`);
+  }
+
+  function _renderEditTracks() {
+    const pps = _editProject.pxPerSec;
+    for (const tid of ['V2', 'V1', 'A1']) {
+      const trackEl = _editTrackEl(tid);
+      if (!trackEl) continue;
+      trackEl.innerHTML = '';
+      for (const clip of _editProject.tracks[tid]) {
+        const el = document.createElement('div');
+        el.className = 'vis-edit-tl-clip';
+        if (clip.id === _editProject.selectedClipId) el.classList.add('is-selected');
+        el.dataset.clipId = clip.id;
+        const dur = Math.max(0.05, clip.out - clip.in);
+        el.style.left  = `${Math.round(clip.start * pps)}px`;
+        el.style.width = `${Math.max(20, Math.round(dur * pps))}px`;
+        // Resize handles on the LEFT and RIGHT edges. Dragging stretches
+        // the clip along the time axis. For images the duration grows
+        // freely; for videos out is capped at srcDuration so we can't
+        // extend past the source's length.
+        el.innerHTML =
+          `<span class="vis-edit-tl-clip-resize is-left"  data-resize="left"></span>` +
+          `<span class="vis-edit-tl-clip-name">${clip.name}</span>` +
+          `<button class="vis-edit-tl-clip-remove" title="Remove clip">×</button>` +
+          `<span class="vis-edit-tl-clip-resize is-right" data-resize="right"></span>`;
+        _wireClipDrag(el, clip, tid);
+        _wireClipResize(el, clip, tid);
+        el.querySelector('.vis-edit-tl-clip-remove')?.addEventListener('mousedown', (e) => e.stopPropagation());
+        el.querySelector('.vis-edit-tl-clip-remove')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          _removeEditClip(clip.id);
+        });
+        trackEl.appendChild(el);
+      }
+    }
+    _refreshEditPlayhead();
+  }
+
+  function _refreshEditPlayhead() {
+    const ph = document.getElementById('vis-edit-tl-playhead');
+    if (!ph) return;
+    const t = _safeDur(editOrigVid?.currentTime, 0);
+    const pps = Math.max(1, Math.min(2000, _editProject.pxPerSec || 50));
+    ph.style.left = `${Math.round(t * pps)}px`;
+    _renderEditOverlays();
+  }
+
+  // Render every V2 clip that's "live" at the current playhead time
+  // as an absolutely-positioned overlay over the EDITED video. The
+  // selected clip (if it's on V2) gets a dashed border + 8 resize
+  // handles. Only image overlays for now — video-on-video compositing
+  // is a follow-up.
+  function _renderEditOverlays() {
+    const layer = document.getElementById('vis-edit-overlays');
+    if (!layer) return;
+    const t = _safeDur(editOrigVid?.currentTime, 0);
+    // Diff against the existing children so we don't thrash the DOM
+    // on every timeupdate. We rebuild only if the active-clip set
+    // changes or a clip's position is dirty.
+    const active = _editProject.tracks.V2.filter((c) => {
+      const dur = Math.max(0.05, (c.out || c.srcDuration || 3) - (c.in || 0));
+      return c.kind === 'image' && t >= c.start && t < c.start + dur;
+    });
+    const sigOf = (arr) => arr.map((c) => `${c.id}:${c.x.toFixed(4)},${c.y.toFixed(4)},${c.w.toFixed(4)},${c.h.toFixed(4)}:${c.id === _editProject.selectedClipId}`).join('|');
+    const sig = sigOf(active);
+    if (layer.dataset.sig === sig) return;
+    layer.dataset.sig = sig;
+    layer.innerHTML = '';
+    for (const clip of active) {
+      const el = document.createElement('div');
+      el.className = 'vis-edit-overlay' + (clip.id === _editProject.selectedClipId ? ' is-selected' : '');
+      el.dataset.clipId = clip.id;
+      el.style.left   = `${(clip.x * 100).toFixed(3)}%`;
+      el.style.top    = `${(clip.y * 100).toFixed(3)}%`;
+      el.style.width  = `${(clip.w * 100).toFixed(3)}%`;
+      el.style.height = `${(clip.h * 100).toFixed(3)}%`;
+      const img = document.createElement('img');
+      const rel = (_visualizerEntries.find((e) => e.path === clip.path)?.rel) || '';
+      img.src = `dash3d-file://gallery/${encodeURI(rel)}`;
+      img.alt = '';
+      img.draggable = false;
+      el.appendChild(img);
+      if (clip.id === _editProject.selectedClipId) {
+        for (const side of ['nw','n','ne','e','se','s','sw','w']) {
+          const h = document.createElement('span');
+          h.className = `vis-edit-overlay-handle is-h-${side}`;
+          h.dataset.handle = side;
+          el.appendChild(h);
+        }
+      }
+      _wireOverlayDrag(el, clip);
+      layer.appendChild(el);
+    }
+  }
+
+  function _wireOverlayDrag(el, clip) {
+    const layer = document.getElementById('vis-edit-overlays');
+    if (!layer) return;
+    let drag = null;
+    el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      // Select this clip so handles appear (and the timeline reflects).
+      _editProject.selectedClipId = clip.id;
+      _renderEditTracks();
+      const handle = e.target.closest?.('.vis-edit-overlay-handle');
+      const r = layer.getBoundingClientRect();
+      drag = {
+        mode: handle ? 'resize' : 'move',
+        side: handle?.dataset.handle || null,
+        startX: e.clientX,
+        startY: e.clientY,
+        layerW: r.width,
+        layerH: r.height,
+        orig: { x: clip.x, y: clip.y, w: clip.w, h: clip.h },
+      };
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    function onMove(e) {
+      if (!drag) return;
+      const dxFrac = (e.clientX - drag.startX) / Math.max(1, drag.layerW);
+      const dyFrac = (e.clientY - drag.startY) / Math.max(1, drag.layerH);
+      const o = drag.orig;
+      if (drag.mode === 'move') {
+        clip.x = Math.max(0, Math.min(1 - o.w, o.x + dxFrac));
+        clip.y = Math.max(0, Math.min(1 - o.h, o.y + dyFrac));
+      } else {
+        const s = drag.side;
+        // East / South: adjust w/h directly.
+        if (s.includes('e')) clip.w = Math.max(0.03, Math.min(1 - o.x, o.w + dxFrac));
+        if (s.includes('s')) clip.h = Math.max(0.03, Math.min(1 - o.y, o.h + dyFrac));
+        // West / North: adjust x/y and inverse w/h so the opposite edge
+        // stays pinned.
+        if (s.includes('w')) {
+          const right = o.x + o.w;
+          const nx = Math.max(0, Math.min(right - 0.03, o.x + dxFrac));
+          clip.x = nx; clip.w = right - nx;
+        }
+        if (s.includes('n')) {
+          const bottom = o.y + o.h;
+          const ny = Math.max(0, Math.min(bottom - 0.03, o.y + dyFrac));
+          clip.y = ny; clip.h = bottom - ny;
+        }
+      }
+      _renderEditOverlays();
+    }
+    function onUp() {
+      drag = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',   onUp);
+    }
+    el.addEventListener('mousedown', () => {
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup',   onUp);
+    });
+  }
+
+  function _addEditClip(trackId, capture, startSec) {
+    const kind = capture.kind || (_IMG_RENDER_RE.test(capture.name) ? 'image' : 'video');
+    // Images have no inherent duration — give them a sensible default
+    // (3s) that the user can later resize. Video duration comes from
+    // its metadata probe.
+    const dur = Number.isFinite(capture.duration) && capture.duration > 0
+      ? capture.duration
+      : (kind === 'image' ? 3 : 5);
+    const clip = {
+      id: ++_editClipSeq,
+      path: capture.path,
+      name: capture.name,
+      kind,
+      srcDuration: dur,
+      in: 0,
+      out: dur,
+      start: Math.max(0, startSec),
+      track: trackId,
+      // Transform (position + size) for overlay clips on V2. Fractions
+      // of the EDITED preview canvas. V1 anchors ignore these (they
+      // cover the canvas). Default: centered at 50% size.
+      x: 0.25, y: 0.25, w: 0.5, h: 0.5,
+    };
+    _editProject.tracks[trackId].push(clip);
+    _editProject.duration = _editTotalDuration();
+    _renderEditRuler();
+    _renderEditTracks();
+    // If V1 is empty no longer, retarget preview to this clip.
+    if (trackId === 'V1' && _editProject.tracks.V1.length === 1) {
+      _retargetEditorAnchor(clip);
+    }
+    // Newly-added V2 overlays should appear immediately if their time
+    // range covers the current playhead. Auto-select the new clip so
+    // the handles are visible right away.
+    if (trackId === 'V2' && clip.kind === 'image') {
+      _editProject.selectedClipId = clip.id;
+      _renderEditOverlays();
+    }
+  }
+
+  function _removeEditClip(clipId) {
+    for (const tid of ['V2', 'V1', 'A1']) {
+      const idx = _editProject.tracks[tid].findIndex((c) => c.id === clipId);
+      if (idx !== -1) {
+        const wasFirstV1 = (tid === 'V1' && idx === 0);
+        _editProject.tracks[tid].splice(idx, 1);
+        if (_editProject.selectedClipId === clipId) _editProject.selectedClipId = null;
+        _editProject.duration = _editTotalDuration();
+        _renderEditRuler();
+        _renderEditTracks();
+        _renderEditOverlays();
+        if (wasFirstV1) {
+          const next = _editProject.tracks.V1[0];
+          if (next) _retargetEditorAnchor(next);
+        }
+        return;
+      }
+    }
+  }
+
+  // Reposition a clip by dragging. Clip can move left/right along
+  // time, and up/down between tracks of the same kind (V2↔V1 for
+  // video, A1 only for audio).
+  //
+  // Hot path optimization: during drag we DO NOT re-render the
+  // whole track DOM on every mousemove (used to call
+  // _renderEditTracks() per move — that's ~3 destroyAll + N create
+  // for every pointer event, blowing GC and the compositor when the
+  // user has any sizable clip list). Instead we mutate the live
+  // element's `style.left` directly, and only re-render at mouseup
+  // (which also handles track changes properly). Project-duration
+  // recalc is deferred to mouseup too.
+  // Resize a timeline clip from either edge. Dragging the RIGHT edge
+  // extends/shrinks the out point (and srcDuration for images, which
+  // have no inherent length). Dragging the LEFT edge moves the start
+  // and in point together so the right edge stays where it is.
+  function _wireClipResize(el, clip, trackId) {
+    const leftH  = el.querySelector('.vis-edit-tl-clip-resize.is-left');
+    const rightH = el.querySelector('.vis-edit-tl-clip-resize.is-right');
+    function wireEdge(handle, side) {
+      if (!handle) return;
+      let drag = null;
+      handle.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        _editProject.selectedClipId = clip.id;
+        drag = {
+          startX: e.clientX,
+          origStart: clip.start,
+          origIn:    clip.in,
+          origOut:   clip.out,
+          origSrc:   clip.srcDuration,
+        };
+        el.classList.add('is-dragging');
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup',   onUp);
+        e.preventDefault();
+        e.stopPropagation();   // don't fire the body-drag handler
+      });
+      function onMove(e) {
+        if (!drag) return;
+        const pps = Math.max(1, _editProject.pxPerSec || 50);
+        const dt = (e.clientX - drag.startX) / pps;
+        if (side === 'right') {
+          // Drag right edge — change out (and srcDuration for images).
+          let newOut = Math.max(drag.origIn + 0.1, drag.origOut + dt);
+          if (clip.kind === 'video') {
+            // Videos can't go past their natural source length.
+            const cap = Number.isFinite(drag.origSrc) && drag.origSrc > 0
+              ? drag.origSrc : newOut;
+            newOut = Math.min(newOut, cap);
+          } else {
+            // Images: stretch srcDuration freely. Cap at 24h so we
+            // can never feed Infinity through the ruler math.
+            newOut = Math.min(newOut, 24 * 60 * 60);
+            clip.srcDuration = newOut - drag.origIn;
+          }
+          clip.out = newOut;
+          el.style.width = `${Math.max(20, Math.round((clip.out - clip.in) * pps))}px`;
+        } else {
+          // Drag left edge — start + in shift by dt; right edge stays
+          // anchored (so the visible content's right border doesn't
+          // move). For images, in stays 0; we just adjust start and
+          // srcDuration symmetrically.
+          if (clip.kind === 'image') {
+            let newStart = Math.max(0, drag.origStart + dt);
+            // Don't let the clip shrink to nothing — keep at least 0.1s.
+            const minLen = 0.1;
+            const rightEdge = drag.origStart + (drag.origOut - drag.origIn);
+            if (newStart > rightEdge - minLen) newStart = rightEdge - minLen;
+            clip.start = newStart;
+            clip.srcDuration = Math.max(minLen, rightEdge - newStart);
+            clip.in  = 0;
+            clip.out = clip.srcDuration;
+          } else {
+            let newIn = Math.max(0, drag.origIn + dt);
+            const minLen = 0.1;
+            if (newIn > drag.origOut - minLen) newIn = drag.origOut - minLen;
+            clip.in    = newIn;
+            clip.start = drag.origStart + (newIn - drag.origIn);
+          }
+          el.style.left  = `${Math.round(clip.start * pps)}px`;
+          el.style.width = `${Math.max(20, Math.round((clip.out - clip.in) * pps))}px`;
+        }
+      }
+      function onUp() {
+        if (!drag) return;
+        drag = null;
+        el.classList.remove('is-dragging');
+        _editProject.duration = _editTotalDuration();
+        _renderEditRuler();
+        _renderEditTracks();
+        _renderEditOverlays();
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup',   onUp);
+      }
+    }
+    wireEdge(leftH,  'left');
+    wireEdge(rightH, 'right');
+  }
+
+  function _wireClipDrag(el, clip, trackId) {
+    let drag = null;
+    function onDown(e) {
+      if (e.button !== 0) return;
+      _editProject.selectedClipId = clip.id;
+      // Re-render overlays so the selected V2 clip's handles appear.
+      _renderEditOverlays();
+      drag = {
+        startX: e.clientX,
+        startY: e.clientY,
+        origStart: clip.start,
+        origTrack: trackId,
+        movedTrack: false,
+      };
+      el.classList.add('is-dragging');
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup',   onUp);
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onMove(e) {
+      if (!drag) return;
+      const dx = e.clientX - drag.startX;
+      const newStart = Math.max(0, drag.origStart + dx / _editProject.pxPerSec);
+      clip.start = newStart;
+      // Cheap live update — just slide the element. No DOM rebuild.
+      el.style.left = `${Math.round(newStart * _editProject.pxPerSec)}px`;
+      // Vertical movement between video tracks. Triggers a one-time
+      // full re-render so the clip ends up in the right track's DOM,
+      // but only on the threshold cross — not every move.
+      const dy = e.clientY - drag.startY;
+      const kind = (drag.origTrack === 'A1') ? 'audio' : 'video';
+      if (Math.abs(dy) > 22 && kind === 'video') {
+        const nextTrack = (dy < 0) ? 'V2' : 'V1';
+        if (nextTrack !== clip.track) {
+          const from = _editProject.tracks[clip.track];
+          const idx = from.findIndex((c) => c.id === clip.id);
+          if (idx !== -1) from.splice(idx, 1);
+          _editProject.tracks[nextTrack].push(clip);
+          clip.track = nextTrack;
+          drag.origTrack = nextTrack;
+          drag.startY = e.clientY;
+          drag.movedTrack = true;
+          _renderEditTracks(); // unavoidable for track changes
+        }
+      }
+    }
+    function onUp() {
+      if (!drag) return;
+      drag = null;
+      el.classList.remove('is-dragging');
+      _editProject.duration = _editTotalDuration();
+      // Final reconcile (ruler width, sort order, etc.) once.
+      _renderEditRuler();
+      _renderEditTracks();
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',   onUp);
+    }
+    el.addEventListener('mousedown', onDown);
+  }
+
+  // Wire each track body to accept drops from the captures list.
+  // The drag payload is the dragged row's data-path; we look up the
+  // entry to get its name + probed duration.
+  function _wireTrackDrop(trackId) {
+    const trackEl = _editTrackEl(trackId);
+    if (!trackEl) return;
+    trackEl.addEventListener('dragover', (e) => {
+      // Only accept drops if the drag carries a recording path.
+      if (e.dataTransfer?.types?.includes('application/x-dash3d-capture')) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        trackEl.classList.add('is-drag-over');
+      }
+    });
+    trackEl.addEventListener('dragleave', () => trackEl.classList.remove('is-drag-over'));
+    trackEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      trackEl.classList.remove('is-drag-over');
+      const path = e.dataTransfer.getData('application/x-dash3d-capture');
+      const kindHint = e.dataTransfer.getData('application/x-dash3d-kind');
+      if (!path) return;
+      const entry = _visualizerEntries.find((x) => x.path === path);
+      if (!entry) return;
+      const isVideo = _VIDEO_RENDER_RE.test(entry.name);
+      const isImage = _IMG_RENDER_RE.test(entry.name);
+      if (!isVideo && !isImage) return;
+      // Audio track only accepts video (we pull audio out of it on export).
+      if (trackId === 'A1' && isImage) return;
+      const rect = trackEl.getBoundingClientRect();
+      const startSec = Math.max(0, (e.clientX - rect.left) / _editProject.pxPerSec);
+      if (isImage || kindHint === 'image') {
+        // Images have no duration to probe — drop straight in with the
+        // default duration (3s, resizable later).
+        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'image' }, startSec);
+        return;
+      }
+      // Video: probe duration off-screen so the clip bar is sized
+      // correctly even before the user previews it.
+      const probe = document.createElement('video');
+      probe.preload = 'metadata';
+      probe.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
+      probe.addEventListener('loadedmetadata', () => {
+        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'video', duration: probe.duration || 5 }, startSec);
+        try { probe.remove(); } catch {}
+      });
+      probe.addEventListener('error', () => {
+        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'video', duration: 5 }, startSec);
+        try { probe.remove(); } catch {}
+      });
+    });
+  }
+
+  function _initEditTimeline() {
+    ['V2', 'V1', 'A1'].forEach(_wireTrackDrop);
+    const fpsSel = document.getElementById('vis-edit-tl-fps');
+    const resSel = document.getElementById('vis-edit-tl-res');
+    const zoomEl = document.getElementById('vis-edit-tl-zoom');
+    fpsSel?.addEventListener('change', () => { _editProject.fps = parseInt(fpsSel.value, 10) || 30; });
+    resSel?.addEventListener('change', () => {
+      const [w, h] = String(resSel.value || '1920x1080').split('x').map((n) => parseInt(n, 10));
+      _editProject.width = w || 1920;
+      _editProject.height = h || 1080;
+    });
+    zoomEl?.addEventListener('input', () => {
+      _editProject.pxPerSec = parseInt(zoomEl.value, 10) || 50;
+      _renderEditRuler();
+      _renderEditTracks();
+    });
+    _renderEditRuler();
+    _renderEditTracks();
+  }
+
+  // Re-point the preview at the first V1 clip (or the supplied clip).
+  // For a video clip, both <video> elements get its src. For an image
+  // clip, the <video>s are hidden and the <img>s show the still — pan
+  // / zoom / filters still apply because both elements share the same
+  // .vis-edit-video / .vis-edit-still CSS rule chain.
+  function _retargetEditorAnchor(clipOverride) {
+    const anchor = clipOverride || _editProject.tracks.V1[0];
+    if (!anchor) return;
+    _editState.src = anchor.path;
+    const rel = (_visualizerEntries.find((e) => e.path === anchor.path)?.rel) || '';
+    const url = `dash3d-file://gallery/${encodeURI(rel)}`;
+    const origImg = document.getElementById('vis-edit-orig-img');
+    const outImg  = document.getElementById('vis-edit-out-img');
+    if (anchor.kind === 'image') {
+      // Hide video elements, show image stills.
+      if (editOrigVid) { try { editOrigVid.pause(); } catch {} editOrigVid.hidden = true; editOrigVid.removeAttribute('src'); try { editOrigVid.load(); } catch {} }
+      if (editOutVid)  { try { editOutVid.pause();  } catch {} editOutVid.hidden = true;  editOutVid.removeAttribute('src');  try { editOutVid.load();  } catch {} }
+      if (origImg) { origImg.src = url; origImg.hidden = false; }
+      if (outImg)  { outImg.src  = url; outImg.hidden  = false; }
+      // For images, the editor's playback model is "static" — set
+      // duration to the clip's chosen length and stop the playhead.
+      _editState.duration = anchor.srcDuration || 3;
+      _editState.trimIn   = 0;
+      _editState.trimOut  = _editState.duration;
+      _refreshEditTimeUi();
+    } else {
+      if (origImg) { origImg.hidden = true; origImg.removeAttribute('src'); }
+      if (outImg)  { outImg.hidden  = true; outImg.removeAttribute('src');  }
+      if (editOrigVid) { editOrigVid.hidden = false; editOrigVid.src = url; try { editOrigVid.load(); } catch {} }
+      if (editOutVid)  { editOutVid.hidden  = false; editOutVid.src  = url; try { editOutVid.load();  } catch {} }
+      // Keep the preview paused on the first frame — re-selecting a
+      // clip shouldn't auto-start playback.
+      try { editOrigVid?.pause(); editOutVid?.pause(); } catch {}
+      try { if (editOrigVid) editOrigVid.currentTime = 0; if (editOutVid) editOutVid.currentTime = 0; } catch {}
+    }
+    if (editNameEl)  editNameEl.textContent = anchor.name;
+  }
+
+  // Compatibility shim — old code still calls _renderEditClips at
+  // various points. Route it to the new timeline render.
+  function _renderEditClips() { _renderEditTracks(); _renderEditRuler(); }
+
+  function _refreshEditTimeUi() {
+    if (!editOrigVid) return;
+    const cur = editOrigVid.currentTime || 0;
+    const dur = _editState.duration || 0;
+    if (editTimeEl) editTimeEl.textContent = `${_fmtTime(cur)} / ${_fmtTime(dur)}`;
+    if (editTrimTimesEl) {
+      editTrimTimesEl.textContent = `TRIM ${_fmtTime(_editState.trimIn)} → ${_fmtTime(_editState.trimOut)}`;
+    }
+    if (editPlayheadEl && dur > 0) {
+      const pct = Math.max(0, Math.min(1, cur / dur)) * 100;
+      editPlayheadEl.style.left = `${pct}%`;
+    }
+    if (editTrimInEl && dur > 0)  editTrimInEl.style.left  = `${(_editState.trimIn  / dur) * 100}%`;
+    if (editTrimOutEl && dur > 0) editTrimOutEl.style.left = `${(_editState.trimOut / dur) * 100}%`;
+    if (editTrimRangeEl && dur > 0) {
+      const a = (_editState.trimIn  / dur) * 100;
+      const b = (_editState.trimOut / dur) * 100;
+      editTrimRangeEl.style.left  = `${a}%`;
+      editTrimRangeEl.style.width = `${Math.max(0, b - a)}%`;
+    }
+  }
+  function _refreshEditBtn() {
+    // Editor disabled for now — diagnosing CPU spikes attributed to the
+    // rec-room editor. Button stays hidden so it can't be triggered. The
+    // editor pane / state / wiring all stay in place so re-enabling is a
+    // one-line change here (remove the early return).
+    if (!editBtn) return;
+    editBtn.hidden = true;
+    editBtn.disabled = true;
+  }
+  // Open editor on the current playing video or image.
+  function _openEditor() {
+    // Editor disabled — see _refreshEditBtn note above.
+    return;
+    // eslint-disable-next-line no-unreachable
+    if (!_visualizerCurrent) return;
+    if (!_VIDEO_RENDER_RE.test(_visualizerCurrent) && !_IMG_RENDER_RE.test(_visualizerCurrent)) return;
+    _editState.src = _visualizerCurrent;
+    _editState.open = true;
+    document.body.classList.add('is-editing');
+    // Pause the main player while editing so audio doesn't double up.
+    try { visualizerVideoEl?.pause(); } catch {}
+    if (editPane) editPane.hidden = false;
+    if (visualizerWrapEl) visualizerWrapEl.style.display = 'none';
+    const url = `dash3d-file://gallery/${encodeURI((_visualizerEntries.find((e) => e.path === _editState.src)?.rel) || '')}`;
+    // Force metadata fetch (via .load()) so the video element gets its
+    // intrinsic dimensions BEFORE first paint. Without this, Chromium
+    // sometimes lazy-loads metadata only on first play, and the video
+    // renders stretched-to-container until the user hits play.
+    if (editOrigVid) { editOrigVid.src = url; try { editOrigVid.load(); } catch {} }
+    if (editOutVid)  { editOutVid.src  = url; try { editOutVid.load();  } catch {} }
+    if (editNameEl)  editNameEl.textContent = _editState.src.split(/[\\/]/).pop();
+    if (editStatusEl) { editStatusEl.textContent = ''; editStatusEl.className = 'vis-edit-status'; }
+    // Open paused — user has to press play to start. Otherwise the
+    // load() above can let the video auto-start when its metadata
+    // arrives (Chromium auto-resumes some preloaded media).
+    try { editOrigVid?.pause(); editOutVid?.pause(); } catch {}
+    try { if (editOrigVid) editOrigVid.currentTime = 0; if (editOutVid) editOutVid.currentTime = 0; } catch {}
+    // Seed the V1 track with the just-opened clip so the timeline
+    // isn't empty on first open.
+    const seedName = _editState.src.split(/[\\/]/).pop();
+    const seedKind = _IMG_RENDER_RE.test(seedName) ? 'image' : 'video';
+    _editProject.tracks.V2 = [];
+    _editProject.tracks.V1 = [{
+      id: ++_editClipSeq,
+      path: _editState.src,
+      name: seedName,
+      kind: seedKind,
+      srcDuration: seedKind === 'image' ? 3 : 0,
+      in: 0,
+      out: seedKind === 'image' ? 3 : 5,
+      start: 0,
+      track: 'V1',
+    }];
+    _editProject.tracks.A1 = [];
+    _editProject.selectedClipId = null;
+    _editProject.duration = _editTotalDuration();
+    _initEditTimeline();
+    // If we opened from an image still, immediately retarget so the
+    // <img> preview shows (skipping the video-load path).
+    if (seedKind === 'image') _retargetEditorAnchor(_editProject.tracks.V1[0]);
+    // Start each clip at fit (scale 1, no pan) — leftover pan from a
+    // previous clip is rarely what the user wants.
+    _editView.scale = 1; _editView.tx = 0; _editView.ty = 0;
+    _applyEditPreview();
+  }
+  function _closeEditor() {
+    _editState.open = false;
+    document.body.classList.remove('is-editing');
+    if (editPane) editPane.hidden = true;
+    if (visualizerWrapEl) visualizerWrapEl.style.display = '';
+    // Tear down the video decoders fully — pause alone leaves Chromium's
+    // video decoder allocated and the source buffered. Clearing src +
+    // calling load() releases the decoder + GPU textures.
+    try {
+      if (editOrigVid) { editOrigVid.pause(); editOrigVid.removeAttribute('src'); editOrigVid.load(); }
+      if (editOutVid)  { editOutVid.pause();  editOutVid.removeAttribute('src');  editOutVid.load();  }
+    } catch {}
+  }
+  // Keep the two videos in lockstep — when ORIGINAL drives play/seek,
+  // EDITED follows. We don't use editOutVid.captureStream because
+  // recordings often use codecs (mkv/h264) that don't play in muted
+  // captureStream cleanly; same-file double-load is simpler and works.
+  editOrigVid?.addEventListener('loadedmetadata', () => {
+    // Some .webm files report duration = Infinity until the user
+    // seeks past the end (Chromium quirk for clips missing duration
+    // metadata in the header). Coerce to a safe finite value so the
+    // ruler / trim handles / total-duration math don't blow up.
+    const rawDur = editOrigVid.duration;
+    _editState.duration = (Number.isFinite(rawDur) && rawDur > 0) ? rawDur : 30;
+    _editState.trimIn   = 0;
+    _editState.trimOut  = _editState.duration;
+    // Belt-and-suspenders: pause again here. Chromium occasionally
+    // resumes playback once metadata arrives if the element was
+    // previously playing under a different src — explicitly stop
+    // that so opening the editor never starts audio on its own.
+    try { editOrigVid.pause(); editOutVid?.pause(); } catch {}
+    // Push the video's natural aspect into a CSS variable so the
+    // side containers shrink-to-fit instead of letterboxing.
+    const w = editOrigVid.videoWidth;
+    const h = editOrigVid.videoHeight;
+    if (w > 0 && h > 0 && editPane) {
+      editPane.style.setProperty('--vid-aspect', `${w} / ${h}`);
+    }
+    // Record the anchor clip's duration into the timeline so its
+    // bar is sized correctly. Recompute project duration + redraw.
+    const anchor = _editProject.tracks.V1[0];
+    if (anchor) {
+      anchor.srcDuration = _editState.duration || 5;
+      anchor.in  = 0;
+      anchor.out = anchor.srcDuration;
+    }
+    _editProject.duration = _editTotalDuration();
+    _renderEditRuler();
+    _renderEditTracks();
+    _refreshEditTimeUi();
+  });
+  editOrigVid?.addEventListener('timeupdate', () => {
+    if (editOutVid && Math.abs((editOutVid.currentTime || 0) - editOrigVid.currentTime) > 0.15) {
+      try { editOutVid.currentTime = editOrigVid.currentTime; } catch {}
+    }
+    _refreshEditTimeUi();
+    if (typeof _refreshEditPlayhead === 'function') _refreshEditPlayhead();
+    // Honour trim while playing: bounce back to trimIn if we overshot.
+    if (!editOrigVid.paused && editOrigVid.currentTime >= _editState.trimOut) {
+      try { editOrigVid.currentTime = _editState.trimIn; } catch {}
+    }
+  });
+  editOrigVid?.addEventListener('play',  () => editOutVid?.play().catch(() => {}));
+  editOrigVid?.addEventListener('pause', () => editOutVid?.pause());
+  editOrigVid?.addEventListener('seeked',() => {
+    if (editOutVid) try { editOutVid.currentTime = editOrigVid.currentTime; } catch {}
+  });
+  // ── Pan + zoom on the previews ───────────────────────────────────
+  // Mouse-wheel zooms (anchored on the cursor); plain drag pans. Both
+  // sides receive the same transform so they show the same region.
+  // Double-click resets the view. Crop drag-rect still wins on the
+  // EDITED side when CROP is on (it grabs mousedown first).
+  function _wirePanZoom(el) {
+    if (!el) return;
+    el.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      // Cursor position in element-relative pixels.
+      const cx = e.clientX - r.left - r.width  / 2;
+      const cy = e.clientY - r.top  - r.height / 2;
+      const oldS = _editView.scale;
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const newS = Math.max(1, Math.min(8, oldS * factor));
+      // Shift translate so the point under the cursor stays put.
+      const ratio = newS / oldS;
+      _editView.tx = cx - (cx - _editView.tx) * ratio;
+      _editView.ty = cy - (cy - _editView.ty) * ratio;
+      _editView.scale = newS;
+      // Snap exactly back to 1× and clear pan when nearly identity.
+      if (Math.abs(newS - 1) < 0.01) { _editView.scale = 1; _editView.tx = 0; _editView.ty = 0; }
+      _applyEditPreview();
+    }, { passive: false });
+    let _panDrag = null;
+    el.addEventListener('mousedown', (e) => {
+      // Don't fight CROP drags or trim-handle drags.
+      if (_editState.cropOn && el === editOutVid) return;
+      if (e.button !== 0) return;
+      _panDrag = { x: e.clientX, y: e.clientY, tx: _editView.tx, ty: _editView.ty };
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!_panDrag) return;
+      _editView.tx = _panDrag.tx + (e.clientX - _panDrag.x);
+      _editView.ty = _panDrag.ty + (e.clientY - _panDrag.y);
+      _applyEditPreview();
+    });
+    window.addEventListener('mouseup', () => { _panDrag = null; });
+    el.addEventListener('dblclick', () => _resetEditView());
+  }
+  _wirePanZoom(editOrigVid);
+  _wirePanZoom(editOutVid);
+  // Preview-audio volume + mute. ORIGINAL is the source of audio; EDITED
+  // stays muted to avoid double-audio. The slider drives ORIGINAL.volume,
+  // the speaker button toggles muted state. We default to muted so
+  // opening the editor doesn't blast audio that was previously off.
+  (() => {
+    const volSlider = document.getElementById('vis-edit-vol');
+    const volBtn    = document.getElementById('vis-edit-vol-btn');
+    if (!volSlider || !volBtn || !editOrigVid) return;
+    // Start muted — user opts in via the speaker button or by moving
+    // the slider. EDITED stays muted permanently (avoid stereo doubling).
+    editOrigVid.muted = true;
+    editOrigVid.volume = (parseInt(volSlider.value, 10) || 80) / 100;
+    if (editOutVid) editOutVid.muted = true;
+    volBtn.classList.add('is-muted');
+    volBtn.textContent = '🔇';
+    volSlider.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(100, parseInt(volSlider.value, 10) || 0)) / 100;
+      editOrigVid.volume = v;
+      // Bumping the slider also un-mutes.
+      if (v > 0 && editOrigVid.muted) {
+        editOrigVid.muted = false;
+        volBtn.classList.remove('is-muted');
+        volBtn.textContent = '🔊';
+      }
+    });
+    volBtn.addEventListener('click', () => {
+      editOrigVid.muted = !editOrigVid.muted;
+      volBtn.classList.toggle('is-muted', editOrigVid.muted);
+      volBtn.textContent = editOrigVid.muted ? '🔇' : '🔊';
+    });
+  })();
+  // Timeline scrub: click empty timeline → seek; drag a handle →
+  // move trim. Listeners are attached directly to each handle so we
+  // don't depend on event delegation through the timeline (which can
+  // miss when the click lands on a pseudo-element or 1px off-edge).
+  let _dragHandle = null;
+  function _timelineFracFromEvent(e) {
+    if (!editTimelineEl) return 0;
+    const r = editTimelineEl.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  }
+  function _wireTrimHandle(el) {
+    if (!el) return;
+    el.addEventListener('mousedown', (e) => {
+      _dragHandle = el.dataset.handle;
+      el.classList.add('is-dragging');
+      e.preventDefault();
+      e.stopPropagation();
+    });
+  }
+  _wireTrimHandle(editTrimInEl);
+  _wireTrimHandle(editTrimOutEl);
+  // Click on the timeline body (not on a handle) — seek.
+  editTimelineEl?.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.vis-edit-trim-handle')) return; // handle wins
+    const frac = _timelineFracFromEvent(e);
+    if (editOrigVid) try { editOrigVid.currentTime = frac * _editState.duration; } catch {}
+  });
+  // ── Multi-track timeline scrubbing ──────────────────────────────
+  // Click + drag anywhere on the ruler / V2 / V1 / A1 backgrounds
+  // (NOT on a clip — clips handle their own drag) to seek the preview
+  // through the project's time axis. Position is computed against the
+  // timeline content's left edge, using the current pxPerSec.
+  let _tlScrubbing = false;
+  function _tlSeekFromEvent(e) {
+    const tlContent = document.getElementById('vis-edit-tl-content');
+    if (!tlContent || !editOrigVid) return;
+    const r = tlContent.getBoundingClientRect();
+    const x = Math.max(0, Math.min(r.width, e.clientX - r.left));
+    const pps = Math.max(1, _editProject.pxPerSec || 50);
+    const t = x / pps;
+    // Clamp by the source's actual duration so a wide project
+    // timeline doesn't park the video past its end (which would just
+    // show the last frame anyway).
+    const dur = Number.isFinite(editOrigVid.duration) && editOrigVid.duration > 0
+      ? editOrigVid.duration
+      : t;
+    try { editOrigVid.currentTime = Math.max(0, Math.min(dur, t)); } catch {}
+    if (typeof _refreshEditPlayhead === 'function') _refreshEditPlayhead();
+  }
+  const tlContentEl = document.getElementById('vis-edit-tl-content');
+  tlContentEl?.addEventListener('mousedown', (e) => {
+    // Clicks on a clip should NOT seek — the clip drag wins.
+    if (e.target.closest('.vis-edit-tl-clip')) return;
+    if (e.target.closest('.vis-edit-tl-clip-remove')) return;
+    if (e.button !== 0) return;
+    _tlScrubbing = true;
+    _tlSeekFromEvent(e);
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (_tlScrubbing) _tlSeekFromEvent(e);
+  });
+  window.addEventListener('mouseup', () => { _tlScrubbing = false; });
+  window.addEventListener('mousemove', (e) => {
+    if (!_dragHandle) return;
+    const frac = _timelineFracFromEvent(e);
+    const t = frac * _editState.duration;
+    if (_dragHandle === 'in') {
+      _editState.trimIn = Math.max(0, Math.min(t, _editState.trimOut - 0.1));
+    } else if (_dragHandle === 'out') {
+      _editState.trimOut = Math.min(_editState.duration, Math.max(t, _editState.trimIn + 0.1));
+    }
+    _refreshEditTimeUi();
+    // Seek the preview to the active trim point so the user can see
+    // exactly where they're cutting.
+    if (editOrigVid) {
+      try { editOrigVid.currentTime = (_dragHandle === 'in') ? _editState.trimIn : _editState.trimOut; } catch {}
+    }
+  });
+  window.addEventListener('mouseup', () => {
+    if (_dragHandle) {
+      editTrimInEl?.classList.remove('is-dragging');
+      editTrimOutEl?.classList.remove('is-dragging');
+    }
+    _dragHandle = null;
+  });
+  // Slider wiring — generic factory so the EDIT panel and the PROCESS
+  // popover use the same code path.
+  function _bindSlider(id, valSel, state, key, suffix, decimals) {
+    const slider = document.getElementById(id);
+    const valEl  = document.querySelector(`.vis-edit-filter-val[data-for="${valSel}"]`);
+    if (!slider || !valEl) return;
+    const paint = () => {
+      const n = parseFloat(slider.value);
+      state.sliders[key] = n;
+      valEl.textContent = decimals ? `${n.toFixed(decimals)} ${suffix}` : `${Math.round(n)}${suffix}`;
+    };
+    slider.addEventListener('input', () => {
+      paint();
+      _applyEditPreview();
+    });
+    paint();
+  }
+  _bindSlider('vis-edit-brightness',  'brightness', _editState, 'brightness', '%',  0);
+  _bindSlider('vis-edit-contrast',    'contrast',   _editState, 'contrast',   '%',  0);
+  _bindSlider('vis-edit-saturation',  'saturation', _editState, 'saturation', '%',  0);
+  _bindSlider('vis-edit-hue',         'hue',        _editState, 'hue',        '°',  0);
+  _bindSlider('vis-edit-blur',        'blur',       _editState, 'blur',       'px', 1);
+  _bindSlider('vis-proc-brightness',  'proc-brightness', _procFilterState, 'brightness', '%',  0);
+  _bindSlider('vis-proc-contrast',    'proc-contrast',   _procFilterState, 'contrast',   '%',  0);
+  _bindSlider('vis-proc-saturation',  'proc-saturation', _procFilterState, 'saturation', '%',  0);
+  _bindSlider('vis-proc-hue',         'proc-hue',        _procFilterState, 'hue',        '°',  0);
+  _bindSlider('vis-proc-blur',        'proc-blur',       _procFilterState, 'blur',       'px', 1);
+  // New EDIT sliders.
+  _bindSlider('vis-edit-sharpen',  'sharpen',  _editState, 'sharpen',  '%', 0);
+  _bindSlider('vis-edit-vignette', 'vignette', _editState, 'vignette', '%', 0);
+  _bindSlider('vis-edit-volume',   'volume',   _editState, 'volume',   '%', 0);
+  // Speed slider — uses a `×` suffix and 2-decimal formatting because
+  // the user-facing unit is a multiplier, not a percentage.
+  (function bindSpeed() {
+    const slider = document.getElementById('vis-edit-speed');
+    const valEl  = document.querySelector('.vis-edit-filter-val[data-for="speed"]');
+    if (!slider || !valEl) return;
+    const paint = () => {
+      const n = parseFloat(slider.value);
+      _editState.sliders.speed = n;
+      valEl.textContent = `${(n / 100).toFixed(2)}×`;
+    };
+    slider.addEventListener('input', () => { paint(); _applyEditPreview(); });
+    paint();
+  })();
+  // Toggle helpers
+  function _wireToggle(btn, state, key, onChange) {
+    btn?.addEventListener('click', () => {
+      state[key] = !state[key];
+      btn.classList.toggle('is-active', state[key]);
+      if (onChange) onChange();
+    });
+  }
+  _wireToggle(editAutoBtn,    _editState, 'auto',    _applyEditPreview);
+  _wireToggle(editDenoiseBtn, _editState, 'denoise', _applyEditPreview);
+  _wireToggle(document.getElementById('vis-proc-auto'),    _procFilterState, 'auto',    null);
+  _wireToggle(document.getElementById('vis-proc-denoise'), _procFilterState, 'denoise', null);
+  // EFFECTS toggles: B&W / sepia / invert (mutex — picking one clears
+  // the others), reverse, mute. flipH/flipV (TRANSFORM) handled here too
+  // since they also use the same toggle pattern.
+  function _wireMutex(btns, state, keys) {
+    btns.forEach((btn, idx) => {
+      btn?.addEventListener('click', () => {
+        const key = keys[idx];
+        const willEnable = !state[key];
+        keys.forEach((k, i) => {
+          state[k] = (i === idx) ? willEnable : false;
+          btns[i]?.classList.toggle('is-active', state[k]);
+        });
+        _applyEditPreview();
+      });
+    });
+  }
+  _wireMutex(
+    [document.getElementById('vis-edit-bw'),
+     document.getElementById('vis-edit-sepia'),
+     document.getElementById('vis-edit-invert')],
+    _editState, ['bw', 'sepia', 'invert']);
+  _wireToggle(document.getElementById('vis-edit-reverse'), _editState, 'reverse', null);
+  _wireToggle(document.getElementById('vis-edit-mute'),    _editState, 'mute',    null);
+  _wireToggle(document.getElementById('vis-edit-flip-h'),  _editState, 'flipH',   _applyEditPreview);
+  _wireToggle(document.getElementById('vis-edit-flip-v'),  _editState, 'flipV',   _applyEditPreview);
+
+  // ROTATE cycles 0 → 90 → 180 → 270 → 0 on each click.
+  const editRotateBtn = document.getElementById('vis-edit-rotate');
+  editRotateBtn?.addEventListener('click', () => {
+    _editState.rotate = (_editState.rotate + 90) % 360;
+    editRotateBtn.textContent = `↻ ROTATE ${_editState.rotate}°`;
+    editRotateBtn.classList.toggle('is-active', _editState.rotate !== 0);
+    _applyEditPreview();
+  });
+
+  // CROP toggle + reset.
+  _wireToggle(document.getElementById('vis-edit-crop-toggle'), _editState, 'cropOn', _applyEditPreview);
+  document.getElementById('vis-edit-crop-reset')?.addEventListener('click', () => {
+    _editState.crop = { x: 0, y: 0, w: 1, h: 1 };
+    _applyCropOverlay();
+  });
+
+  // Crop drag-rect interactions. Coordinates are normalized [0..1] and
+  // converted to pixels on render. Drag the body to move; drag a handle
+  // to resize. Renamed `editCropOverlay` to avoid collision with the
+  // live-mirror crop overlay declared elsewhere in this file.
+  const editCropOverlay = document.getElementById('vis-edit-crop');
+  const editCropRect    = document.getElementById('vis-edit-crop-rect');
+  function _applyCropOverlay() {
+    if (!editCropRect) return;
+    const c = _editState.crop;
+    editCropRect.style.left   = `${(c.x * 100).toFixed(2)}%`;
+    editCropRect.style.top    = `${(c.y * 100).toFixed(2)}%`;
+    editCropRect.style.width  = `${(c.w * 100).toFixed(2)}%`;
+    editCropRect.style.height = `${(c.h * 100).toFixed(2)}%`;
+  }
+  _applyCropOverlay();
+  let _editCropDrag = null;
+  function _editCropFromEvent(e, box) {
+    const r = box.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
+    };
+  }
+  editCropOverlay?.addEventListener('mousedown', (e) => {
+    if (!_editState.cropOn) return;
+    const handle = e.target.closest?.('.vis-edit-crop-handle');
+    if (handle) {
+      _editCropDrag = { mode: 'resize', side: handle.dataset.chandle, start: { ..._editState.crop } };
+    } else if (e.target.closest?.('.vis-edit-crop-rect')) {
+      const p = _editCropFromEvent(e, editCropOverlay);
+      _editCropDrag = { mode: 'move', offset: { x: p.x - _editState.crop.x, y: p.y - _editState.crop.y } };
+    }
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!_editCropDrag || !editCropOverlay) return;
+    const p = _editCropFromEvent(e, editCropOverlay);
+    const c = _editState.crop;
+    if (_editCropDrag.mode === 'move') {
+      c.x = Math.max(0, Math.min(1 - c.w, p.x - _editCropDrag.offset.x));
+      c.y = Math.max(0, Math.min(1 - c.h, p.y - _editCropDrag.offset.y));
+    } else {
+      const s = _editCropDrag.side;
+      const start = _editCropDrag.start;
+      if (s.includes('e')) c.w = Math.max(0.02, Math.min(1 - start.x, p.x - start.x));
+      if (s.includes('s')) c.h = Math.max(0.02, Math.min(1 - start.y, p.y - start.y));
+      if (s.includes('w')) {
+        const right = start.x + start.w;
+        const nx = Math.max(0, Math.min(right - 0.02, p.x));
+        c.x = nx; c.w = right - nx;
+      }
+      if (s.includes('n')) {
+        const bottom = start.y + start.h;
+        const ny = Math.max(0, Math.min(bottom - 0.02, p.y));
+        c.y = ny; c.h = bottom - ny;
+      }
+    }
+    _applyCropOverlay();
+  });
+  window.addEventListener('mouseup', () => { _editCropDrag = null; });
+
+  // TAB switching for the new COLOR / TRANSFORM / EFFECTS panes.
+  document.querySelectorAll('.vis-edit-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.tab;
+      document.querySelectorAll('.vis-edit-tab').forEach((t) =>
+        t.classList.toggle('is-active', t === tab));
+      document.querySelectorAll('.vis-edit-tabpane').forEach((p) =>
+        p.classList.toggle('is-active', p.dataset.tabpane === target));
+    });
+  });
+  // Collapse toggle on the tab strip — hides the entire tool body
+  // (sliders + presets) so the timeline + previews get more room.
+  // State stored in cfg.editToolsCollapsed and restored on next open.
+  const editTabsCollapseBtn = document.getElementById('vis-edit-tabs-collapse');
+  function _applyEditToolsCollapsed(collapsed) {
+    if (editPane) editPane.classList.toggle('is-tools-collapsed', !!collapsed);
+    if (editTabsCollapseBtn) editTabsCollapseBtn.textContent = collapsed ? '▸' : '▾';
+  }
+  (async () => {
+    try {
+      const cfg = (await window.dash?.getConfig?.()) || {};
+      _applyEditToolsCollapsed(!!cfg.editToolsCollapsed);
+    } catch {}
+  })();
+  editTabsCollapseBtn?.addEventListener('click', () => {
+    const next = !editPane?.classList.contains('is-tools-collapsed');
+    _applyEditToolsCollapsed(next);
+    window.dash?.setConfig?.({ editToolsCollapsed: next });
+  });
+
+  // EXPAND button — toggles a body class that the CSS uses to elevate
+  // the visualizer combo-pane over the rest of the combo panel and
+  // hide the captures list, giving the editor the whole canvas.
+  const editExpandBtn = document.getElementById('vis-edit-expand');
+  editExpandBtn?.addEventListener('click', () => {
+    const on = !document.body.classList.contains('has-rec-edit-expanded');
+    document.body.classList.toggle('has-rec-edit-expanded', on);
+    editExpandBtn.classList.toggle('is-active', on);
+    editExpandBtn.textContent = on ? '⛶ COLLAPSE' : '⛶';
+  });
+
+  // + ADD — append a clip to the timeline. Picks the first selected
+  // capture (or the currently-playing one if nothing is selected) and
+  // appends it to the clip list. Probes the file via a hidden video
+  // element to record its duration for the clip-bar label.
+  const editAddClipBtn = document.getElementById('vis-edit-clips-add');
+  editAddClipBtn?.addEventListener('click', () => {
+    // Source candidates: selection first, else currently-playing.
+    const candidates = _visualizerSelected.size
+      ? [..._visualizerSelected]
+      : (_visualizerCurrent ? [_visualizerCurrent] : []);
+    const pool = candidates
+      .map((abs) => _visualizerEntries.find((e) => e.path === abs))
+      .filter((e) => e && _VIDEO_RENDER_RE.test(e.name));
+    if (!pool.length) {
+      if (editStatusEl) { editStatusEl.textContent = 'SELECT A RECORDING TO ADD'; editStatusEl.className = 'vis-edit-status is-error'; }
+      return;
+    }
+    for (const e of pool) {
+      // Skip duplicates of the anchor or any already-listed clip.
+      if (_editState.clips.some((c) => c.path === e.path)) continue;
+      const clip = { path: e.path, name: e.name, duration: 0 };
+      _editState.clips.push(clip);
+      // Probe duration off-screen so the bar label can show it.
+      const probe = document.createElement('video');
+      probe.preload = 'metadata';
+      probe.src = `dash3d-file://gallery/${encodeURI(e.rel)}`;
+      probe.addEventListener('loadedmetadata', () => {
+        clip.duration = probe.duration || 0;
+        try { probe.remove(); } catch {}
+        _renderEditClips();
+      });
+      probe.addEventListener('error', () => { try { probe.remove(); } catch {} });
+    }
+    _renderEditClips();
+    if (editStatusEl) { editStatusEl.textContent = `${_editState.clips.length} clip(s) queued`; editStatusEl.className = 'vis-edit-status is-ok'; }
+  });
+
+  // SNAPSHOT — draw the current EDITED frame to a canvas (including
+  // applied CSS filter + transform) and save as PNG via comfySaveOutput
+  // (re-uses that handler since it writes to gallery/generated/image/).
+  const editSnapBtn = document.getElementById('vis-edit-snap');
+  editSnapBtn?.addEventListener('click', async () => {
+    if (!editOutVid || !editOutVid.videoWidth) return;
+    if (editStatusEl) { editStatusEl.textContent = 'SNAPSHOTTING…'; editStatusEl.className = 'vis-edit-status'; }
+    try {
+      const c = document.createElement('canvas');
+      c.width = editOutVid.videoWidth;
+      c.height = editOutVid.videoHeight;
+      const ctx = c.getContext('2d');
+      ctx.filter = _editCssFilter(_editState);
+      // Manual flip/rotate via canvas transform.
+      ctx.save();
+      ctx.translate(c.width / 2, c.height / 2);
+      if (_editState.rotate) ctx.rotate(_editState.rotate * Math.PI / 180);
+      ctx.scale(_editState.flipH ? -1 : 1, _editState.flipV ? -1 : 1);
+      ctx.translate(-c.width / 2, -c.height / 2);
+      ctx.drawImage(editOutVid, 0, 0, c.width, c.height);
+      ctx.restore();
+      const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
+      const buf  = new Uint8Array(await blob.arrayBuffer());
+      const stem = (_editState.src.split(/[\\/]/).pop() || 'frame').replace(/\.[^.]+$/, '');
+      const r = await window.dash?.comfySaveOutput?.('image', buf, '.png', `${stem} FRAME`);
+      if (r?.ok) {
+        if (editStatusEl) { editStatusEl.textContent = `SNAP SAVED · ${r.name}`; editStatusEl.className = 'vis-edit-status is-ok'; }
+        try { await refreshVisualizer(); } catch {}
+      } else {
+        if (editStatusEl) { editStatusEl.textContent = `SNAP ERROR · ${r?.error || 'unknown'}`; editStatusEl.className = 'vis-edit-status is-error'; }
+      }
+    } catch (err) {
+      if (editStatusEl) { editStatusEl.textContent = `SNAP ERROR · ${err.message || err}`; editStatusEl.className = 'vis-edit-status is-error'; }
+    }
+  });
+  // Buttons
+  editBtn?.addEventListener('click', () => { _openEditor(); playSfx?.('click'); });
+  editCloseBtn?.addEventListener('click', () => { _closeEditor(); playSfx?.('click'); });
+  // Manual playhead tick — used when there's no real <video> driving
+  // playback (e.g. V1 anchor is an image, or the user wants the
+  // timeline to scrub through V2 overlays without an underlying clip).
+  // Advances editOrigVid.currentTime manually so the playhead and
+  // overlay-timing math keep working.
+  let _editFakePlayTimer = null;
+  function _editStartFakePlay() {
+    if (_editFakePlayTimer) return;
+    const startWall = performance.now();
+    const startT    = editOrigVid?.currentTime || 0;
+    _editFakePlayTimer = setInterval(() => {
+      if (!editOrigVid) return;
+      const elapsed = (performance.now() - startWall) / 1000;
+      const dur = _editProject.duration || 30;
+      let t = startT + elapsed;
+      if (t >= dur) { t = 0; /* loop back */ }
+      try { editOrigVid.currentTime = t; } catch {}
+      if (typeof _refreshEditPlayhead === 'function') _refreshEditPlayhead();
+    }, 1000 / 30); // 30fps tick
+  }
+  function _editStopFakePlay() {
+    if (_editFakePlayTimer) { clearInterval(_editFakePlayTimer); _editFakePlayTimer = null; }
+  }
+  function _editPaintPlayBtn(isPlaying) {
+    if (editPlayBtn) editPlayBtn.textContent = isPlaying ? '⏸' : '▶';
+  }
+  editPlayBtn?.addEventListener('click', async () => {
+    if (!editOrigVid) return;
+    const v1Anchor = _editProject.tracks.V1[0];
+    const anchorIsImage = v1Anchor?.kind === 'image';
+    if (anchorIsImage || !editOrigVid.src) {
+      // No real video to play — drive the playhead manually.
+      if (_editFakePlayTimer) { _editStopFakePlay(); _editPaintPlayBtn(false); }
+      else                    { _editStartFakePlay(); _editPaintPlayBtn(true); }
+      return;
+    }
+    // Normal video path.
+    if (editOrigVid.paused) {
+      _editPaintPlayBtn(true);
+      try {
+        await editOrigVid.play();
+      } catch (err) {
+        console.warn('[edit] play failed:', err?.message || err);
+        _editPaintPlayBtn(false);
+      }
+    } else {
+      editOrigVid.pause();
+      _editPaintPlayBtn(false);
+    }
+  });
+  // Keep the button icon in sync if play state changes from somewhere
+  // else (auto-pause on trim drag, end-of-clip, etc.).
+  editOrigVid?.addEventListener('play',   () => _editPaintPlayBtn(true));
+  editOrigVid?.addEventListener('pause',  () => _editPaintPlayBtn(false));
+  editOrigVid?.addEventListener('ended',  () => _editPaintPlayBtn(false));
+  editResetBtn?.addEventListener('click', () => {
+    Object.assign(_editState.sliders, {
+      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
+      sharpen: 0, vignette: 0, speed: 100, volume: 100,
+    });
+    Object.assign(_editState, {
+      auto: false, denoise: false, bw: false, sepia: false, invert: false,
+      reverse: false, mute: false, flipH: false, flipV: false, rotate: 0,
+      cropOn: false, crop: { x: 0, y: 0, w: 1, h: 1 },
+      trimIn: 0, trimOut: _editState.duration,
+    });
+    // Slider inputs back to defaults.
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    setVal('vis-edit-brightness', 100);
+    setVal('vis-edit-contrast',   100);
+    setVal('vis-edit-saturation', 100);
+    setVal('vis-edit-hue',        0);
+    setVal('vis-edit-blur',       0);
+    setVal('vis-edit-sharpen',    0);
+    setVal('vis-edit-vignette',   0);
+    setVal('vis-edit-speed',      100);
+    setVal('vis-edit-volume',     100);
+    // Clear all toggle pressed-states.
+    document.querySelectorAll('.visualizer-edit-pane .vis-edit-toggle').forEach((b) =>
+      b.classList.remove('is-active'));
+    if (editRotateBtn) editRotateBtn.textContent = '↻ ROTATE 0°';
+    // Re-paint slider value labels.
+    document.querySelectorAll('#visualizer-edit-pane .vis-edit-filter-val').forEach((el) => {
+      const k = el.dataset.for;
+      if (!k || !(k in _editState.sliders)) return;
+      const v = _editState.sliders[k];
+      if (k === 'blur')         el.textContent = `${(v || 0).toFixed(1)} px`;
+      else if (k === 'hue')     el.textContent = `${Math.round(v || 0)}°`;
+      else if (k === 'speed')   el.textContent = `${(v / 100).toFixed(2)}×`;
+      else                      el.textContent = `${Math.round(v || 0)}%`;
+    });
+    _editView.scale = 1; _editView.tx = 0; _editView.ty = 0;
+    _applyCropOverlay();
+    _applyEditPreview();
+    _refreshEditTimeUi();
+  });
+  // Progress bar lives in the status row of the editor. We inject it
+  // once on first export; subsequent exports just update its width.
+  function _ensureExportProgressEl() {
+    let bar = document.getElementById('vis-edit-progress');
+    if (bar) return bar;
+    const wrap = document.createElement('div');
+    wrap.className = 'vis-edit-progress-wrap';
+    bar = document.createElement('div');
+    bar.id = 'vis-edit-progress';
+    bar.className = 'vis-edit-progress';
+    wrap.appendChild(bar);
+    editStatusEl?.parentNode?.insertBefore(wrap, editStatusEl);
+    return bar;
+  }
+  function _renderEditExportProgress(p) {
+    const bar = _ensureExportProgressEl();
+    const pct = Math.max(0, Math.min(100, p?.percent || 0));
+    bar.style.width = `${pct}%`;
+    if (editStatusEl) {
+      const fps = p?.fps ? ` · ${Math.round(p.fps)}fps` : '';
+      const enc = p?.encoder ? ` · ${p.encoder}` : '';
+      editStatusEl.textContent = `RENDERING ${pct.toFixed(0)}%${fps}${enc}`;
+    }
+  }
+  function _hideEditExportProgress() {
+    const bar = document.getElementById('vis-edit-progress');
+    if (bar) bar.style.width = '0%';
+  }
+  editExportBtn?.addEventListener('click', async () => {
+    if (!_editState.src) return;
+    if (editStatusEl) { editStatusEl.textContent = 'PREPARING…'; editStatusEl.className = 'vis-edit-status'; }
+    _renderEditExportProgress({ percent: 0 });
+    editExportBtn.disabled = true;
+    editExportBtn.textContent = '… RENDERING';
+    try {
+      // Wire progress updates from main → progress bar in the editor.
+      const progressUnsub = window.dash?.onEditExportProgress?.((p) => {
+        _renderEditExportProgress(p);
+      });
+      const r = await window.dash?.editExportVideo?.({
+        srcPath: _editState.src,
+        trimIn:  _editState.trimIn,
+        trimOut: _editState.trimOut,
+        sliders: { ..._editState.sliders },
+        auto:    _editState.auto,
+        denoise: _editState.denoise,
+        bw:      _editState.bw,
+        sepia:   _editState.sepia,
+        invert:  _editState.invert,
+        reverse: _editState.reverse,
+        mute:    _editState.mute,
+        flipH:   _editState.flipH,
+        flipV:   _editState.flipV,
+        rotate:  _editState.rotate,
+        crop:    _editState.cropOn ? _editState.crop : null,
+        // Project output resolution — drives overlay scaling math.
+        projectWidth:  _editProject.width  || 1920,
+        projectHeight: _editProject.height || 1080,
+        projectFps:    _editProject.fps    || 30,
+        // Anchor metadata for the export pipeline. If the first clip
+        // is an image, the export pipeline switches into still-mode
+        // for the anchor input (`-loop 1 -t <duration>`).
+        anchorKind: _editProject.tracks.V1[0]?.kind || 'video',
+        anchorDuration: _editProject.tracks.V1[0]?.srcDuration || 3,
+        // Extra appended clips (V1 track in start-time order, skipping
+        // the anchor). Each entry carries its kind + duration so still
+        // images become looped inputs in the concat.
+        extraClips: _editProject.tracks.V1
+          .slice()
+          .sort((a, b) => a.start - b.start)
+          .slice(1)
+          .map((c) => ({
+            path: c.path,
+            kind: c.kind || 'video',
+            duration: c.srcDuration || 3,
+          })),
+        // V2 image overlays — each composes on top of the V1 output
+        // for its time range. Coordinates are fractions of the
+        // project canvas (same as the preview overlay).
+        v2Overlays: _editProject.tracks.V2
+          .filter((c) => c.kind === 'image')
+          .map((c) => ({
+            path: c.path,
+            start: c.start,
+            duration: Math.max(0.05, (c.out || 0) - (c.in || 0)),
+            x: c.x, y: c.y, w: c.w, h: c.h,
+          })),
+      });
+      try { progressUnsub?.(); } catch {}
+      if (r?.ok) {
+        if (editStatusEl) { editStatusEl.textContent = `SAVED · ${r.name}`; editStatusEl.className = 'vis-edit-status is-ok'; }
+        await refreshVisualizer();
+      } else {
+        if (editStatusEl) { editStatusEl.textContent = `ERROR · ${r?.error || 'unknown'}`; editStatusEl.className = 'vis-edit-status is-error'; }
+      }
+    } catch (err) {
+      if (editStatusEl) { editStatusEl.textContent = `ERROR · ${err.message || err}`; editStatusEl.className = 'vis-edit-status is-error'; }
+    } finally {
+      editExportBtn.disabled = false;
+      editExportBtn.textContent = '▶ EXPORT';
+      _hideEditExportProgress();
+    }
+  });
+  // Initial paint — the EDIT button's enabled state is also refreshed
+  // alongside DELETE at every playback / selection change point (see
+  // the `_refreshEditBtn();` calls added next to each `_refreshDeleteBtn()`
+  // callsite).
+  _refreshEditBtn();
+  // Expose process-filter state so the existing PROCESS submission
+  // can read it without us threading it through every helper.
+  window._procFilterState = _procFilterState;
 
   // ── MUTE toggle ─────────────────────────────────────────────────
   // Drives visualizerVideoEl.muted. Persists the user's preference
@@ -6147,7 +8069,11 @@ if (comboPanel) {
   }
   async function _screencapMaybeCapture() {
     if (!_screencapOn) return;
-    if (!_mirrorStream) return; // nothing to record
+    // Need *something* to capture from — either an active live mirror
+    // or a video file currently loaded in the rec-room player. Without
+    // either, the canvas draw produces a black frame.
+    const hasVideoContent = (visualizerVideoEl && visualizerVideoEl.videoWidth > 0 && visualizerVideoEl.videoHeight > 0);
+    if (!_mirrorStream && !hasVideoContent) return;
     const now = Date.now();
     if (now - _screencapLastAt < 1000) return; // throttle 1/sec
     const dataUrl = _screencapEncode();
@@ -6529,6 +8455,10 @@ if (comboPanel) {
         holdMs,
         useGpu,
         codec: 'h264',
+        // Optional color/blur/denoise pass shared with the EDIT panel.
+        // _procFilterState is hung on window by the editor block so
+        // we don't have to thread it through every helper here.
+        filters: window._procFilterState || undefined,
       });
       try { unsub?.(); } catch {}
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
@@ -7206,12 +9136,21 @@ if (comboPanel) {
     };
   }
   function _pickRecorderMime() {
-    // Prefer VP9 for size; fall back through what Chromium supports.
+    // Prefer H.264 in MP4 — Chromium hardware-encodes that path on
+    // most systems (NVENC / QuickSync / AMF), which cuts the
+    // recording CPU cost roughly in half compared to VP9 software
+    // encode. Fall back to VP8 (cheaper than VP9) before VP9 since
+    // VP9 software encode is the heaviest combo on the renderer.
     const candidates = [
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp8,opus',
-      'video/webm;codecs=vp9',
+      'video/mp4;codecs=avc1.42E01F,mp4a.40.2', // H.264 Baseline + AAC
+      'video/mp4;codecs=avc1.4D401F,mp4a.40.2', // H.264 Main + AAC
+      'video/mp4;codecs=avc1.64001F,mp4a.40.2', // H.264 High + AAC
+      'video/mp4;codecs=avc1',
+      'video/mp4',
+      'video/webm;codecs=vp8,opus',  // VP8 next — lighter than VP9
       'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp9',
       'video/webm',
     ];
     for (const m of candidates) {
@@ -7219,6 +9158,10 @@ if (comboPanel) {
     }
     return '';
   }
+  // Reports whether the picked MediaRecorder mime is hardware-friendly
+  // (H.264 family). Used to skip the screenrec-stop transcode when the
+  // recorder already emits MP4 directly.
+  function _mimeIsMp4(mime) { return /^video\/mp4/.test(String(mime || '')); }
   // Build a MediaStream audio track from the WASAPI loopback worker.
   // The audify worker (already running for the audio visualizer) is
   // pushed into PCM-forwarding mode for the duration of recording; each
@@ -7322,15 +9265,18 @@ if (comboPanel) {
                   : _mirrorSourceOverride?.id?.startsWith?.('screen:') ? 'screen'
                   : 'unknown';
     console.log('[screenrec] recorder stream:', { audio: audioCount, video: videoCount, kind: srcKind, loopback: !!loopback?.track });
+    // Pick the mime FIRST so we can tell main whether to expect MP4
+    // bytes (hardware-encoded H.264 — skip the post-stop transcode)
+    // or WebM (software VP8/VP9 — re-encode to .mp4 on stop).
+    const mime = _pickRecorderMime();
     let started;
-    try { started = await window.dash?.screenrecStart?.(); } catch { started = null; }
+    try { started = await window.dash?.screenrecStart?.({ mime }); } catch { started = null; }
     if (!started?.ok || !started.id) {
       built.cleanup?.();
       try { await loopback?.teardown?.(); } catch {}
       playSfx?.('error');
       return;
     }
-    const mime = _pickRecorderMime();
     const opts = { videoBitsPerSecond: _recProfile.bitsPerSec || 5_000_000 };
     if (mime) opts.mimeType = mime;
     let recorder;
@@ -7345,6 +9291,15 @@ if (comboPanel) {
       return;
     }
     console.log('[screenrec] recording started:', { mime: recorder.mimeType, bps: opts.videoBitsPerSecond });
+    // Surface the chosen encoder path in the toolbar tooltip so the
+    // user can see at a glance whether they got the GPU path
+    // (H.264/MP4) or the software fallback (VP8/VP9/WebM).
+    if (screenrecBtn) {
+      const isGpu = _mimeIsMp4(recorder.mimeType);
+      screenrecBtn.title = isGpu
+        ? `REC · hardware H.264 (low CPU) · ${(opts.videoBitsPerSecond/1_000_000).toFixed(1)} Mbps`
+        : `REC · software VP8/VP9 (CPU-bound) · ${(opts.videoBitsPerSecond/1_000_000).toFixed(1)} Mbps`;
+    }
     const pending = [];
     recorder.ondataavailable = async (ev) => {
       if (!ev.data || !ev.data.size) return;
@@ -8037,6 +9992,13 @@ if (comboPanel) {
     browserResultsGridEl.hidden = !isGrid;
     browserResultsLabel.textContent =
       (isVideos ? 'VIDEOS · ' : isImages ? 'IMAGES · ' : 'RESULTS · ') + t.query;
+    // Sync the filter-chip row so the active kind reflects the result
+    // kind we're actually showing. Without this the chip can drift out
+    // of step with the data when results were loaded from a saved tab
+    // or via a kind-specific deep link.
+    for (const b of document.querySelectorAll('.browser-results-filter')) {
+      b.classList.toggle('is-active', b.dataset.kind === r.kind);
+    }
     if (r.loading && r.items.length === 0) {
       // Fresh search — show "SEARCHING…" while page 1 is in flight.
       browserResultsCount.textContent = 'SEARCHING…';
@@ -8519,6 +10481,197 @@ if (comboPanel) {
   browserBookmarksBtn?.addEventListener('click', _browserOpenBookmarksOverlay);
   browserBookmarksCloseBtn?.addEventListener('click', _browserCloseBookmarksOverlay);
 
+  // ── Video scraper overlay (yt-dlp) ───────────────────────────────
+  // SCRAPE button → ask main to run yt-dlp on the active tab's URL,
+  // filter to videos ≥ 5 min, present a downloadable list. Same stage-
+  // overlay pattern as history/bookmarks: dataset.mode = 'scrape' +
+  // detach BVs so the HTML list paints over where the page was.
+  const browserScrapeBtn        = document.getElementById('browser-scrape-btn');
+  const browserScrapePanel      = document.getElementById('browser-scrape-panel');
+  const browserScrapeListEl     = document.getElementById('browser-scrape-list');
+  const browserScrapeStatusEl   = document.getElementById('browser-scrape-status');
+  const browserScrapeTitleEl    = document.getElementById('browser-scrape-title');
+  const browserScrapeCloseBtn   = document.getElementById('browser-scrape-close-btn');
+  const browserScrapeDlAllBtn   = document.getElementById('browser-scrape-dl-all-btn');
+  // downloadId → { row, fillEl, pctEl, doneEl } so onYtDownloadProgress
+  // can route each progress event to the right row's bar.
+  const _scrapeRowsByDl = new Map();
+  // Live unsubscribe — bound once on first scrape, kept for the session.
+  let _scrapeProgressUnsub = null;
+  function _ensureScrapeProgressSubscribed() {
+    if (_scrapeProgressUnsub || !window.dash?.onYtDownloadProgress) return;
+    _scrapeProgressUnsub = window.dash.onYtDownloadProgress((p) => {
+      const row = _scrapeRowsByDl.get(p?.downloadId);
+      if (!row) return;
+      const pct = Math.max(0, Math.min(100, p.percent || 0));
+      if (row.fillEl) row.fillEl.style.width = `${pct.toFixed(1)}%`;
+      if (row.pctEl)  row.pctEl.textContent  = `${pct.toFixed(0)}%`;
+      if (p.done && row.doneEl) {
+        row.doneEl.classList.add('is-done');
+        row.doneEl.textContent = '✓';
+      }
+    });
+  }
+  function _fmtDuration(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '—';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    return h > 0
+      ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+      : `${m}:${String(s).padStart(2,'0')}`;
+  }
+  function _setScrapeStatus(text, kind) {
+    if (!browserScrapeStatusEl) return;
+    browserScrapeStatusEl.textContent = text || '';
+    browserScrapeStatusEl.hidden = !text;
+    browserScrapeStatusEl.className = `browser-history-empty${kind ? ` is-${kind}` : ''}`;
+  }
+  function _renderScrapeList(items, pageTitle) {
+    if (!browserScrapeListEl) return;
+    browserScrapeListEl.innerHTML = '';
+    _scrapeRowsByDl.clear();
+    if (browserScrapeTitleEl) {
+      browserScrapeTitleEl.textContent = pageTitle
+        ? `VIDEOS · ${items.length}`
+        : `VIDEOS FOUND · ${items.length}`;
+    }
+    if (browserScrapeDlAllBtn) browserScrapeDlAllBtn.hidden = items.length === 0;
+    for (const v of items) {
+      const li = document.createElement('li');
+      li.className = 'browser-scrape-row';
+      // Thumbnail (fallback to a placeholder block when missing).
+      const thumb = document.createElement('div');
+      thumb.className = 'browser-scrape-thumb';
+      if (v.thumbnail) {
+        const img = document.createElement('img');
+        img.src = v.thumbnail;
+        img.alt = '';
+        img.referrerPolicy = 'no-referrer';
+        img.loading = 'lazy';
+        thumb.appendChild(img);
+      }
+      const dur = document.createElement('span');
+      dur.className = 'browser-scrape-dur';
+      dur.textContent = _fmtDuration(v.duration);
+      thumb.appendChild(dur);
+
+      const body = document.createElement('div');
+      body.className = 'browser-scrape-body';
+      const title = document.createElement('div');
+      title.className = 'browser-scrape-title-row';
+      title.textContent = v.title || v.url;
+      const meta = document.createElement('div');
+      meta.className = 'browser-scrape-meta';
+      meta.textContent = v.channel || v.url;
+      const progWrap = document.createElement('div');
+      progWrap.className = 'browser-scrape-progress';
+      const progFill = document.createElement('div');
+      progFill.className = 'browser-scrape-progress-fill';
+      progWrap.appendChild(progFill);
+      body.append(title, meta, progWrap);
+
+      const right = document.createElement('div');
+      right.className = 'browser-scrape-actions';
+      const pct = document.createElement('span');
+      pct.className = 'browser-scrape-pct';
+      const dl = document.createElement('button');
+      dl.type = 'button';
+      dl.className = 'browser-scrape-dl';
+      dl.textContent = '⇩';
+      dl.title = 'Download to gallery/downloads';
+      const done = document.createElement('span');
+      done.className = 'browser-scrape-done';
+      right.append(pct, done, dl);
+
+      const rowRef = { fillEl: progFill, pctEl: pct, doneEl: done };
+      dl.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (dl.disabled) return;
+        dl.disabled = true;
+        const downloadId = `dl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        _scrapeRowsByDl.set(downloadId, rowRef);
+        _ensureScrapeProgressSubscribed();
+        pct.textContent = '0%';
+        try {
+          const r = await window.dash?.ytDownload?.({ url: v.url, downloadId });
+          if (r?.ok) {
+            done.classList.add('is-done');
+            done.textContent = '✓';
+            pct.textContent = '100%';
+            progFill.style.width = '100%';
+          } else {
+            done.classList.add('is-error');
+            done.textContent = '✕';
+            done.title = r?.error || 'download failed';
+          }
+        } catch (err) {
+          done.classList.add('is-error');
+          done.textContent = '✕';
+          done.title = err.message || 'download failed';
+        } finally {
+          dl.disabled = false;
+        }
+      });
+      li.append(thumb, body, right);
+      browserScrapeListEl.appendChild(li);
+    }
+  }
+  async function _runScrape() {
+    const tab = _browserActiveTab?.() || null;
+    const url = tab?.url || '';
+    if (!url || !/^https?:/i.test(url)) {
+      _setScrapeStatus('OPEN A WEB PAGE FIRST', 'error');
+      return;
+    }
+    _setScrapeStatus('SCANNING… (yt-dlp may take a minute on large channels)');
+    if (browserScrapeListEl) browserScrapeListEl.innerHTML = '';
+    if (browserScrapeDlAllBtn) browserScrapeDlAllBtn.hidden = true;
+    try {
+      const r = await window.dash?.ytScrapePage?.({ url, minDurationSec: 300 });
+      if (!r?.ok) {
+        _setScrapeStatus(`ERROR · ${r?.error || 'unknown'}`, 'error');
+        return;
+      }
+      if (!r.items?.length) {
+        _setScrapeStatus(r.note
+          ? `NO VIDEOS ≥ 5 MIN · ${r.note.slice(-160)}`
+          : 'NO VIDEOS ≥ 5 MIN FOUND ON THIS PAGE', 'warn');
+        return;
+      }
+      _setScrapeStatus('');
+      _renderScrapeList(r.items, true);
+    } catch (err) {
+      _setScrapeStatus(`ERROR · ${err.message || err}`, 'error');
+    }
+  }
+  function _browserOpenScrape() {
+    if (browserStageEl.dataset.mode === 'scrape') return;
+    browserStageEl.dataset.mode = 'scrape';
+    try { window.dash?.browserTabActivate?.(null); } catch {}
+    _runScrape();
+  }
+  function _browserCloseScrape() {
+    if (browserStageEl.dataset.mode !== 'scrape') return;
+    _browserApplyStageMode();
+  }
+  browserScrapeBtn?.addEventListener('click', _browserOpenScrape);
+  browserScrapeCloseBtn?.addEventListener('click', _browserCloseScrape);
+  browserScrapeDlAllBtn?.addEventListener('click', () => {
+    // Fire each row's download in sequence with a small stagger so yt-dlp
+    // doesn't get N parallel spawns racing for the same network.
+    const buttons = browserScrapeListEl?.querySelectorAll('.browser-scrape-dl:not(:disabled)');
+    if (!buttons || !buttons.length) return;
+    let i = 0;
+    const fire = () => {
+      if (i >= buttons.length) return;
+      buttons[i].click();
+      i += 1;
+      setTimeout(fire, 250);
+    };
+    fire();
+  });
+
   // ── Browser opacity toggle (zen-mode see-through) ────────────────
   // Mirrors the YT popout's OPAQUE / SEE THRU buttons. SEE THRU drops
   // the active BV's page opacity to 0.4 + transparent BV background so
@@ -8567,12 +10720,23 @@ if (comboPanel) {
     const q = browserSplashSearchEl.value.trim();
     if (q) { _browserSearchActive(q, _browserState.searchKind); browserSplashSearchEl.value = ''; }
   });
-  // WEB / IMAGES kind picker on the splash.
-  for (const btn of document.querySelectorAll('.browser-splash-kind-btn')) {
+  // Result-type filter chips (ALL · IMAGES · VIDEOS · LINKS · NEWS).
+  // Live on the results header — splash always starts as 'web'. Clicking
+  // a chip re-runs the active tab's query with the new kind so the user
+  // can pivot from a web search into image / video results without
+  // retyping. LINKS and NEWS currently fall back to 'web' on the
+  // backend but ship the kind through so a future provider can pick
+  // them up without renderer changes.
+  for (const btn of document.querySelectorAll('.browser-results-filter')) {
     btn.addEventListener('click', () => {
-      _browserState.searchKind = btn.dataset.kind || 'web';
-      for (const b of document.querySelectorAll('.browser-splash-kind-btn')) {
+      const kind = btn.dataset.kind || 'web';
+      for (const b of document.querySelectorAll('.browser-results-filter')) {
         b.classList.toggle('is-active', b === btn);
+      }
+      _browserState.searchKind = kind;
+      const t = _browserActiveTab?.();
+      if (t && t.query) {
+        _browserSearchActive(t.query, kind);
       }
     });
   }
@@ -8585,6 +10749,7 @@ if (comboPanel) {
     window.dash?.onBrowserStats?.((data) => {
       if (data && typeof data.adsBlocked    === 'number') _browserState.adsBlocked    = data.adsBlocked;
       if (data && typeof data.imagesBlocked === 'number') _browserState.imagesBlocked = data.imagesBlocked;
+      if (data && typeof data.popupsBlocked === 'number') _browserState.popupsBlocked = data.popupsBlocked;
       _browserRenderSplashStats();
     });
   } catch {}
@@ -9337,11 +11502,28 @@ function paintDiag() {
 }
 
 // FPS counter — counts requestAnimationFrame callbacks; reset each tick.
+// Only runs while the diagnostic overlay is visible. Keeping a rAF loop
+// alive at display refresh (e.g. 117 Hz here) kept the compositor + GPU
+// thread + V8 hot 24/7 across every Electron child process and produced
+// constant parallel-GC bursts across all CPU cores even when the user
+// wasn't looking at the FPS number. Now it spins up on setDiagOn(true)
+// and shuts off on setDiagOn(false).
+let _diagFpsRaf = 0;
 function _diagFrame() {
   _diagFrames++;
-  requestAnimationFrame(_diagFrame);
+  _diagFpsRaf = requestAnimationFrame(_diagFrame);
 }
-requestAnimationFrame(_diagFrame);
+function _startDiagFpsCounter() {
+  if (_diagFpsRaf) return;
+  _diagFpsRaf = requestAnimationFrame(_diagFrame);
+}
+function _stopDiagFpsCounter() {
+  if (_diagFpsRaf) {
+    cancelAnimationFrame(_diagFpsRaf);
+    _diagFpsRaf = 0;
+  }
+  _diagFrames = 0;
+}
 
 // Telemetry tick — snapshot counters, refresh main-process stats, then
 // repaint overlay if visible. FPS / DRAWS-per-second stay accurate at
@@ -9365,7 +11547,10 @@ function setDiagOn(on) {
   if (diagOverlayEl) diagOverlayEl.hidden = !_diagOn;
   diagBtnEl?.classList.toggle('is-active', !!on);
   if (_diagOn) {
+    _startDiagFpsCounter();
     pollMainStats().then(paintDiag);
+  } else {
+    _stopDiagFpsCounter();
   }
 }
 diagBtnEl?.addEventListener('click', async () => {
@@ -9399,6 +11584,28 @@ document.querySelector('#flush-ram-btn')?.addEventListener('click', async () => 
   } catch (err) {
     console.warn('[flush-ram] error:', err.message || err);
     playSfx('error');
+  } finally {
+    btn?.classList.remove('is-busy');
+  }
+});
+
+// Sleep button — asks main to put the PC into suspend. Main shows a
+// native confirm dialog first; if the user clicks "Sleep" the OS goes
+// to S3/S0ix. We click-feedback only — the resume side just sees the
+// dashboard already running when the screen comes back.
+document.querySelector('#sleep-btn')?.addEventListener('click', async () => {
+  if (!window.dash?.systemSleep) return;
+  const btn = document.querySelector('#sleep-btn');
+  btn?.classList.add('is-busy');
+  playSfx?.('click');
+  try {
+    const r = await window.dash.systemSleep();
+    if (r?.ok)             { /* fire-and-forget — OS handles the rest */ }
+    else if (r?.cancelled) { playSfx?.('click'); }
+    else                   { console.warn('[sleep] failed:', r?.error); playSfx?.('error'); }
+  } catch (err) {
+    console.warn('[sleep] error:', err.message || err);
+    playSfx?.('error');
   } finally {
     btn?.classList.remove('is-busy');
   }
@@ -11259,16 +13466,12 @@ async function saveWebcamGeom() {
 // remaining audio bars + grid read as a calm screensaver. Snapshot the
 // user's previous theme/dim before swapping so we can restore on exit
 // without writing to config (so the user's saved theme is preserved).
-const ZEN_IDLE_MS = 5 * 60 * 1000; // 5 minutes
-const ZEN_CYCLE_MS = 25000;
-// Pastel + low-contrast set used as a slow theme rotation while idle.
-const ZEN_THEMES = [
-  'pastel', 'rose', 'meadow',
-  'mint', 'lavender', 'sage',
-  'dust', 'slate', 'harbor', 'moss', 'dusk', 'paper', 'storm',
-];
+// ZEN_IDLE_MS was the no-input-before-auto-enter delay. Auto-enter has
+// been removed (zen is manual-only now); the constant stays so the
+// auto path is a one-line restore inside armZenTimer if we ever want
+// it back.
+const ZEN_IDLE_MS = 5 * 60 * 1000;
 let _zenTimer = null;
-let _zenCycleTimer = null;
 // Single timer shared by the fade-in/fade-out CSS transitions. Tracked so
 // leaveZen can cancel an in-flight entry (and vice versa) — otherwise the
 // orphaned callback re-applies its class after the opposite transition
@@ -11281,8 +13484,10 @@ let _zenTransitionTimer = null;
 const ZEN_CURSOR_HIDE_MS = 3000;
 let _zenCursorTimer = null;
 let _zenActive = false;
+// _zenPrevTheme stays for the leaveZen() safety call. Since enterZen no
+// longer changes the theme, the call is a no-op in the happy path —
+// kept defensive for any future code that does swap the palette.
 let _zenPrevTheme = null;
-let _zenIdx = 0;
 
 // Zen-mode CPU throttle. 85% ceiling keeps real headroom for HEVC/AV1
 // decode + GPU compositing of the dimmed overlay; tighter caps cause
@@ -11331,9 +13536,11 @@ function _zenVideoExit() {
 function enterZen() {
   if (_zenActive) return;
   _zenActive = true;
+  // Preserve the user's current theme — zen mode used to randomize on
+  // entry and cycle every N seconds, which made the focus mode flicker
+  // between palettes the user hadn't picked. Keep _zenPrevTheme in case
+  // we ever want to restore (no-op now since we don't change it).
   _zenPrevTheme = document.documentElement.getAttribute('data-theme') || null;
-  _zenIdx = Math.floor(Math.random() * ZEN_THEMES.length);
-  applyTheme(ZEN_THEMES[_zenIdx]);
   applyZenPower(ZEN_POWER_ZEN);
   // Kick off the entry transition; settle into the steady zen state once
   // the fade-through-black completes (CSS-only; see styles.css).
@@ -11377,11 +13584,6 @@ function enterZen() {
     clearInterval(_termTelemetryTimer);
     _termTelemetryTimer = null;
   }
-  clearInterval(_zenCycleTimer);
-  _zenCycleTimer = setInterval(() => {
-    _zenIdx = (_zenIdx + 1) % ZEN_THEMES.length;
-    applyTheme(ZEN_THEMES[_zenIdx]);
-  }, ZEN_CYCLE_MS);
   // Cycle through the 5-day forecast in the corner widget.
   _zenForecastIdx = 0;
   paintZenForecast(0);
@@ -11396,8 +13598,6 @@ function enterZen() {
 function leaveZen() {
   if (!_zenActive) return;
   _zenActive = false;
-  clearInterval(_zenCycleTimer);
-  _zenCycleTimer = null;
   // Reverse the fade-through-black on exit (CSS-only).
   clearTimeout(_zenTransitionTimer);
   clearTimeout(_zenCursorTimer);
@@ -11434,11 +13634,17 @@ function leaveZen() {
 // arm/leave path for a short window around the button click.
 let _zenForceArming = false;
 
+// Zen is now MANUAL-ONLY. Earlier this function also scheduled
+// `enterZen` after ZEN_IDLE_MS of no input — that auto-trigger has been
+// removed per user request. The function still runs on every input
+// event so an already-active zen session exits the moment the user
+// interacts, but no setTimeout is queued any more. ZEN_IDLE_MS is kept
+// in the file so re-enabling auto-zen is a one-line restore.
 function armZenTimer() {
   if (_zenForceArming) return;
   if (_zenActive) leaveZen();
   clearTimeout(_zenTimer);
-  _zenTimer = setTimeout(enterZen, ZEN_IDLE_MS);
+  _zenTimer = null;
 }
 ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart', 'touchmove']
   .forEach(ev => window.addEventListener(ev, armZenTimer, { passive: true }));
@@ -15395,8 +17601,12 @@ zenBtnEl?.addEventListener('click', (e) => {
   let _bgmPeaks = new Float32Array(0);
   let _bgmPeakHold = new Float32Array(0);
   function _bgmTargetBarCount(W) {
-    const TARGET_BAR_PX = 3;
-    return Math.max(64, Math.min(384, Math.floor(W / TARGET_BAR_PX)));
+    // Was 3 px / cap 384 — on a wide pane that gave ~250+ bars redrawn at
+    // 60 Hz. 6 px / cap 128 halves the canvas fillRect count per frame
+    // and the FFT bucket loop scales with bar count, so the entire draw
+    // path is ~2× cheaper. Visually still reads as a dense spectrum.
+    const TARGET_BAR_PX = 6;
+    return Math.max(48, Math.min(128, Math.floor(W / TARGET_BAR_PX)));
   }
   function _bgmEnsureBarArrays(n) {
     if (_bgmBarCount === n) return;
@@ -15407,11 +17617,17 @@ zenBtnEl?.addEventListener('click', (e) => {
   }
   function _bgmResolveColors() {
     const cs = getComputedStyle(bgmMeterEl || document.documentElement);
-    const audioStr = (cs.getPropertyValue('--audio-color').trim()
-                   || cs.getPropertyValue('--accent').trim()
-                   || '#5ccfff');
-    const amberStr = (cs.getPropertyValue('--amber').trim() || '#f3a83b');
-    const redStr   = (cs.getPropertyValue('--red').trim()   || '#ff3b30');
+    // Music meter uses a split palette so it visually echoes the audio
+    // input + output panels:
+    //   OUT side (left of centre) → --accent      (audio-out colour)
+    //   IN  side (right of centre) → --amber      (audio-in  colour)
+    // Falling back through --audio-color preserves the prior look on
+    // themes that haven't defined --accent specifically.
+    const accentStr = (cs.getPropertyValue('--accent').trim()
+                    || cs.getPropertyValue('--audio-color').trim()
+                    || '#5ccfff');
+    const amberStr  = (cs.getPropertyValue('--amber').trim() || '#f3a83b');
+    const redStr    = (cs.getPropertyValue('--red').trim()   || '#ff3b30');
     const parseHex = (s) => {
       let h = (s || '').trim();
       if (h.startsWith('#')) h = h.slice(1);
@@ -15419,9 +17635,12 @@ zenBtnEl?.addEventListener('click', (e) => {
       if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return null;
       return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
     };
-    const bright = parseHex(audioStr) || [80, 200, 255];
-    const dim    = [Math.round(bright[0]*0.25), Math.round(bright[1]*0.25), Math.round(bright[2]*0.25)];
-    return { bright, dim, audioStr, amberStr, redStr };
+    // OUT side = audio-out (accent / cyan). IN side = audio-in (amber).
+    const brightOut = parseHex(accentStr) || [80, 200, 255];
+    const dimOut    = [Math.round(brightOut[0]*0.25), Math.round(brightOut[1]*0.25), Math.round(brightOut[2]*0.25)];
+    const brightIn  = parseHex(amberStr) || [243, 168, 59];
+    const dimIn     = [Math.round(brightIn[0]*0.25), Math.round(brightIn[1]*0.25), Math.round(brightIn[2]*0.25)];
+    return { brightOut, dimOut, brightIn, dimIn, accentStr, amberStr, redStr };
   }
   function _bgmDrawMeter() {
     if (!bgmMeterEl || !_bgmAnalyser) return;
@@ -15467,8 +17686,11 @@ zenBtnEl?.addEventListener('click', (e) => {
       else { _bgmPeaks[i] = Math.max(0, _bgmPeaks[i] - 1.4); }
     }
 
-    // Segmented bar layout — same shape as the system audio viz.
-    const { bright, dim, redStr } = _bgmResolveColors();
+    // Segmented bar layout — same shape as the system audio viz, but the
+    // palette is split down the centre: left half uses the audio-OUT
+    // colour (accent), right half uses the audio-IN colour (amber), so
+    // the music meter visually bridges the two input/output panels.
+    const { brightOut, dimOut, brightIn, dimIn, redStr } = _bgmResolveColors();
     const gap = 1;
     const barW = Math.max(1, (W - gap * (N - 1)) / N);
     const baselineY = H * 0.78;
@@ -15479,22 +17701,36 @@ zenBtnEl?.addEventListener('click', (e) => {
     const cellH = Math.max(1, segPitch * 0.55);
     const cellGapY = segPitch - cellH;
     const reflectSegMax = Math.max(1, Math.floor(reflectH / segPitch));
-    const colors = new Array(segments);
+    // Pre-compute two segment-colour gradients — one per side — so the
+    // hot path stays a single fillStyle write per cell.
+    const colorsOut = new Array(segments);
+    const colorsIn  = new Array(segments);
     for (let s = 0; s < segments; s++) {
       const t = s / Math.max(1, segments - 1);
-      const r = Math.round(dim[0] * (1 - t) + bright[0] * t);
-      const g = Math.round(dim[1] * (1 - t) + bright[1] * t);
-      const b = Math.round(dim[2] * (1 - t) + bright[2] * t);
-      colors[s] = `rgb(${r},${g},${b})`;
+      const ro = Math.round(dimOut[0] * (1 - t) + brightOut[0] * t);
+      const go = Math.round(dimOut[1] * (1 - t) + brightOut[1] * t);
+      const bo = Math.round(dimOut[2] * (1 - t) + brightOut[2] * t);
+      colorsOut[s] = `rgb(${ro},${go},${bo})`;
+      const ri = Math.round(dimIn[0] * (1 - t) + brightIn[0] * t);
+      const gi = Math.round(dimIn[1] * (1 - t) + brightIn[1] * t);
+      const bi = Math.round(dimIn[2] * (1 - t) + brightIn[2] * t);
+      colorsIn[s] = `rgb(${ri},${gi},${bi})`;
     }
+    const halfN = N / 2;
     for (let i = 0; i < N; i++) {
       const dist = N > 1 ? Math.abs(i / (N - 1) - 0.5) * 2 : 0;
-      const scale = 1 + dist * 0.18;
+      // Bell-curve falloff (matches audio bars) — tallest at centre,
+      // ~30% at edges. Replaces the prior "smile" that exaggerated the
+      // edges; user wanted the opposite shape.
+      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
       const value = (_bgmDisplayed[i] / 100) * scale;
       const cellsLit = Math.min(segments, Math.ceil(value * segments));
       const x = i * (barW + gap);
+      // Hard split at the midpoint — left side OUT (accent), right side
+      // IN (amber). Bar index < N/2 → OUT, else → IN.
+      const palette = (i < halfN) ? colorsOut : colorsIn;
       for (let s = 0; s < cellsLit; s++) {
-        ctx2d.fillStyle = colors[s];
+        ctx2d.fillStyle = palette[s];
         const y = baselineY - (s + 1) * segPitch + cellGapY;
         ctx2d.fillRect(x, y, barW, cellH);
       }
@@ -15502,7 +17738,7 @@ zenBtnEl?.addEventListener('click', (e) => {
       if (reflectN > 0) {
         ctx2d.globalAlpha = 0.22;
         for (let s = 0; s < reflectN; s++) {
-          ctx2d.fillStyle = colors[s];
+          ctx2d.fillStyle = palette[s];
           const y = baselineY + s * segPitch;
           ctx2d.fillRect(x, y, barW, cellH);
         }
@@ -15513,7 +17749,8 @@ zenBtnEl?.addEventListener('click', (e) => {
     ctx2d.fillStyle = redStr;
     for (let i = 0; i < N; i++) {
       const dist = N > 1 ? Math.abs(i / (N - 1) - 0.5) * 2 : 0;
-      const scale = 1 + dist * 0.18;
+      // Same bell-curve falloff so peaks track the bar fill profile.
+      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
       const peakValue = (_bgmPeaks[i] / 100) * scale;
       const peakSeg = Math.min(segments, Math.ceil(peakValue * segments));
       if (peakSeg <= 0) continue;
@@ -15521,8 +17758,27 @@ zenBtnEl?.addEventListener('click', (e) => {
       const y = baselineY - peakSeg * segPitch + cellGapY;
       ctx2d.fillRect(x, y, barW, cellH);
     }
-    if (window._bgmState.playing) _bgmMeterRaf = requestAnimationFrame(_bgmDrawMeter);
+    // Re-queue only if BGM is still playing AND the music tab is visible.
+    // When the user switches away from the music tab, the in-flight draw
+    // completes once then the rAF chain stops naturally — no more canvas
+    // work happens in the background. When they come back to the tab,
+    // setComboMode calls window._bgmMaybeStartMeter() (defined below) to
+    // restart the rAF. Music itself keeps playing either way.
+    if (window._bgmState.playing && window._isMusicTabVisible) {
+      _bgmMeterRaf = requestAnimationFrame(_bgmDrawMeter);
+    } else {
+      _bgmMeterRaf = 0;
+    }
   }
+  // Exposed so setComboMode can restart the meter when the user returns
+  // to the music tab while BGM is playing. No-op if the rAF chain is
+  // already running.
+  window._bgmMaybeStartMeter = () => {
+    if (_bgmMeterRaf) return;
+    if (window._bgmState?.playing && window._isMusicTabVisible) {
+      _bgmMeterRaf = requestAnimationFrame(_bgmDrawMeter);
+    }
+  };
 
   function _bgmPaintPlayBtn() {
     if (!bgmPlayBtn) return;
@@ -15849,11 +18105,32 @@ zenBtnEl?.addEventListener('click', (e) => {
         // we include them, a dangling link would let the loop assign a
         // widget value into the wrong name and shift every subsequent
         // widget by one. This logic must mirror _genDiscoverFields.
-        const SCALAR_WIDGET_TYPES = new Set(['STRING', 'INT', 'FLOAT', 'BOOLEAN']);
+        // Widget-input detection. ComfyUI's object_info uses several
+        // dialects for the same idea — we need to recognize all of them
+        // so a widget-backed input doesn't get treated as a link-only
+        // type (and miss its widgets_values slot, shifting every later
+        // widget by one).
+        //
+        //   ["STRING", { ... }]          ← scalar widget by type name
+        //   ["INT" / "FLOAT" / "BOOLEAN" / "COMBO", { ... }]
+        //   [[ "choice", "choice", ... ], { ... }]   ← combo (inline choices)
+        //   [ "...", { choices/options: [...] } ]    ← typed COMBO (new style)
+        //
+        // Anything else is a link-only type (AUDIO, MODEL, CLIP, IMAGE,
+        // LATENT, CONDITIONING, MASK, VAE, …) and doesn't consume a
+        // widgets_values slot.
+        const SCALAR_WIDGET_TYPES = new Set(['STRING', 'INT', 'FLOAT', 'BOOLEAN', 'COMBO']);
         const isWidgetSpec = (v) => {
           if (!Array.isArray(v)) return false;
           const t = v[0];
-          return Array.isArray(t) || SCALAR_WIDGET_TYPES.has(t);
+          if (Array.isArray(t)) return true;
+          if (SCALAR_WIDGET_TYPES.has(t)) return true;
+          const opts = v[1];
+          if (opts && typeof opts === 'object'
+              && (Array.isArray(opts.choices) || Array.isArray(opts.options))) {
+            return true;
+          }
+          return false;
         };
         const orderedNames = [];
         for (const [k, v] of Object.entries(required)) {
@@ -15979,6 +18256,20 @@ zenBtnEl?.addEventListener('click', (e) => {
         else if (typeOrChoices === 'FLOAT') kind = 'float';
         else if (typeOrChoices === 'STRING') kind = 'string';
         else if (typeOrChoices === 'BOOLEAN') kind = 'bool';
+        else if (typeOrChoices === 'COMBO') {
+          // New-style typed combo. Choices live in spec[1].choices or
+          // spec[1].options.
+          kind = 'combo';
+          choices = Array.isArray(opts.choices) ? opts.choices
+                  : Array.isArray(opts.options) ? opts.options
+                  : [];
+        } else if (Array.isArray(opts.choices) || Array.isArray(opts.options)) {
+          // Newer dialect: the named type is the value type (e.g.
+          // "STRING") but the input is really a constrained combo via
+          // a choices/options array in the spec dict.
+          kind = 'combo';
+          choices = Array.isArray(opts.choices) ? opts.choices : opts.options;
+        }
         else continue; // skip linked-only types (MODEL, CLIP, IMAGE, etc.)
         entries.push({
           name: slot.name,
@@ -16876,6 +19167,31 @@ zenBtnEl?.addEventListener('click', (e) => {
     throw new Error('timeout waiting for completion');
   }
 
+  // Two-word atmospheric tag generator for audio outputs. Sequential
+  // USER NNNN names don't say anything about a song; an evocative name
+  // doubles as a quick visual cue in the gallery and the thumbnail strip.
+  // Number suffix avoids collisions; main de-collides further if needed.
+  function _genAudioName() {
+    const ADJ = [
+      'NEON', 'AURORA', 'VELVET', 'COSMIC', 'CRYSTAL', 'SHADOW',
+      'MIDNIGHT', 'SOLAR', 'AMBER', 'FROZEN', 'ECHO', 'GHOST',
+      'IRON', 'OBSIDIAN', 'PHANTOM', 'EMBER', 'SILVER', 'ARCANE',
+      'ASTRAL', 'LUMINOUS', 'OPAL', 'PLASMA', 'QUANTUM', 'RADIANT',
+      'SCARLET', 'TIDAL', 'VOID', 'EMERALD', 'ROGUE', 'STARLIT',
+    ];
+    const NOUN = [
+      'PULSE', 'CASCADE', 'MIRAGE', 'ECLIPSE', 'NEBULA', 'ORBIT',
+      'REVERIE', 'TIDE', 'VORTEX', 'WAKE', 'CIPHER', 'DRIFT',
+      'FROST', 'GLITCH', 'HORIZON', 'INFERNO', 'LUNA', 'MAZE',
+      'NOMAD', 'OASIS', 'REQUIEM', 'SIGNAL', 'TEMPEST', 'UMBRA',
+      'WAVELENGTH', 'CIRCUIT', 'GHOST', 'ASCENT', 'BLOOM', 'HOLLOW',
+    ];
+    const a = ADJ[Math.floor(Math.random() * ADJ.length)];
+    const n = NOUN[Math.floor(Math.random() * NOUN.length)];
+    const num = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+    return `${a} ${n} ${num}`;
+  }
+
   async function _genFetchAndSave(url, originalName, kind) {
     _genSetStatus('DOWNLOADING', 'ok');
     const r = await _genHttp({ method: 'GET', url });
@@ -16884,7 +19200,10 @@ zenBtnEl?.addEventListener('click', (e) => {
     // Derive extension from original filename.
     const m = (originalName || '').match(/\.([A-Za-z0-9]{2,5})$/);
     const ext = m ? '.' + m[1].toLowerCase() : '.png';
-    const result = await window.dash?.comfySaveOutput?.(kind, buf, ext);
+    // Only audio gets a creative name — image/video can be visually
+    // identified at a glance, so sequential USER NNNN is fine there.
+    const nameHint = kind === 'audio' ? _genAudioName() : '';
+    const result = await window.dash?.comfySaveOutput?.(kind, buf, ext, nameHint);
     if (result?.ok) {
       _genSetStatus(`SAVED · ${result.name}`, 'ok');
       _genShowOutput(result.path, kind, result.name);
@@ -16892,6 +19211,157 @@ zenBtnEl?.addEventListener('click', (e) => {
       _genSetStatus(`SAVE ERROR · ${result?.error || 'unknown'}`, 'error');
     }
   }
+
+  // ── Themed audio widget + fluid waveform visualizer ─────────────
+  // Drives the .gen-audio-player UI: play/pause, scrub bar, time, and a
+  // smooth curve waveform on canvas. The native <audio> element stays
+  // as the playback engine; we just hide its controls and read its
+  // state. WebAudio AnalyserNode feeds getByteTimeDomainData for an
+  // oscilloscope look, smoothed and stroked via quadraticCurveTo so
+  // the line flows rather than ticks.
+  let _genAudioCtx = null;
+  let _genAudioSrc = null;       // MediaElementSource tied to genOutputAud
+  let _genAudioAnalyser = null;
+  let _genAudioVizRaf = 0;
+  let _genAudioWired = false;
+  function _genStopAudioViz() {
+    if (_genAudioVizRaf) {
+      cancelAnimationFrame(_genAudioVizRaf);
+      _genAudioVizRaf = 0;
+    }
+  }
+  function _genWireAudioWidget() {
+    if (_genAudioWired) return; // event listeners are one-time
+    _genAudioWired = true;
+    const playBtn   = document.getElementById('gen-audio-play');
+    const iconPlay  = playBtn?.querySelector('.gen-audio-icon-play');
+    const iconPause = playBtn?.querySelector('.gen-audio-icon-pause');
+    const barEl     = document.getElementById('gen-audio-bar');
+    const progEl    = document.getElementById('gen-audio-progress');
+    const knobEl    = document.getElementById('gen-audio-knob');
+    const timeEl    = document.getElementById('gen-audio-time');
+    const vizCanvas = document.getElementById('gen-audio-viz');
+    if (!genOutputAud) return;
+    // Initialize WebAudio chain once on first play (user gesture
+    // unblocks AudioContext on Chromium).
+    function _ensureAudioGraph() {
+      if (_genAudioCtx) return;
+      try {
+        _genAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        _genAudioSrc = _genAudioCtx.createMediaElementSource(genOutputAud);
+        _genAudioAnalyser = _genAudioCtx.createAnalyser();
+        _genAudioAnalyser.fftSize = 1024;
+        _genAudioAnalyser.smoothingTimeConstant = 0.85;
+        _genAudioSrc.connect(_genAudioAnalyser);
+        _genAudioAnalyser.connect(_genAudioCtx.destination);
+      } catch (err) {
+        console.warn('[gen-audio] AudioContext init failed:', err?.message || err);
+      }
+    }
+    function _setPlayIcons(playing) {
+      if (iconPlay)  iconPlay.hidden  = playing;
+      if (iconPause) iconPause.hidden = !playing;
+    }
+    function _fmt(s) {
+      if (!Number.isFinite(s) || s < 0) s = 0;
+      const m = Math.floor(s / 60);
+      const r = Math.floor(s % 60);
+      return `${m}:${String(r).padStart(2, '0')}`;
+    }
+    function _paintTime() {
+      const cur = genOutputAud.currentTime || 0;
+      const dur = genOutputAud.duration || 0;
+      if (timeEl) timeEl.textContent = `${_fmt(cur)} / ${_fmt(dur)}`;
+      if (dur > 0) {
+        const pct = Math.max(0, Math.min(100, (cur / dur) * 100));
+        if (progEl) progEl.style.width = `${pct}%`;
+        if (knobEl) knobEl.style.left  = `${pct}%`;
+      }
+    }
+    function _drawViz() {
+      const ana = _genAudioAnalyser;
+      const c = vizCanvas;
+      if (!ana || !c) { _genAudioVizRaf = 0; return; }
+      const ctx = c.getContext('2d');
+      // Resize canvas backing store to its CSS size for crisp lines.
+      const cssW = c.clientWidth || c.width;
+      const cssH = c.clientHeight || c.height;
+      if (c.width !== cssW || c.height !== cssH) { c.width = cssW; c.height = cssH; }
+      const N = ana.fftSize;
+      const data = new Uint8Array(N);
+      ana.getByteTimeDomainData(data);
+      ctx.clearRect(0, 0, cssW, cssH);
+      // Accent-tinted glow underlay. Drawing a wider, low-alpha stroke
+      // first gives the line a soft halo without resorting to shadow
+      // blur (which is heavy when animated).
+      const accent = getComputedStyle(document.documentElement)
+        .getPropertyValue('--accent').trim() || '#3df';
+      const midY = cssH / 2;
+      const amp  = cssH * 0.45;
+      // Sample down to ~150 points for smooth curves while staying fast.
+      const step = Math.max(1, Math.floor(N / 150));
+      const pts = [];
+      for (let i = 0; i < N; i += step) {
+        const v = (data[i] - 128) / 128;
+        const x = (i / N) * cssW;
+        const y = midY + v * amp;
+        pts.push([x, y]);
+      }
+      if (pts[pts.length - 1]?.[0] < cssW) pts.push([cssW, midY]);
+      // Two-pass stroke: thick translucent halo + crisp inner line.
+      for (const pass of [{ w: 6, a: 0.18 }, { w: 1.6, a: 0.95 }]) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        // Quadratic smoothing between each consecutive pair using
+        // midpoint control points — gives a flowing curve instead of
+        // jagged segments.
+        for (let i = 1; i < pts.length - 1; i++) {
+          const [x1, y1] = pts[i];
+          const [x2, y2] = pts[i + 1];
+          const mx = (x1 + x2) / 2;
+          const my = (y1 + y2) / 2;
+          ctx.quadraticCurveTo(x1, y1, mx, my);
+        }
+        const last = pts[pts.length - 1];
+        ctx.lineTo(last[0], last[1]);
+        ctx.lineWidth   = pass.w;
+        ctx.globalAlpha = pass.a;
+        ctx.strokeStyle = accent;
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      _paintTime();
+      _genAudioVizRaf = requestAnimationFrame(_drawViz);
+    }
+    playBtn?.addEventListener('click', async () => {
+      _ensureAudioGraph();
+      try { if (_genAudioCtx?.state === 'suspended') await _genAudioCtx.resume(); } catch {}
+      if (genOutputAud.paused) genOutputAud.play().catch(() => {});
+      else genOutputAud.pause();
+    });
+    genOutputAud.addEventListener('play',  () => {
+      _setPlayIcons(true);
+      _genStopAudioViz();
+      _genAudioVizRaf = requestAnimationFrame(_drawViz);
+    });
+    genOutputAud.addEventListener('pause', () => {
+      _setPlayIcons(false);
+      _genStopAudioViz();
+      _paintTime();
+    });
+    genOutputAud.addEventListener('ended', () => { _setPlayIcons(false); _genStopAudioViz(); });
+    genOutputAud.addEventListener('timeupdate', _paintTime);
+    genOutputAud.addEventListener('loadedmetadata', _paintTime);
+    barEl?.addEventListener('click', (e) => {
+      if (!genOutputAud.duration) return;
+      const r = barEl.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      try { genOutputAud.currentTime = frac * genOutputAud.duration; } catch {}
+    });
+  }
+  // Expose stop hook to _genShowMainOutput (which is defined above and
+  // calls it via typeof guard so order doesn't matter).
+  window._genStopAudioViz = _genStopAudioViz;
 
   function _genShowOutput(absPath, kind, name) {
     if (!genOutputEl) return;
@@ -16913,6 +19383,11 @@ zenBtnEl?.addEventListener('click', (e) => {
     [genOutputImg, genOutputVid, genOutputAud].forEach((el) => {
       if (el) { el.hidden = true; try { el.removeAttribute('src'); } catch {} }
     });
+    // Hide the themed audio widget by default; only audio outputs
+    // expose it. Stop any in-flight visualizer animation.
+    const audioPlayerEl = document.getElementById('gen-audio-player');
+    if (audioPlayerEl) audioPlayerEl.hidden = true;
+    if (typeof _genStopAudioViz === 'function') _genStopAudioViz();
     if (item.kind === 'image' && genOutputImg) {
       genOutputImg.src = item.url;
       genOutputImg.hidden = false;
@@ -16921,7 +19396,9 @@ zenBtnEl?.addEventListener('click', (e) => {
       genOutputVid.hidden = false;
     } else if (item.kind === 'audio' && genOutputAud) {
       genOutputAud.src = item.url;
-      genOutputAud.hidden = false;
+      // Keep <audio> hidden — playback engine only. Show themed widget.
+      if (audioPlayerEl) audioPlayerEl.hidden = false;
+      if (typeof _genWireAudioWidget === 'function') _genWireAudioWidget();
     }
     // Reflect the active thumb selection.
     genOutputThumbs?.querySelectorAll('.gen-output-thumb').forEach((el, i) => {

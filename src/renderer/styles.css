@@ -749,11 +749,17 @@ body.is-zen .zen-overlay {
   opacity: 1;
   transform: translateY(0);
 }
-/* Non-focal zen elements render 60% darker than the clock/date/weather/power.
-   The exit button stays at full brightness so it remains obvious. */
-body.is-zen .zen-overlay > *:not(.zen-clock):not(.zen-date):not(.zen-weather):not(.zen-power):not(.zen-exit-btn),
-body.is-zen .audio-grid {
+/* Non-focal zen overlay elements render 60% darker than the clock /
+   date / weather / power. The exit button stays at full brightness so
+   it remains obvious. Audio visualizers (.audio-grid) are intentionally
+   excluded here — they stay at full opacity in zen mode so the
+   spectrum is clearly visible across the bottom of the screen. */
+body.is-zen .zen-overlay > *:not(.zen-clock):not(.zen-date):not(.zen-weather):not(.zen-power):not(.zen-exit-btn) {
   opacity: 0.4;
+  transition: opacity 600ms ease;
+}
+body.is-zen .audio-grid {
+  opacity: 1;
   transition: opacity 600ms ease;
 }
 .zen-clock {
@@ -1054,10 +1060,21 @@ body.is-zen-entering .hud .panel-stack {
   transition: opacity 500ms ease;
   pointer-events: none;
 }
-body.is-zen .hud .panel,
-body.is-zen .hud .panel-stack {
-  opacity: 0;
-  pointer-events: none;
+/* Hide every panel in zen — full opacity:0 with !important so any
+   per-panel transform / opacity rule (panel-combo expanded states,
+   themed alert pulses, etc.) can't keep the box visible. The selector
+   covers panels anywhere in the tree (inside .hud OR floating at body
+   level); the audio visualizers use .audio-grid, not .panel, so they
+   stay visible — same with the .zen-overlay clock/date/weather/power.
+   visibility flips to hidden AFTER the 800ms opacity fade so the fade
+   itself is still visible, but the box stops taking hit-tests and
+   stops painting its filter chain once it's offscreen. */
+body.is-zen .panel,
+body.is-zen .panel-stack {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  visibility: hidden;
+  transition: opacity 800ms ease, visibility 0s linear 800ms;
 }
 body.is-zen-leaving .hud .panel,
 body.is-zen-leaving .hud .panel-stack {
@@ -1163,8 +1180,11 @@ html, body {
   min-height: 120px;
   /* Same hairline outline as .panel — audio visualizers participate in
      the panel layout (see applySideArrange) so they should read as the
-     same chrome. */
+     same chrome. Background also matches `.panel { background: var(--panel-bg); }`
+     so themed backdrops (especially inverted/light variants) render the
+     audio grids and the panels with identical transparency / fill. */
   border: 1px solid var(--rule-dim);
+  background: var(--panel-bg);
   z-index: 60;
   pointer-events: auto;
   cursor: move;
@@ -1392,7 +1412,25 @@ html, body {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  /* Solid base fill. Lives on the bg-grid layer (not just body) so
+     that body.theme-invert's filter on #app inverts the bg color too,
+     which is what gives the invert wallpaper its light backdrop. */
   background-color: var(--bg);
+  z-index: 0;
+}
+/* The grid pattern is painted on a pseudo-element so we can animate
+   its opacity without also fading the solid bg-color above. Earlier
+   versions ran the pulse on .bg-grid itself, which dimmed the entire
+   page background; user feedback: "lets have the dots or lines on the
+   background fade light to dark", "the invert wallpaper is not obeying
+   the update". This split lets the dots/lines fade while the bg-color
+   stays solid — and the alternate patterns below (data-bg-pattern)
+   override background-image on ::after to slot in. */
+.bg-grid::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
   background-image:
     /* tick dot at every 80×80 cell origin */
     radial-gradient(circle, color-mix(in srgb, var(--accent) 30%, transparent) 1px, transparent 1.5px),
@@ -1403,7 +1441,6 @@ html, body {
     repeating-linear-gradient(90deg, transparent 0 39px, color-mix(in srgb, var(--accent) 8%, transparent) 39px 40px),
     repeating-linear-gradient(0deg,  transparent 0 39px, color-mix(in srgb, var(--accent) 8%, transparent) 39px 40px);
   background-size: 80px 80px, auto, auto, auto, auto;
-  z-index: 0;
   animation: bg-grid-pulse 8s ease-in-out infinite;
 }
 
@@ -1411,19 +1448,19 @@ html, body {
    Each variant swaps just the background-image. Color is themed via
    --accent so they pick up every palette automatically. Pulse stays
    the same so the variants feel like siblings of the default grid. */
-body[data-bg-pattern="dots"] .bg-grid {
+body[data-bg-pattern="dots"] .bg-grid::after {
   background-image:
     radial-gradient(circle, color-mix(in srgb, var(--accent) 32%, transparent) 1.3px, transparent 1.8px),
     radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, transparent) 0.7px, transparent 1.1px);
   background-size: 40px 40px, 12px 12px;
 }
-body[data-bg-pattern="diagonal"] .bg-grid {
+body[data-bg-pattern="diagonal"] .bg-grid::after {
   background-image:
     repeating-linear-gradient(45deg, transparent 0 39px,
       color-mix(in srgb, var(--accent) 12%, transparent) 39px 40px);
   background-size: auto;
 }
-body[data-bg-pattern="diamond"] .bg-grid {
+body[data-bg-pattern="diamond"] .bg-grid::after {
   background-image:
     repeating-linear-gradient(45deg,  transparent 0 39px,
       color-mix(in srgb, var(--accent) 10%, transparent) 39px 40px),
@@ -1431,7 +1468,7 @@ body[data-bg-pattern="diamond"] .bg-grid {
       color-mix(in srgb, var(--accent) 10%, transparent) 39px 40px);
   background-size: auto;
 }
-body[data-bg-pattern="triangles"] .bg-grid {
+body[data-bg-pattern="triangles"] .bg-grid::after {
   background-image:
     repeating-linear-gradient(60deg,  transparent 0 49px,
       color-mix(in srgb, var(--accent) 11%, transparent) 49px 50px),
@@ -1441,7 +1478,7 @@ body[data-bg-pattern="triangles"] .bg-grid {
       color-mix(in srgb, var(--accent) 11%, transparent) 49px 50px);
   background-size: auto;
 }
-body[data-bg-pattern="hexagons"] .bg-grid {
+body[data-bg-pattern="hexagons"] .bg-grid::after {
   /* Three diagonal grids 60° apart trace the outlines of hexagonal cells. */
   background-image:
     repeating-linear-gradient(30deg,  transparent 0 49px,
@@ -1452,7 +1489,7 @@ body[data-bg-pattern="hexagons"] .bg-grid {
       color-mix(in srgb, var(--accent) 12%, transparent) 49px 50px);
   background-size: auto;
 }
-body[data-bg-pattern="herringbone"] .bg-grid {
+body[data-bg-pattern="herringbone"] .bg-grid::after {
   /* Short opposing diagonals tiled into a 30×30 cell, offset by half a
      cell so they interlock instead of overlapping. */
   background-image:
@@ -1467,7 +1504,7 @@ body[data-bg-pattern="herringbone"] .bg-grid {
   background-size: 30px 30px, 30px 30px;
   background-position: 0 0, 15px 15px;
 }
-body[data-bg-pattern="circuit"] .bg-grid {
+body[data-bg-pattern="circuit"] .bg-grid::after {
   /* PCB-style: dots at every 80px node, thin connectors on the major
      grid. Reads denser than the default grid but cleaner than dots. */
   background-image:
@@ -1480,7 +1517,7 @@ body[data-bg-pattern="circuit"] .bg-grid {
 }
 /* Denser triangle lattice — three diagonal grids at 60° offsets with
    tight 30 px spacing for a busier mesh feel. */
-body[data-bg-pattern="triangles-fine"] .bg-grid {
+body[data-bg-pattern="triangles-fine"] .bg-grid::after {
   background-image:
     repeating-linear-gradient(60deg,  transparent 0 29px,
       color-mix(in srgb, var(--accent) 10%, transparent) 29px 30px),
@@ -1492,7 +1529,7 @@ body[data-bg-pattern="triangles-fine"] .bg-grid {
 }
 /* Bolder triangle lattice — 80 px cells with heavier 2 px strokes for
    architectural drafting feel. */
-body[data-bg-pattern="triangles-bold"] .bg-grid {
+body[data-bg-pattern="triangles-bold"] .bg-grid::after {
   background-image:
     repeating-linear-gradient(60deg,  transparent 0 78px,
       color-mix(in srgb, var(--accent) 14%, transparent) 78px 80px),
@@ -1504,7 +1541,7 @@ body[data-bg-pattern="triangles-bold"] .bg-grid {
 }
 /* Isometric grid — only 30°/90°/150° lines, no horizontal/vertical.
    Reads as the construction grid for an isometric drawing. */
-body[data-bg-pattern="iso-grid"] .bg-grid {
+body[data-bg-pattern="iso-grid"] .bg-grid::after {
   background-image:
     repeating-linear-gradient(30deg,  transparent 0 39px,
       color-mix(in srgb, var(--accent) 12%, transparent) 39px 40px),
@@ -1517,7 +1554,7 @@ body[data-bg-pattern="iso-grid"] .bg-grid {
 /* Spiderweb — concentric radial rings centered on the screen + 12
    radial spokes via conic-gradient. The conic wedges fan out from
    center so spokes look wider toward the edges, like a real web. */
-body[data-bg-pattern="spiderweb"] .bg-grid {
+body[data-bg-pattern="spiderweb"] .bg-grid::after {
   background-image:
     repeating-radial-gradient(circle at 50% 50%,
       transparent 0 79px,
@@ -1553,7 +1590,7 @@ body[data-bg-pattern="spiderweb"] .bg-grid {
 }
 /* Spiderweb tight — denser rings (40 px) + 16 radial spokes (22.5°).
    Reads as a tighter, more dramatic web pattern. */
-body[data-bg-pattern="spiderweb-tight"] .bg-grid {
+body[data-bg-pattern="spiderweb-tight"] .bg-grid::after {
   background-image:
     repeating-radial-gradient(circle at 50% 50%,
       transparent 0 39px,
@@ -1597,7 +1634,7 @@ body[data-bg-pattern="spiderweb-tight"] .bg-grid {
 }
 /* Radial — pure spokes, no rings. 24 radial lines = every 15°. The
    bare-bones "sunburst" or starfield-bridge cousin of spiderweb. */
-body[data-bg-pattern="radial"] .bg-grid {
+body[data-bg-pattern="radial"] .bg-grid::after {
   background-image:
     conic-gradient(from 0deg at 50% 50%,
       color-mix(in srgb, var(--accent) 11%, transparent) 0deg 0.4deg,
@@ -1654,11 +1691,19 @@ body[data-bg-pattern="radial"] .bg-grid {
 }
 
 @keyframes bg-grid-pulse {
-  0%, 100% { filter: brightness(0.55); }
-  50%      { filter: brightness(1.20); }
+  /* Opacity instead of filter brightness — see panel-pulse note. The
+     grid layer itself is a single composited surface, so animating its
+     alpha is essentially free. */
+  0%, 100% { opacity: 0.62; }
+  50%      { opacity: 1.00; }
 }
 
-/* Random per-cell dark patches over the 200px major grid */
+/* #bg-grid-overlay used to host one <div> per major grid cell that
+   flickered at random opacity ("blinds-and-spotlights"). Removed for
+   performance — every cell's opacity transition was a separate GPU
+   layer promotion and Layerize was dominating the compositor budget.
+   Container kept as an empty positioned box (the renderer clears it
+   on boot, see buildBgCells removal in app.js). */
 .bg-grid-overlay {
   position: fixed;
   inset: 0;
@@ -1666,28 +1711,28 @@ body[data-bg-pattern="radial"] .bg-grid {
   z-index: 0;
   overflow: hidden;
 }
-.bg-grid-cell {
-  position: absolute;
-  width: 200px;
-  height: 200px;
-  background: var(--bg);
-  opacity: 0;
-  transition: opacity 2.5s ease-in-out;
-}
 
-/* Panels breathe subtly. Inner elements (meters / rows) get their own,
-   stronger strobe with independent staggered phases — see element-pulse. */
+/* Panels breathe subtly via opacity instead of `filter: brightness()`.
+   Against the dark grid background, opacity 0.88 ↔ 1.0 reads as the
+   panel gently dimming and lifting — visually close to a brightness
+   pulse — but the compositor cost is dramatically lower: opacity on a
+   GPU layer is a single alpha-channel multiply, while brightness has
+   to recompute every pixel inside the element on every frame. Earlier
+   versions used filter brightness on every panel + every meter row,
+   which pegged "Layerize" at 40% in DevTools profiles. */
 .panel {
   animation: panel-pulse 8s ease-in-out infinite;
+  /* Pre-promote to a composited layer so the opacity animation runs on
+     the GPU without Chromium having to create/destroy the layer each
+     pulse cycle. Paired with the `contain: layout style paint` on the
+     main .panel rule, this turns each panel into an isolated, GPU-
+     animated unit. */
+  will-change: opacity;
 }
 @keyframes panel-pulse {
-  0%, 100% { filter: brightness(0.92); }
-  50%      { filter: brightness(1.10); }
+  0%, 100% { opacity: 0.92; }
+  50%      { opacity: 1.00; }
 }
-
-/* Per-element strobe — each datum strobes on its own phase (JS-assigned
-   random animation-delay). Range is wider than the panel's so individual
-   elements visibly throb against the panel's gentle base pulse. */
 .meter,
 .time-row,
 .temp-row,
@@ -1699,10 +1744,30 @@ body[data-bg-pattern="radial"] .bg-grid {
 .weather-left,
 .weather-right {
   animation: element-pulse 7s ease-in-out infinite;
+  will-change: opacity;
+}
+/* Productivity panel (panel-combo) is the user's main work surface.
+   Anything that pulses inside it — note tabs, chat messages, task rows —
+   reads as flickering animated squares behind the content the user is
+   reading or typing. Disable element-pulse on every descendant so the
+   productivity panel stays still while the data-readout panels keep
+   their breathing effect. */
+.panel-combo .meter,
+.panel-combo .time-row,
+.panel-combo .temp-row,
+.panel-combo .storage-row,
+.panel-combo .net-row,
+.panel-combo .gpu-mem-row,
+.panel-combo .note-tab,
+.panel-combo .chat-msg,
+.panel-combo .weather-left,
+.panel-combo .weather-right {
+  animation: none;
+  will-change: auto;
 }
 @keyframes element-pulse {
-  0%, 100% { filter: brightness(0.65); }
-  50%      { filter: brightness(1.35); }
+  0%, 100% { opacity: 0.72; }
+  50%      { opacity: 1.00; }
 }
 
 /* Hover state — panel brightens and gets a soft cyan glow.
@@ -2111,23 +2176,17 @@ body.is-zen video[data-zen-moved] {
   z-index: 5 !important;
   pointer-events: none !important;
 }
-body.is-zen .webcam-panel {
-  filter: brightness(0.5);
-  /* !important needed to override inline left/top set by the drag handler. */
-  top:    18px !important;
-  right:  18px !important;
-  left:   auto !important;
-  bottom: auto !important;
-}
-/* Mirror treatment for the terminal: pinned to the left edge,
-   vertically centered, dimmed alongside everything else. */
+/* Zen mode hides EVERY floating panel except the audio visualizers
+   and the zen overlay (clock / date / weather / power). Webcam and
+   terminal panels live at the body level (position: fixed) and were
+   not covered by `body.is-zen .hud .panel { opacity: 0 }` — they used
+   to show at half brightness. Now they fade out entirely, matching
+   the user's "all panels invisible" intent. */
+body.is-zen .webcam-panel,
 body.is-zen .terminal-panel:not([hidden]) {
-  filter: brightness(0.5);
-  top:    50% !important;
-  left:   18px !important;
-  right:  auto !important;
-  bottom: auto !important;
-  transform: translateY(-50%) !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: opacity 600ms ease;
 }
 .webcam-label {
   position: absolute;
@@ -2395,6 +2454,12 @@ body.is-zen .terminal-panel:not([hidden]) {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  /* Isolation hint to the rendering pipeline: style/layout/paint changes
+     inside this panel can't affect anything outside it. Lets Chromium
+     skip propagating Recalculate Style / Layout up the tree when a value
+     ticks inside one panel — a measurable win on a dashboard with many
+     panels that all update independently. */
+  contain: layout style paint;
 }
 
 .panel-header,
@@ -3329,8 +3394,15 @@ body.is-combo-fold-light .audio-grid {
 }
 .core-bar-fill {
   position: absolute;
-  left: 0; right: 0; bottom: 0;
-  height: 0%;
+  /* Fill is always FULL track height; visible portion is controlled by
+     transform translateY which slides the bar down by (100 - --bar-pct)%
+     of its own height. Sub-100% values keep the gradient at natural size
+     and let the track's overflow:hidden clip the off-screen portion.
+     Variable writes from JS don't trigger Layout; transform transitions
+     run pure on the compositor. */
+  --bar-pct: 0;
+  inset: 0;
+  transform: translateY(calc((100 - var(--bar-pct)) * 1%));
   background:
     repeating-linear-gradient(0deg,
       transparent 0,
@@ -3347,12 +3419,19 @@ body.is-combo-fold-light .audio-grid {
   background-size: 100% 100%, 100% var(--bar-h, 36px);
   background-position: 0 0, 0 bottom;
   background-repeat: repeat, no-repeat;
-  transition: height 0.35s ease;
+  transition: transform 0.35s ease;
+  will-change: transform;
 }
 .core-bar-peak {
   position: absolute;
   left: 0; right: 0;
-  bottom: 0%;
+  /* Anchored at the bottom edge, then translated UP by --peak-pct% of the
+     TRACK height (not its own 2 px height). We use the bar's height var
+     (--bar-h) — set once by the ResizeObserver — to translate in pixels:
+     translateY(calc(-1 * var(--bar-h) * var(--peak-pct) / 100)). Variable
+     writes don't trigger Layout; the transition runs on the compositor. */
+  --peak-pct: 0;
+  bottom: 0;
   height: 2px;
   background:
     linear-gradient(0deg,
@@ -3367,9 +3446,11 @@ body.is-combo-fold-light .audio-grid {
   background-repeat: no-repeat;
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, white);
   pointer-events: none;
+  transform: translateY(calc(-1 * var(--bar-h, 36px) * var(--peak-pct) / 100));
   /* Long-ish ease-out so each downward step (one per data update) renders
      as a smooth slide instead of a snap, matching the audio bars' feel. */
-  transition: bottom 1.6s ease-out;
+  transition: transform 1.6s ease-out;
+  will-change: transform;
 }
 /* warn/high modifiers retained as no-ops for older code paths that still
    set them. The cascade gradient communicates the same thing visually. */
@@ -3429,9 +3510,11 @@ body.is-combo-fold-light .audio-grid {
   overflow: hidden;
 }
 .gpu-bar-fill {
+  /* Same transform-based fill as .core-bar-fill — see comment there. */
+  --bar-pct: 0;
   position: absolute;
-  left: 0; right: 0; bottom: 0;
-  height: 0%;
+  inset: 0;
+  transform: translateY(calc((100 - var(--bar-pct)) * 1%));
   background:
     repeating-linear-gradient(0deg,
       transparent 0,
@@ -3448,12 +3531,14 @@ body.is-combo-fold-light .audio-grid {
   background-size: 100% 100%, 100% var(--bar-h, 36px);
   background-position: 0 0, 0 bottom;
   background-repeat: repeat, no-repeat;
-  transition: height 0.35s ease;
+  transition: transform 0.35s ease;
+  will-change: transform;
 }
 .gpu-bar-peak {
+  --peak-pct: 0;
   position: absolute;
   left: 0; right: 0;
-  bottom: 0%;
+  bottom: 0;
   height: 2px;
   background:
     linear-gradient(0deg,
@@ -3468,7 +3553,9 @@ body.is-combo-fold-light .audio-grid {
   background-repeat: no-repeat;
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, white);
   pointer-events: none;
-  transition: bottom 1.6s ease-out;
+  transform: translateY(calc(-1 * var(--bar-h, 36px) * var(--peak-pct) / 100));
+  transition: transform 1.6s ease-out;
+  will-change: transform;
 }
 .gpu-bar-fill.warn,
 .gpu-bar-fill.high { background: inherit; }
@@ -4537,6 +4624,89 @@ body.is-combo-fold-light .audio-grid {
   display: block;
   width: 100%;
 }
+/* ── Themed audio widget (GENERATE pane) ───────────────────────────
+   Native HTML5 audio chrome is white/round and clashes with the
+   dashboard. The native <audio> stays as the playback engine but
+   `controls` is removed; this widget owns the visible UI. */
+.gen-audio-player {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+  position: relative;
+  overflow: hidden;
+}
+.gen-audio-player[hidden] { display: none; }
+.gen-audio-viz {
+  display: block;
+  width: 100%;
+  height: 160px;
+  background: radial-gradient(ellipse at center,
+    color-mix(in srgb, var(--accent) 8%, #000) 0%,
+    #000 80%);
+}
+.gen-audio-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.5);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.gen-audio-play {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gen-audio-play:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.gen-audio-play svg { width: 14px; height: 14px; }
+.gen-audio-play svg[hidden] { display: none; }
+.gen-audio-bar {
+  flex: 1 1 auto;
+  position: relative;
+  height: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, #000);
+  border: 1px solid var(--rule-dim);
+  cursor: pointer;
+}
+.gen-audio-progress {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0%;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.gen-audio-knob {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 12px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.7);
+  pointer-events: none;
+}
+.gen-audio-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  min-width: 80px;
+  text-align: right;
+}
 /* When hidden, browsers' UA `[hidden] { display: none }` rule wins
    only if no later rule overrides it — `:not([hidden])` above is the
    guard, but be explicit for clarity. */
@@ -5351,7 +5521,93 @@ body.is-combo-fold-light .audio-grid {
    (the inactive one is display:none, freeing the full pane height
    for the active list). Click a row to select; double-click to
    navigate (folder) or open (file). */
-.combo-pane-explore { gap: 8px; }
+.combo-pane-explore { gap: 8px; position: relative; }
+
+/* ── Inline media viewer (Explore pane) ─────────────────────────────
+   Overlay that covers the explore section list when the user clicks
+   an image or video. Uses native <video controls> for seek / volume /
+   fullscreen / PiP so we don't have to reinvent the chrome.
+   Closes on × button or Esc. */
+.explore-viewer {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  /* Element has [hidden] in HTML; that resolves to display:none and
+     wins automatically against this flex when the viewer is closed. */
+}
+.explore-viewer-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 80%, #000);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.explore-viewer-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.explore-viewer-action {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-size: 14px;
+  width: 28px;
+  height: 26px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.explore-viewer-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.explore-viewer-close { font-size: 18px; }
+.explore-viewer-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+.explore-viewer-img,
+.explore-viewer-vid {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+}
+.explore-viewer-img { object-fit: contain; background: #000; }
+.explore-viewer-vid {
+  width: 100%;
+  height: 100%;
+  background: #000;
+  object-fit: contain;
+}
+/* When the user requests true OS-level fullscreen, the stage paints
+   edge-to-edge — hide the head row inside that mode. */
+.explore-viewer:fullscreen .explore-viewer-head { display: none; }
+.explore-viewer:fullscreen .explore-viewer-stage { padding: 0; }
+.explore-viewer:fullscreen .explore-viewer-img,
+.explore-viewer:fullscreen .explore-viewer-vid {
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+}
 .explore-tabs {
   display: flex;
   gap: 0;
@@ -5650,6 +5906,15 @@ body.is-eco-mode .audio-grid {
   box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .visualizer-source-picker[hidden] { display: none; }
+.visualizer-source-hint {
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent) 25%, transparent);
+  line-height: 1.4;
+}
 .visualizer-source-picker-head {
   display: flex;
   align-items: center;
@@ -5945,19 +6210,25 @@ body.is-eco-mode .audio-grid {
 
 .visualizer-player-wrap {
   position: relative;
-  /* Grow to fill the available vertical space in the pane (column-
-     flex), capped at 60% so the captures list still gets room. width
-     stays 100% of the pane. We drop the previous aspect-ratio: 16/9
-     because it combined with flex: 0 0 auto and a 100%/100% video
-     child caused circular sizing — the wrap was shrinking to the
-     source's intrinsic dimensions and rendering a tiny thumbnail in
-     the middle of the pane instead of filling it. */
-  flex: 1 1 auto;
+  /* Height is now driven by --rec-split-pct (set on the combo-pane via
+     the splitter drag). Defaults to 60% so the captures list still gets
+     room on first launch. width stays 100% of the pane. We drop the
+     previous aspect-ratio: 16/9 because it combined with flex: 0 0 auto
+     and a 100%/100% video child caused circular sizing. */
+  flex: 0 0 auto;
   min-height: 0;
-  max-height: 60%;
+  height: var(--rec-split-pct, 60%);
   width: 100%;
   background: #000;
   border: 1px solid var(--rule-dim);
+}
+/* The EDIT pane is the resizable thing while in edit mode — same
+   variable-driven height so the splitter works in both modes. */
+.combo-pane-visualizer .visualizer-edit-pane:not([hidden]) {
+  flex: 0 0 auto;
+  height: var(--rec-split-pct, 60%);
+  min-height: 0;
+  overflow-y: auto;
 }
 /* When a source-aspect is known (mirror or file playback), shape the
    wrap to match — width auto, aspect from the --source-aspect custom
@@ -6255,10 +6526,946 @@ body.is-eco-mode .audio-grid {
   pointer-events: none;
 }
 .visualizer-player-wrap.is-playing .visualizer-empty { display: none; }
-.visualizer-list-head {
+/* Rec-room toolbar button groups. Each .vis-btn-group is a small
+   flex cluster of related buttons, and .vis-btn-divider is the slim
+   vertical separator between clusters so the toolbar reads as
+   labelled regions rather than one long undifferentiated row. */
+.vis-btn-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.vis-btn-divider {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  flex-shrink: 0;
+}
+/* ── EDIT MODE PANE ────────────────────────────────────────────────
+   Replaces the visualizer-player-wrap visually while edit mode is on.
+   Dual videos side-by-side, scrubbable timeline with trim handles,
+   filter sliders, export controls. */
+.visualizer-edit-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--rule-dim);
+  background: rgba(0, 0, 0, 0.35);
+  padding: 6px;
+  margin-bottom: 6px;
+  /* Use every pixel of the slot the splitter assigns us. Allow the
+     editor body to scroll if the videos + timeline + tabs combined
+     exceed the available height (rare, only on very small panes). */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.visualizer-edit-pane[hidden] { display: none; }
+.vis-edit-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: nowrap;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.2cqi, 11px);
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+.vis-edit-head-group {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* Override base .explore-action (which is a fixed 22×22 square for
+   the small icon buttons used elsewhere). In the EDIT header we want
+   auto-width text buttons sized by their content. */
+.vis-edit-head .explore-action {
+  flex-shrink: 0;
+  width: auto;
+  min-width: 0;
+  padding: 3px 10px;
+  height: 26px;
+  font-size: 11px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.vis-edit-head .vis-edit-icon-btn {
+  width: 30px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+/* Centring spacers — eat free space on either side of the actions
+   group so RESET / EXPORT end up centred between title and icons. */
+.vis-edit-head-spacer {
+  flex: 1 1 0;
+  min-width: 8px;
+}
+.vis-edit-title {
+  /* Shrink-only — natural content width when there's room, ellipsis
+     when not. Pairs with margin-left: auto on the icon group so
+     RESET/EXPORT sit just after the title and the icons hard-right. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vis-edit-title em { color: var(--text); font-style: normal; }
+.vis-edit-reset { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.vis-edit-export {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.vis-edit-export:hover { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+/* Dual preview grid. Grows to fill all space NOT consumed by the
+   header above and the tools docked below. Letterbox bars within
+   each side are filled by zooming/panning the preview. */
+.vis-edit-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.vis-edit-side {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+  overflow: hidden;
+  min-height: 120px;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+.vis-edit-side-label {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.65);
+  padding: 2px 6px;
+  pointer-events: none;
+  z-index: 2;
+}
+/* Overlay layer above the EDITED video. Each active V2 image clip
+   renders here as an absolutely-positioned <img>; the selected one
+   gets a dashed border + 8 resize handles. Coordinates are stored on
+   the clip as 0..1 fractions of the .vis-edit-side container. */
+.vis-edit-overlays {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+.vis-edit-overlay {
+  position: absolute;
+  pointer-events: auto;
+  cursor: grab;
+}
+.vis-edit-overlay img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.2);
+}
+.vis-edit-overlay.is-selected {
+  outline: 2px dashed var(--accent);
+  outline-offset: 0;
+}
+.vis-edit-overlay-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border: 1px solid #000;
+  pointer-events: auto;
+  z-index: 1;
+}
+.vis-edit-overlay-handle.is-h-nw { top: -5px;  left: -5px;  cursor: nwse-resize; }
+.vis-edit-overlay-handle.is-h-n  { top: -5px;  left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.vis-edit-overlay-handle.is-h-ne { top: -5px;  right: -5px; cursor: nesw-resize; }
+.vis-edit-overlay-handle.is-h-e  { top: 50%; right: -5px; transform: translateY(-50%); cursor: ew-resize; }
+.vis-edit-overlay-handle.is-h-se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+.vis-edit-overlay-handle.is-h-s  { bottom: -5px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.vis-edit-overlay-handle.is-h-sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+.vis-edit-overlay-handle.is-h-w  { top: 50%;  left: -5px; transform: translateY(-50%); cursor: ew-resize; }
+.vis-edit-video,
+.vis-edit-still {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  /* Pan + zoom transform set by JS (_editView). transform-origin
+     stays centred so wheel-zoom anchors on the cursor in JS by
+     adjusting tx/ty after the scale change. */
+  transform-origin: center center;
+  transition: none;
+  /* Hint Chromium to put this on its own GPU compositor layer so
+     filter() + transform changes don't trigger renderer-thread paint
+     work on every animation frame. Scoped to .is-editing so the layers
+     only exist while the editor pane is actually active — leaving it
+     unconditional left composited textures alive for hidden elements,
+     bloating the compositor layer tree (visible as 65% "Layerize" in
+     DevTools profiles on idle dashboards). */
+}
+body.is-editing .vis-edit-video,
+body.is-editing .vis-edit-still {
+  will-change: transform, filter;
+  backface-visibility: hidden;
+}
+.vis-edit-video[hidden],
+.vis-edit-still[hidden] { display: none !important; }
+.vis-edit-side { display: flex; align-items: stretch; justify-content: stretch; }
+/* Timeline with trim handles + playhead. The bar itself is the
+   clickable seek surface; handles + playhead sit on top of it. */
+.vis-edit-timeline {
+  position: relative;
+  height: 14px;
+  margin: 4px 0 2px;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--accent) 8%, #000);
+  cursor: pointer;
+  user-select: none;
+  flex: 0 0 auto;
+}
+.vis-edit-trim-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  pointer-events: none;
+}
+/* Trim handles — bracket-shaped tabs sticking above and below the
+   timeline. Wide hit area + clear contrast so they're easy to grab.
+   We anchor differently on each side so the handle never clips off
+   the timeline edges: in-handle hangs to the RIGHT of its position
+   (left: trimInPct%, anchored at left edge); out-handle hangs to
+   the LEFT (right anchored via translateX(-100%)). */
+.vis-edit-trim-handle {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 10px;
+  background: var(--accent);
+  cursor: ew-resize;
+  z-index: 5;
+  box-shadow: 0 0 0 1px #000;
+}
+.vis-edit-trim-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 14px;
+  background: #000;
+  pointer-events: none;
+}
+.vis-edit-trim-handle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 6px;
+  height: 2px;
+  background: #000;
+  pointer-events: none;
+}
+.vis-edit-trim-handle.is-in {
+  /* Tab sticks RIGHT from the left trim line. */
+  transform: none;
+  border-radius: 0;
+}
+.vis-edit-trim-handle.is-out {
+  /* Tab sticks LEFT from the right trim line. */
+  transform: translateX(-100%);
+}
+.vis-edit-trim-handle:hover,
+.vis-edit-trim-handle.is-dragging {
+  background: color-mix(in srgb, var(--accent) 65%, white);
+}
+.vis-edit-playhead {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: color-mix(in srgb, var(--accent) 90%, white);
+  pointer-events: none;
+  z-index: 4;
+  transform: translateX(-50%);
+}
+.vis-edit-time-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+/* ── DaVinci-style multi-track timeline ──────────────────────────
+   V2 / V1 / A1 tracks with track headers on the left, a time ruler
+   across the top, and clips as positioned bars sized by duration.
+   Drag captures into a track to add clips; drag clips along the
+   time axis to reposition. */
+.vis-edit-tl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--accent) 4%, #000);
+  flex: 0 0 auto;
+}
+.vis-edit-tl-project {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.5);
+  border-bottom: 1px solid var(--rule-dim);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.vis-edit-tl-proj-lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.vis-edit-tl-project select {
+  -webkit-appearance: none;
+  appearance: none;
+  background:
+    /* Custom accent chevron in place of the native arrow. */
+    linear-gradient(45deg, transparent 50%, var(--accent) 50%) calc(100% - 12px) 50% / 4px 4px no-repeat,
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%) calc(100% - 8px) 50% / 4px 4px no-repeat,
+    rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--rule-dim);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 22px 2px 6px;
+  cursor: pointer;
+}
+.vis-edit-tl-project select:hover { border-color: var(--accent); }
+.vis-edit-tl-project select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.vis-edit-tl-project select option {
+  background: #000;
+  color: var(--accent);
+}
+.vis-edit-tl-project input[type="range"] {
+  width: 120px;
+}
+.vis-edit-tl-proj-hint {
+  margin-left: auto;
+  color: var(--dim);
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.vis-edit-tl-body {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  align-items: stretch;
+}
+.vis-edit-tl-headers {
+  display: grid;
+  grid-template-rows: 18px 28px 28px 28px;  /* ruler + V2 + V1 + A1 */
+  border-right: 1px solid var(--rule-dim);
+}
+.vis-edit-tl-head-spacer { /* aligns with the ruler */
+  background: rgba(0, 0, 0, 0.4);
+  border-bottom: 1px solid var(--rule-dim);
+}
+.vis-edit-tl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  background: rgba(0, 0, 0, 0.55);
+  border-bottom: 1px solid var(--rule-dim);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+}
+.vis-edit-tl-head-meta {
+  color: var(--dim);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+}
+.vis-edit-tl-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+}
+.vis-edit-tl-content {
+  position: relative;
+  /* Width set by JS — pxPerSec * projectDuration; min so it's never
+     skinnier than the visible scroll. */
+  min-width: 100%;
+}
+.vis-edit-tl-ruler {
+  height: 18px;
+  position: relative;
+  background: rgba(0, 0, 0, 0.4);
+  border-bottom: 1px solid var(--rule-dim);
+  cursor: ew-resize;
+}
+.vis-edit-tl-track { cursor: ew-resize; }
+.vis-edit-tl-clip { cursor: grab; }
+.vis-edit-tl-ruler-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.vis-edit-tl-ruler-tick.is-major { background: var(--accent); }
+.vis-edit-tl-ruler-label {
+  position: absolute;
+  top: 2px;
+  transform: translateX(2px);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.vis-edit-tl-track {
+  position: relative;
+  height: 28px;
+  background: color-mix(in srgb, var(--accent) 6%, #000);
+  border-bottom: 1px solid var(--rule-dim);
+}
+.vis-edit-tl-track.is-audio {
+  background: color-mix(in srgb, var(--red, #c44) 6%, #000);
+}
+.vis-edit-tl-track.is-drag-over {
+  background: color-mix(in srgb, var(--accent) 20%, #000);
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
+}
+.vis-edit-tl-clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: color-mix(in srgb, var(--accent) 35%, #000);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  padding: 2px 6px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  contain: layout paint;
+}
+/* Promote clips to their own layer only while the editor is open;
+   permanent will-change kept the compositor managing dead layers. */
+body.is-editing .vis-edit-tl-clip {
+  will-change: left;
+}
+.vis-edit-tl-track.is-audio .vis-edit-tl-clip {
+  background: color-mix(in srgb, var(--red, #c44) 30%, #000);
+  border-color: var(--red, #c44);
+  color: var(--red, #c44);
+}
+.vis-edit-tl-clip.is-dragging { opacity: 0.6; cursor: grabbing; z-index: 6; }
+.vis-edit-tl-clip.is-selected { box-shadow: 0 0 0 1px white inset; }
+.vis-edit-tl-clip-remove {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.vis-edit-tl-clip-remove:hover { opacity: 1; color: var(--red, #c44); }
+/* Edge resize handles on each timeline clip — drag to stretch the
+   clip along the time axis. The handle is visually a thin accent
+   strip flush with the edge; it gets a brighter highlight on hover
+   so the affordance reads even at low contrast. */
+.vis-edit-tl-clip-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  background: color-mix(in srgb, var(--accent) 55%, #000);
+  cursor: ew-resize;
+  z-index: 2;
+}
+.vis-edit-tl-clip-resize.is-left  { left: 0;  border-right: 1px solid var(--accent); }
+.vis-edit-tl-clip-resize.is-right { right: 0; border-left:  1px solid var(--accent); }
+.vis-edit-tl-clip-resize:hover {
+  background: color-mix(in srgb, var(--accent) 80%, white);
+}
+.vis-edit-tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: white;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.vis-edit-clips-label {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+.vis-edit-clips-track {
+  flex: 1 1 auto;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, #000);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.vis-edit-clips-track:empty::before {
+  content: 'NO CLIPS — HIT + ADD TO APPEND';
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: 0.06em;
+  padding: 0 4px;
+}
+.vis-edit-clip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--accent) 18%, #000);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  cursor: grab;
+  white-space: nowrap;
+  user-select: none;
+}
+.vis-edit-clip.is-anchor {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 32%, #000);
+}
+.vis-edit-clip.is-dragging { opacity: 0.4; cursor: grabbing; }
+.vis-edit-clip .vis-edit-clip-dur {
+  color: var(--muted);
+  font-size: 9px;
+}
+.vis-edit-clip .vis-edit-clip-remove {
+  background: transparent;
+  border: none;
+  color: var(--red, #e55);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+.vis-edit-clip .vis-edit-clip-remove:hover { color: white; }
+.vis-edit-clips-add {
+  flex: 0 0 auto;
+}
+.vis-edit-time { color: var(--text); }
+.vis-edit-trim-times { margin-left: auto; color: var(--accent); }
+.vis-edit-vol-btn {
+  font-size: 12px;
+  padding: 0 6px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.vis-edit-vol-btn.is-muted { color: var(--red, #e55); border-color: var(--red, #e55); }
+.vis-edit-vol {
+  width: 80px;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, #000);
+  border: 1px solid var(--rule-dim);
+  outline: none;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+}
+.vis-edit-vol::-webkit-slider-runnable-track { height: 4px; background: transparent; border: none; }
+.vis-edit-vol::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 12px;
+  margin-top: -5px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.7);
+}
+/* Filter panel. Reused inside the PROCESS popover via a <details>
+   wrapper — same .vis-edit-filter-row class so the layout matches. */
+.vis-edit-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 16px;
+  row-gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.vis-edit-filter-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 56px;
+  align-items: center;
+  gap: 6px;
+}
+.vis-edit-filter-label {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.vis-edit-filter-val {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+  text-align: right;
+}
+.vis-edit-toggle-row {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 6px;
+}
+.vis-edit-toggle.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.vis-edit-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  min-height: 14px;
+}
+.vis-edit-status.is-error { color: var(--red); }
+.vis-edit-status.is-ok    { color: var(--ok); }
+.vis-edit-progress-wrap {
+  width: 100%;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, #000);
+  border: 1px solid var(--rule-dim);
+  margin: 2px 0;
+  overflow: hidden;
+}
+.vis-edit-progress {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 60%, transparent) 0%,
+    var(--accent) 100%);
+  transition: width 0.15s linear;
+}
+/* Tab strip + bodies. The body fills the remaining pane height so the
+   tools have room to breathe instead of being crammed into the top. */
+.vis-edit-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.vis-edit-tab {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  border-bottom: none;
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.vis-edit-tab:hover { color: var(--accent); border-color: var(--accent); }
+.vis-edit-tab.is-active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+}
+.vis-edit-tabbody {
+  display: flex;
+  flex-direction: column;
+}
+.vis-edit-tabpane { display: none; padding: 8px 4px 4px; }
+.vis-edit-tabpane.is-active { display: block; }
+/* Collapse toggle on the right of the tab strip. */
+.vis-edit-tabs-collapse {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  width: 28px;
+  height: 22px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.vis-edit-tabs-collapse:hover { color: var(--accent); border-color: var(--accent); }
+/* When collapsed, hide everything that's only used for tool editing:
+   the tab strip's chosen pane body, the timeline buttons (timeline +
+   trim handles still useful — keep them), and the per-pane filters. */
+.visualizer-edit-pane.is-tools-collapsed .vis-edit-tabbody {
+  display: none;
+}
+.vis-edit-help {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  padding-top: 4px;
+  line-height: 1.5;
+}
+/* Crop overlay on the EDITED preview — draggable rect with 8 handles,
+   sits on top of the video. Coordinates are 0..1 (relative to video
+   element); the ffmpeg export pass converts to source pixels. */
+.vis-edit-crop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.vis-edit-crop:not([hidden]) { pointer-events: auto; }
+.vis-edit-crop-rect {
+  position: absolute;
+  left: 10%;
+  top: 10%;
+  width: 80%;
+  height: 80%;
+  border: 2px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  cursor: move;
+}
+.vis-edit-crop-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border: 1px solid #000;
+}
+.vis-edit-crop-handle.is-h-nw { top: -5px;  left: -5px;  cursor: nwse-resize; }
+.vis-edit-crop-handle.is-h-n  { top: -5px;  left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.vis-edit-crop-handle.is-h-ne { top: -5px;  right: -5px; cursor: nesw-resize; }
+.vis-edit-crop-handle.is-h-e  { top: 50%; right: -5px; transform: translateY(-50%); cursor: ew-resize; }
+.vis-edit-crop-handle.is-h-se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+.vis-edit-crop-handle.is-h-s  { bottom: -5px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.vis-edit-crop-handle.is-h-sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+.vis-edit-crop-handle.is-h-w  { top: 50%;  left: -5px; transform: translateY(-50%); cursor: ew-resize; }
+/* EXPAND mode — when the user clicks the ⛶ button, the editor takes
+   over the whole combo panel. We use a `body.has-rec-edit-expanded`
+   class set by JS that:
+   - elevates the visualizer combo-pane above its siblings
+   - hides the captures list so the videos own the screen
+   - pins the edit pane to fill the visualizer column entirely */
+body.has-rec-edit-expanded .combo-panel { position: relative; }
+body.has-rec-edit-expanded .combo-panel .combo-pane {
+  display: none;
+}
+body.has-rec-edit-expanded .combo-panel .combo-pane-visualizer {
+  display: flex !important;
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: var(--bg, #000);
+}
+body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-player-wrap,
+body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-list-head,
+body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-list,
+body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-split {
+  display: none !important;
+}
+body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-edit-pane {
+  flex: 1 1 auto !important;
+  height: auto !important;
+  max-height: none !important;
+}
+/* Compact `<details>` wrapper for the filter section inside the
+   PROCESS popover. */
+.visualizer-process-filters {
+  border-top: 1px solid var(--rule-dim);
+  border-bottom: 1px solid var(--rule-dim);
+  padding: 4px 0;
+  margin: 4px 0;
+}
+.visualizer-process-filters > summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 2px 0;
+}
+.visualizer-process-filters > summary::-webkit-details-marker { display: none; }
+.visualizer-process-filters[open] > summary { color: var(--accent); }
+.visualizer-process-filters > .vis-edit-filter-row { margin-top: 4px; }
+/* ── Splitter between player/edit area and captures list ────────────
+   Slim horizontal bar; user drags it to redistribute vertical space.
+   The combo-pane has --rec-split-pct that drives the player-wrap +
+   edit-pane height (see above). Hover/active accent state makes the
+   handle visible without dominating the layout. */
+.visualizer-split {
+  flex: 0 0 auto;
+  height: 6px;
+  margin: 2px 0;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid var(--rule-dim);
+  cursor: ns-resize;
+  position: relative;
+  user-select: none;
+}
+.visualizer-split:hover,
+.visualizer-split.is-dragging {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  border-color: var(--accent);
+}
+.visualizer-split::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  opacity: 0.5;
+}
+.visualizer-split:hover::before { opacity: 1; }
+/* ── Themed range sliders ────────────────────────────────────────────
+   Replaces the native chrome on every <input type="range"> inside the
+   EDIT panel, the PROCESS filter section, and any other dashboard
+   slider that opts in via `.vis-edit-filter-row` / `.gen-dim-slider`.
+   Track is a thin accent-tinted strip; thumb is a hard accent square
+   (matches the rest of the chrome rather than a chrome circle). */
+.vis-edit-filter-row input[type="range"],
+.visualizer-process-filters input[type="range"],
+.vis-edit-tl-project input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, #000);
+  border: 1px solid var(--rule-dim);
+  outline: none;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+}
+.vis-edit-filter-row input[type="range"]::-webkit-slider-runnable-track,
+.visualizer-process-filters input[type="range"]::-webkit-slider-runnable-track,
+.vis-edit-tl-project input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: transparent;
+  border: none;
+}
+.vis-edit-filter-row input[type="range"]::-webkit-slider-thumb,
+.visualizer-process-filters input[type="range"]::-webkit-slider-thumb,
+.vis-edit-tl-project input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 14px;
+  margin-top: -6px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.7);
+}
+.vis-edit-filter-row input[type="range"]:hover::-webkit-slider-thumb,
+.visualizer-process-filters input[type="range"]:hover::-webkit-slider-thumb,
+.vis-edit-tl-project input[type="range"]:hover::-webkit-slider-thumb {
+  background: color-mix(in srgb, var(--accent) 70%, white);
+}
+.vis-edit-filter-row input[type="range"]:focus,
+.visualizer-process-filters input[type="range"]:focus,
+.vis-edit-tl-project input[type="range"]:focus {
+  border-color: var(--accent);
+}
+.vis-edit-filter-row input[type="range"]::-moz-range-thumb,
+.visualizer-process-filters input[type="range"]::-moz-range-thumb,
+.vis-edit-tl-project input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 14px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  cursor: pointer;
+}
+/* Themed scrollbars on the editor's timeline scroll area — match the
+   accent + dark chrome instead of the system grey. */
+.vis-edit-tl-scroll::-webkit-scrollbar { height: 10px; width: 10px; }
+.vis-edit-tl-scroll::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--accent) 6%, #000);
+  border-top: 1px solid var(--rule-dim);
+}
+.vis-edit-tl-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+}
+.vis-edit-tl-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.vis-edit-tl-scroll::-webkit-scrollbar-corner { background: #000; }
+.visualizer-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   padding: 4px 8px;
   border: 1px solid var(--rule-dim);
   border-bottom: none;
@@ -6729,6 +7936,115 @@ body.is-eco-mode .audio-grid {
 }
 .browser-stage[data-mode="history"]   #browser-history          { display: flex; }
 .browser-stage[data-mode="bookmarks"] #browser-bookmarks-panel  { display: flex; }
+.browser-stage[data-mode="scrape"]    #browser-scrape-panel     { display: flex; }
+
+/* ── Video scraper overlay (browser pane) ─────────────────────────
+   Reuses .browser-history container chrome; rows have an extra
+   thumbnail block + a download button + an inline progress bar that
+   fills under the title row while yt-dlp pulls the file. */
+.browser-scrape-list { gap: 6px; }
+.browser-scrape-row {
+  display: grid;
+  grid-template-columns: 120px 1fr auto;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 70%, #000);
+  align-items: center;
+  list-style: none;
+}
+.browser-scrape-thumb {
+  position: relative;
+  width: 120px;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+  overflow: hidden;
+}
+.browser-scrape-thumb img {
+  width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+.browser-scrape-dur {
+  position: absolute; right: 4px; bottom: 4px;
+  background: rgba(0, 0, 0, 0.78);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  padding: 1px 4px;
+  letter-spacing: 0.04em;
+}
+.browser-scrape-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.browser-scrape-title-row {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.browser-scrape-meta {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.browser-scrape-progress {
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, #000);
+  border: 1px solid var(--rule-dim);
+  margin-top: 2px;
+  overflow: hidden;
+}
+.browser-scrape-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--amber)));
+  transition: width 0.15s linear;
+}
+.browser-scrape-actions {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.browser-scrape-pct { min-width: 36px; text-align: right; }
+.browser-scrape-done { width: 14px; text-align: center; }
+.browser-scrape-done.is-done  { color: var(--accent); }
+.browser-scrape-done.is-error { color: var(--red); }
+.browser-scrape-dl {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-size: 14px;
+  width: 28px; height: 28px;
+  cursor: pointer;
+  padding: 0;
+}
+.browser-scrape-dl:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.browser-scrape-dl:disabled { opacity: 0.4; cursor: default; }
+.browser-scrape-download-all {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  cursor: pointer;
+  margin-right: 6px;
+}
+.browser-scrape-download-all:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.browser-history-empty.is-warn  { color: var(--amber); }
+.browser-history-empty.is-error { color: var(--red); }
 
 /* Per-list-row × delete button — only used by the bookmarks list. */
 .browser-history-list .h-remove {
@@ -6891,6 +8207,31 @@ body.is-eco-mode .audio-grid {
   letter-spacing: 0.18em;
   color: var(--muted);
   margin-left: auto;
+}
+.browser-results-filters {
+  display: flex;
+  gap: 4px;
+  margin-left: 12px;
+  align-items: center;
+}
+.browser-results-filter {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.browser-results-filter:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.browser-results-filter.is-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .browser-results-list {
   list-style: none;

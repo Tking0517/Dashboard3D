@@ -42,10 +42,41 @@ contextBridge.exposeInMainWorld('dash', {
   // directly so submission/polling don't need IPC.
   comfyListWorkflows: () => ipcRenderer.invoke('comfy-list-workflows'),
   comfyLoadWorkflow:  (file) => ipcRenderer.invoke('comfy-load-workflow', file),
-  comfySaveOutput:    (kind, bytes, ext) => ipcRenderer.invoke('comfy-save-output', kind, bytes, ext),
+  comfySaveOutput:    (kind, bytes, ext, nameHint) => ipcRenderer.invoke('comfy-save-output', kind, bytes, ext, nameHint),
   // CORS-bypassing HTTP proxy via main's Node http module. Used by
   // the GENERATE pane to talk to ComfyUI (default 127.0.0.1:8000).
   comfyHttp:          (opts) => ipcRenderer.invoke('comfy-http', opts),
+  // Rec-room EDIT panel: ffmpeg-based trim + color/blur/denoise export.
+  editExportVideo:    (opts) => ipcRenderer.invoke('edit-export-video', opts),
+  // Streams ffmpeg progress (percent, fps, encoder) during edit
+  // export. Returns an unsubscribe function. Wired in the editor's
+  // EXPORT click handler so the progress bar advances live.
+  onEditExportProgress: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('edit-export-progress', handler);
+    return () => ipcRenderer.off('edit-export-progress', handler);
+  },
+  // Browser-pane video scraper: enumerate every video on the URL,
+  // filter by minimum duration (default 600 s = 10 min). Returns
+  // { ok, items: [{ id, title, url, duration, thumbnail, channel }], note? }.
+  ytScrapePage:       (opts) => ipcRenderer.invoke('yt:scrape-page', opts),
+  // Single-video download via yt-dlp to gallery/downloads/. Returns
+  // { ok, path, downloadId }. Pair with onYtDownloadProgress to drive
+  // per-row progress bars during a multi-download session.
+  ytDownload:         (opts) => ipcRenderer.invoke('yt:download', opts),
+  onYtDownloadProgress: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('yt:download-progress', handler);
+    return () => ipcRenderer.off('yt:download-progress', handler);
+  },
+  // GPU diagnostic — returns Chromium's feature-status block + GL info.
+  gpuInfo:            () => ipcRenderer.invoke('gpu-info'),
+  // Trash + undo. exploreDelete now returns { ok, trashPath, origPath }
+  // (the renderer pushes those onto its undo stack); exploreRestore
+  // moves the file back; exploreEmptyTrash sends everything to the
+  // OS Recycle Bin for final disposal.
+  exploreRestore:     (opts) => ipcRenderer.invoke('explore-restore', opts),
+  exploreEmptyTrash:  ()     => ipcRenderer.invoke('explore-empty-trash'),
   setAudioDevice: (deviceId) => ipcRenderer.invoke('audio-set-device', deviceId),
   setOutputMute:  (mute)     => ipcRenderer.invoke('audio-set-out-mute', mute),
   setInputMute:   (mute)     => ipcRenderer.invoke('audio-set-in-mute',  mute),
@@ -79,6 +110,10 @@ contextBridge.exposeInMainWorld('dash', {
   exploreRename:  (oldAbs, newName) => ipcRenderer.invoke('explore-rename', oldAbs, newName),
   exploreDelete:  (abs) => ipcRenderer.invoke('explore-delete', abs),
   flushRam:        () => ipcRenderer.invoke('flush-ram'),
+  // Suspend the host machine. Main shows a native confirm dialog first;
+  // returns { ok: true } on confirm + spawn success, { ok: false, cancelled: true }
+  // when the user cancels, or { ok: false, error } on spawn failure.
+  systemSleep:     () => ipcRenderer.invoke('system-sleep'),
 
   // Set Windows power-scheme processor min/max state (used to throttle CPU
   // during zen mode and restore performance on resume).

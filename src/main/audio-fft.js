@@ -15,9 +15,11 @@
 
 const FFT_SIZE = 1024;
 const NUM_BANDS = 24;
-// Run the FFT every Nth audio callback. The Windows worker historically
-// did this every 4th call at 512 frames @ 48k → ~23 Hz updates.
-const FFT_EVERY = 4;
+// Default FFT-per-tick divisor. Workers override via createFftEngine
+// options if their chunk size doesn't match. Windows worker uses 2048
+// samples per tick @ 48 kHz → ~23 Hz natively → fftEvery: 1. Linux worker
+// still chunks at 512 → ~94 Hz callbacks → fftEvery: 4 → ~23 Hz output.
+const FFT_EVERY_DEFAULT = 1;
 
 function makeHann(n) {
   const h = new Float32Array(n);
@@ -70,7 +72,8 @@ function makeBandBins(sampleRate) {
   return { lo, hi };
 }
 
-function createFftEngine({ sampleRate = 48000 } = {}) {
+function createFftEngine({ sampleRate = 48000, fftEvery = FFT_EVERY_DEFAULT } = {}) {
+  const FFT_EVERY = Math.max(1, fftEvery | 0);
   const real = new Float64Array(FFT_SIZE);
   const imag = new Float64Array(FFT_SIZE);
   const ring = new Float32Array(FFT_SIZE);
