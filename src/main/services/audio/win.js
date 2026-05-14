@@ -66,7 +66,14 @@ function startLoopback(win, deviceId = null, readConfig = null) {
     if (data?.status === 'started') {
       console.log(`WASAPI loopback started on "${data.deviceName}" (${data.sampleRate}Hz, ${data.channels}ch)`);
     }
-    if (_audioWin && !_audioWin.isDestroyed()) {
+    if (!_audioWin || _audioWin.isDestroyed()) return;
+    // Split the IPC channel by message type so the renderer doesn't have
+    // to type-discriminate on every level update:
+    //   • PCM samples → audio-out-pcm   (only while recording is active)
+    //   • everything else (rms, bands, devices, status, error) → audio-out-level
+    if (data?.pcm) {
+      _audioWin.webContents.send('audio-out-pcm', data);
+    } else {
       _audioWin.webContents.send('audio-out-level', data);
     }
   });
@@ -86,6 +93,16 @@ function stopLoopback() {
   const p = _audioProc;
   setTimeout(() => { try { p.kill(); } catch {} }, 200);
   _audioProc = null;
+}
+
+// Toggle raw-PCM forwarding from the audify worker on/off. When on, the
+// worker emits `{ pcm, sampleRate, channels }` messages alongside its
+// normal rms/bands updates; main forwards those to the renderer on the
+// 'audio-out-pcm' channel so the screen recorder can mix them into its
+// MediaStream. Safe to call when no worker is running (no-op).
+function setPcmForward(on) {
+  if (!_audioProc) return;
+  try { _audioProc.postMessage(on ? 'pcm-on' : 'pcm-off'); } catch {}
 }
 
 function restartLoopback(win, deviceId, readConfig) {
@@ -263,6 +280,7 @@ module.exports = {
   startLoopback,
   stopLoopback,
   restartLoopback,
+  setPcmForward,
   setSystemMute,
   getSystemMuteStates,
   setDefaultEndpoint,

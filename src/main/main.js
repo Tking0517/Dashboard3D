@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, Menu, clipboard, screen, session, desktopCapturer, utilityProcess, shell, protocol, net } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Menu, clipboard, screen, session, desktopCapturer, utilityProcess, shell, protocol, net, powerMonitor } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -21,6 +21,17 @@ const isDev = !!process.env.VITE_DEV_SERVER_URL;
 // Main HUD BrowserWindow. Captured in createWindow() so the embedded
 // BROWSER pane can attach/detach BrowserViews against it.
 let _mainWin = null;
+// Global key hook (module scope so before-quit can reach it). The
+// actual spawn + handlers live inside registerIpc(); these refs let
+// the lifecycle hook clean up on app exit.
+let _keyHookProc = null;
+let _keyHookEnabled = false;
+function _stopKeyHook() {
+  if (_keyHookProc) {
+    try { _keyHookProc.kill(); } catch {}
+    _keyHookProc = null;
+  }
+}
 
 // ─── SHARED UTILITIES ──────────────────────────────────────────────
 
@@ -58,6 +69,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Dashboard window allows autoplay so boot SFX and any procedural
+      // audio at startup can play before the user clicks anything.
+      // Third-party content (browser-pane) gets the strict policy
+      // independently via its BrowserView webPreferences below.
+      autoplayPolicy: 'no-user-gesture-required',
     },
   });
 
@@ -68,9 +84,14 @@ function createWindow() {
 
   // F12 → toggle DevTools (handy for diagnosing renderer errors when the
   // window is borderless and can't be right-clicked).
+  // Escape during zen → force the renderer to leave zen. Goes through
+  // before-input-event so we still catch Escape even when a focused
+  // input in the renderer wants to swallow it via stopPropagation.
   win.webContents.on('before-input-event', (_event, input) => {
-    if (input.type === 'keyDown' && input.key === 'F12') {
-      win.webContents.toggleDevTools();
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'F12') { win.webContents.toggleDevTools(); return; }
+    if (input.key === 'Escape' && _zenIsActiveInMain) {
+      try { win.webContents.send('force-leave-zen'); } catch {}
     }
   });
 
@@ -163,8 +184,12 @@ function openYouTubeWindow() {
   // intercepts Escape FIRST when the player view is active (returns to
   // results); main only fires this when the renderer didn't preventDefault.
   const handleEsc = () => {
-    if (_zenIsActiveInMain && _audioWin && !_audioWin.isDestroyed()) {
-      _audioWin.webContents.send('force-leave-zen');
+    // Previously this referenced _audioWin (since deleted), which made
+    // the check always fail and Escape in zen close the YT popout
+    // instead of dropping zen. Route to the dashboard's main window
+    // when zen is active so the user gets out of zen instead.
+    if (_zenIsActiveInMain && _mainWin && !_mainWin.isDestroyed()) {
+      _mainWin.webContents.send('force-leave-zen');
       return;
     }
     _ytWin?.close();
@@ -236,7 +261,10 @@ function applyYoutubeZenMode(on) {
     if (!_ytPreZenBounds) _ytPreZenBounds = _ytWin.getBounds();
     const display = screen.getDisplayMatching(_ytWin.getBounds());
     _ytWin.setBounds(display.bounds);
-    _ytWin.setOpacity(0.05);
+    // Full opacity — the YouTube playback becomes the zen background.
+    // The dashboard renderer's zen overlay (clock / weather) sits on
+    // top via its own window.
+    _ytWin.setOpacity(1);
     try { _ytWin.webContents.setBackgroundThrottling(false); } catch {}
   } else {
     _ytWin.setOpacity(1);
@@ -268,6 +296,7 @@ function sendToBottom(win) {
 app.on('before-quit', () => {
   audioService.stopLoopback();
   wmService.shutdown();
+  _stopKeyHook();
 });
 
 // ─── USER FOLDERS ──────────────────────────────────────────────────
@@ -318,13 +347,20 @@ protocol.registerSchemesAsPrivileged([
 // dashboard" and pausing the renderer / freezing media. These need to
 // be set BEFORE app.whenReady fires.
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
+// Note: WGC (Windows Graphics Capture) feature flags were tried for
+// the rec-room SOURCE picker (Cinema 4D and other hardware-accelerated
+// windows don't appear in desktopCapturer.getSources by default).
+// They had no effect — Chromium's *window enumerator* filters those
+// windows out before the capturer is involved, so the WGC backend
+// switch doesn't help. Workflow for hardware-accelerated apps: pick
+// a screen and use CROP to focus on the window.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
-// Block all media autoplay across every renderer. Hero videos that loop
-// behind a page's first viewport are a major contributor to "open the
-// browser → fans rev" — autoplay-policy stops them until the user clicks.
-// The user can still tap play on any video they want to watch.
-app.commandLine.appendSwitch('autoplay-policy', 'document-user-activation-required');
+// Per-window autoplay policy instead of a global switch — the dashboard
+// itself needs to autoplay its boot SFX before the user clicks anything
+// (otherwise the CRT power-on tone is silent on startup). The
+// BrowserView's webPreferences sets the strict policy so third-party
+// pages still can't autoplay hero/ad video and rev the fans.
 // Smooth scrolling is GPU-accelerated and runs an animation curve on every
 // scroll. We don't want any of it in this pane — instant scroll is fine.
 app.commandLine.appendSwitch('disable-smooth-scrolling');
@@ -371,12 +407,15 @@ app.whenReady().then(() => {
 
   // Embedded browser tab — in-memory ("private") session with a hardcoded
   // ad/tracker domain blocklist. Each BrowserView is created with
-  // partition="dash-browser" so this session is what services its
-  // requests. No persist: prefix → cookies, cache, and history die when
-  // the dashboard closes. The blocklist is a substring match against the
-  // request URL; it's not a full ABP engine but it cuts the obvious
-  // surveillance + ad networks.
-  const _BROWSER_PARTITION = 'dash-browser';
+  // partition="persist:dash-browser" so this session is backed by disk:
+  // cookies, localStorage, IndexedDB and service workers SURVIVE app
+  // restart. That keeps signed-in sites signed in. Cache + browsing
+  // history are wipeable via the CLEAR DATA button (handled below by
+  // the 'browser-clear-data' IPC), which selectively keeps the storage
+  // types where auth tokens typically live. The blocklist is a
+  // substring match against the request URL; it's not a full ABP
+  // engine but it cuts the obvious surveillance + ad networks.
+  const _BROWSER_PARTITION = 'persist:dash-browser';
   const _BROWSER_BLOCKLIST = [
     'doubleclick.net', 'googlesyndication.com', 'googletagmanager.com',
     'googletagservices.com', 'google-analytics.com', 'googleadservices.com',
@@ -422,6 +461,49 @@ app.whenReady().then(() => {
     'segmentapi.', 'mparticle.com',
   ];
   const browserSession = session.fromPartition(_BROWSER_PARTITION);
+
+  // ── Browser history store ─────────────────────────────────────────
+  // Recent visits, deduplicated against the head (consecutive same-URL
+  // navigations just bump the head's title+timestamp). Capped at 500
+  // entries, persisted to userData\browser-history.json on a 5-second
+  // debounce so we don't write on every single navigation. Loaded once
+  // on startup. IPC handlers below let the renderer fetch and clear.
+  const _historyFile = path.join(app.getPath('userData'), 'browser-history.json');
+  let _history = [];
+  let _historyFlushTimer = null;
+  try {
+    const raw = fs.readFileSync(_historyFile, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) _history = parsed.filter(e => e && typeof e.url === 'string').slice(0, 500);
+  } catch { /* file missing or unparseable — start fresh */ }
+  function _scheduleHistoryFlush() {
+    if (_historyFlushTimer) return;
+    _historyFlushTimer = setTimeout(() => {
+      _historyFlushTimer = null;
+      try {
+        fs.mkdirSync(path.dirname(_historyFile), { recursive: true });
+        fs.writeFileSync(_historyFile, JSON.stringify(_history.slice(0, 500)), 'utf8');
+      } catch {}
+    }, 5000);
+  }
+  function _pushHistory(url, title) {
+    if (!url) return;
+    // Skip internal/error schemes — they're not real visits.
+    if (/^(about:|chrome:|chrome-error:|data:|file:|devtools:)/i.test(url)) return;
+    const now = Date.now();
+    const head = _history[0];
+    if (head && head.url === url) {
+      // Same URL as last visit — refresh title/timestamp instead of
+      // pushing a duplicate row. Common when a title-update event
+      // fires shortly after did-navigate.
+      if (title) head.title = title;
+      head.ts = now;
+    } else {
+      _history.unshift({ url, title: title || url, ts: now });
+      if (_history.length > 500) _history.length = 500;
+    }
+    _scheduleHistoryFlush();
+  }
   // Light UA touch only: strip the Electron/Dashboard3D substrings from
   // the default UA so a few WAFs don't serve a stripped fallback. Keep
   // the Chromium version that Electron actually reports — overriding it
@@ -527,6 +609,134 @@ app.whenReady().then(() => {
     return { ok: true, darkMode: _bvDarkMode };
   });
   ipcMain.handle('browser-get-dark-mode', () => ({ darkMode: _bvDarkMode }));
+
+  // Browser zen-backdrop: when the dashboard enters zen and a tab has a
+  // playing video, expand that BrowserView to fill the host window and
+  // inject CSS that promotes every <video> on the page to a fullscreen
+  // overlay. The dashboard renderer's zen overlay (clock / weather)
+  // still sits on top because BrowserViews paint underneath the host
+  // window's webContents in our setup.
+  let _bvZenSavedBounds = null;
+  let _bvZenCssKey = null;
+  let _bvZenTabId  = null;
+  const _BV_ZEN_CSS = `
+    html, body { background: #000 !important; overflow: hidden !important; }
+    video {
+      position: fixed !important;
+      top: 0 !important; left: 0 !important;
+      width: 100vw !important; height: 100vh !important;
+      object-fit: contain !important;
+      background: #000 !important;
+      z-index: 2147483647 !important;
+    }
+  `;
+
+  // ── Browser opacity (zen-mode see-through) ─────────────────────
+  // BrowserView lives inside the dashboard window so it can't use
+  // BrowserWindow.setOpacity() the way the YouTube popout does. Closest
+  // equivalent: CSS-inject `opacity` onto the page + set the BV's own
+  // background to transparent so the zen dashboard behind shows through
+  // the dimmed page content. State is tracked per-BV so the choice
+  // sticks when the user re-enters zen or switches tabs.
+  let _bvOpacityCssKey = null;
+  let _bvOpacityTabId  = null;
+  let _bvLastOpacity   = 1.0;
+  async function _applyBvOpacity(view, opacity) {
+    if (!view) return;
+    const wc = view.webContents;
+    // Clear any prior injection first.
+    if (_bvOpacityCssKey) {
+      try { await wc.removeInsertedCSS(_bvOpacityCssKey); } catch {}
+      _bvOpacityCssKey = null;
+    }
+    if (opacity >= 1) {
+      // Fully opaque — restore the BV's default dark background.
+      try { view.setBackgroundColor('#0a0a0a'); } catch {}
+      return;
+    }
+    // Transparent — make the BV's surface alpha so the dashboard zen
+    // overlay can render through, then dim the page content via CSS.
+    try { view.setBackgroundColor('#00000000'); } catch {}
+    try {
+      _bvOpacityCssKey = await wc.insertCSS(
+        `html, body { opacity: ${opacity} !important; background: transparent !important; }`,
+      );
+    } catch {}
+  }
+  ipcMain.handle('browser-set-opacity', async (_e, opacity) => {
+    const o = Math.max(0.1, Math.min(1, Number(opacity)));
+    if (!Number.isFinite(o)) return { ok: false };
+    _bvLastOpacity = o;
+    // Apply to whichever BV is currently shown: the zen-mode tab if zen
+    // is active, otherwise the active tab.
+    const targetId = _bvZenTabId != null ? _bvZenTabId : _bvActiveId;
+    const t = targetId != null ? _bvTabs.get(targetId) : null;
+    if (t) {
+      _bvOpacityTabId = targetId;
+      await _applyBvOpacity(t.view, o);
+    }
+    return { ok: true, opacity: o };
+  });
+
+  ipcMain.handle('browser-set-zen-mode', async (_e, on) => {
+    if (!_mainWin || _mainWin.isDestroyed()) return { ok: false };
+    if (on) {
+      // Look for a tab whose webContents reports a playing video. We
+      // prefer the active tab if it qualifies; otherwise scan others
+      // (audio may be playing on a detached tab).
+      let pick = null;
+      const candidates = _bvActiveId != null
+        ? [_bvActiveId, ...[..._bvTabs.keys()].filter(id => id !== _bvActiveId)]
+        : [..._bvTabs.keys()];
+      for (const id of candidates) {
+        const t = _bvTabs.get(id);
+        if (!t) continue;
+        let hasPlaying = false;
+        try {
+          hasPlaying = await t.view.webContents.executeJavaScript(
+            `Array.from(document.querySelectorAll('video')).some(v => !v.paused && v.currentTime > 0 && v.readyState >= 2)`,
+            true,
+          );
+        } catch {}
+        if (hasPlaying) { pick = id; break; }
+      }
+      if (pick == null) return { ok: true, applied: false };
+      const t = _bvTabs.get(pick);
+      const wc = t.view.webContents;
+      // Save the current global bounds rect so leaveZen can restore.
+      _bvZenSavedBounds = { ..._bvBounds };
+      _bvZenTabId = pick;
+      // Re-attach this BV (in case another tab was previously active)
+      // and resize it to fill the whole host window — the renderer's
+      // bounds-tracker reports fractions of the viewport, so {0,0,1,1}
+      // covers everything.
+      try { _mainWin.setBrowserView(t.view); } catch {}
+      _bvBounds = { x: 0, y: 0, width: 1, height: 1 };
+      _applyBvBounds(t.view);
+      try { _bvZenCssKey = await wc.insertCSS(_BV_ZEN_CSS); } catch {}
+      return { ok: true, applied: true, tabId: pick };
+    }
+    // Off — undo everything: pull the injected CSS back out, restore
+    // the saved geometry, and re-activate whichever tab was active.
+    if (_bvZenTabId != null) {
+      const t = _bvTabs.get(_bvZenTabId);
+      if (t && _bvZenCssKey) {
+        try { await t.view.webContents.removeInsertedCSS(_bvZenCssKey); } catch {}
+      }
+    }
+    _bvZenCssKey = null;
+    _bvZenTabId  = null;
+    if (_bvZenSavedBounds) {
+      _bvBounds = _bvZenSavedBounds;
+      _bvZenSavedBounds = null;
+      // Re-apply to whichever BV is currently active (may have changed).
+      if (_bvActiveId != null) {
+        const cur = _bvTabs.get(_bvActiveId);
+        if (cur) _applyBvBounds(cur.view);
+      }
+    }
+    return { ok: true };
+  });
 
   // Route every download initiated from a BrowserView into the dashboard's
   // own downloads/ folder so the Explore pane can list it like gallery/docs
@@ -700,23 +910,39 @@ app.whenReady().then(() => {
     wc.on('did-navigate', (_e, url) => {
       const t = _bvTabs.get(id); if (!t) return;
       t.url = url;
+      _pushHistory(url, t.title);
       _sendTabEvent({ id, type: 'navigate', url });
     });
     wc.on('did-navigate-in-page', (_e, url, isMain) => {
       if (!isMain) return;
       const t = _bvTabs.get(id); if (!t) return;
       t.url = url;
+      _pushHistory(url, t.title);
       _sendTabEvent({ id, type: 'navigate', url });
     });
     wc.on('page-title-updated', (_e, title) => {
       const t = _bvTabs.get(id); if (!t) return;
       t.title = title || t.url;
+      // Update the matching history head with the real page title (which
+      // arrives slightly after did-navigate on most pages).
+      _pushHistory(t.url, title);
       _sendTabEvent({ id, type: 'title', title: t.title });
     });
     wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
       if (!isMainFrame) return;
       _sendTabEvent({ id, type: 'fail', url, code, desc });
     });
+    // Escape during zen → forward to the main renderer's force-leave-zen
+    // channel. Without this, an Escape press while a BrowserView has
+    // focus (browser pane is the active combo mode) would never reach
+    // the dashboard's renderer and the user couldn't leave zen.
+    wc.on('before-input-event', (_event, input) => {
+      if (input.type !== 'keyDown') return;
+      if (input.key === 'Escape' && _zenIsActiveInMain && _mainWin && !_mainWin.isDestroyed()) {
+        try { _mainWin.webContents.send('force-leave-zen'); } catch {}
+      }
+    });
+
     // Right-click → native context menu. Builds a small template based on
     // what was actually right-clicked (link / image / selection / editable
     // input). The "Open link in new tab" entry rides the same renderer
@@ -823,6 +1049,11 @@ app.whenReady().then(() => {
         partition: _BROWSER_PARTITION,
         contextIsolation: true,
         nodeIntegration: false,
+        // Keep third-party pages from autoplaying hero/ad video. The
+        // global autoplay-policy switch is gone (so the dashboard can
+        // play its boot SFX); this restores it just for the embedded
+        // browser tabs.
+        autoplayPolicy: 'document-user-activation-required',
         // Note: sandbox left as default (false). Setting sandbox:true
         // here caused some sites (Framer-built, Liferay-built) to render
         // their HTML source as visible text instead of executing — most
@@ -897,6 +1128,47 @@ app.whenReady().then(() => {
     _bvBounds = rect || _bvBounds;
     const t = _bvActiveId != null ? _bvTabs.get(_bvActiveId) : null;
     if (t) _applyBvBounds(t.view);
+    return { ok: true };
+  });
+
+  // History — get returns the most-recent N entries (newest first);
+  // clear wipes both the in-memory list and the on-disk file.
+  ipcMain.handle('browser-history-get', (_e, limit = 100) => {
+    const n = Math.max(1, Math.min(500, Number.isFinite(limit) ? limit : 100));
+    return _history.slice(0, n);
+  });
+  ipcMain.handle('browser-history-clear', () => {
+    _history = [];
+    _scheduleHistoryFlush();
+    return { ok: true };
+  });
+
+  // Clear-data — wipes cache + browsing history + transient storage
+  // (service workers, shader cache, etc.) BUT keeps cookies +
+  // localStorage + IndexedDB, where modern sites stash auth tokens.
+  // Result: cache is gone and history is empty, but the user stays
+  // logged in everywhere they were already signed in. Also clears the
+  // adsBlocked/popupsBlocked counters that drive the splash chips.
+  ipcMain.handle('browser-clear-data', async () => {
+    try { await browserSession.clearCache(); } catch {}
+    try {
+      await browserSession.clearStorageData({
+        storages: [
+          'appcache',
+          'filesystem',
+          'shadercache',
+          'websql',
+          'serviceworkers',
+          'cachestorage',
+        ],
+      });
+    } catch {}
+    _history = [];
+    _scheduleHistoryFlush();
+    _adsBlocked = 0;
+    _imagesBlocked = 0;
+    _statsDirty = true;
+    _broadcastBrowserStats();
     return { ok: true };
   });
 
@@ -1045,6 +1317,16 @@ app.whenReady().then(() => {
     '.png':  'image/png',  '.jpg':  'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif':  'image/gif',  '.webp': 'image/webp', '.bmp':  'image/bmp',
     '.svg':  'image/svg+xml', '.avif': 'image/avif', '.ico': 'image/x-icon',
+    // Video — Chromium's <video> refuses to decode application/octet-
+    // stream, so anything we want to play inline needs a real MIME.
+    // .mkv files we produce are WebM bytes wrapped in a .mkv extension
+    // (Chromium's MediaRecorder only emits WebM), so serving them as
+    // video/webm lets them play. Generic non-WebM MKVs will still fail
+    // — same as before — and the player just stays blank in that case.
+    '.mp4':  'video/mp4',  '.m4v':  'video/mp4',
+    '.webm': 'video/webm', '.mkv':  'video/webm',
+    '.mov':  'video/quicktime',
+    '.ogv':  'video/ogg',  '.ogg':  'video/ogg',
     '.txt':  'text/plain;charset=utf-8',
     '.html': 'text/html;charset=utf-8',
     '.json': 'application/json',
@@ -1158,13 +1440,36 @@ function registerIpc() {
     return await getDiskIo();
   });
 
-  ipcMain.handle('transfers-info', async () => {
-    return await getTransfersInfo();
-  });
-
   ipcMain.handle('config-get', () => readConfig());
   ipcMain.handle('config-set', (_e, partial) => writeConfig(partial));
   ipcMain.handle('config-path', () => configFilePath());
+
+  // Pollen.com's unofficial pollen-forecast endpoint (the same one their
+  // own site uses). Requires a Referer header pointing back at their
+  // page; renderers can't override Referer due to spec restrictions, so
+  // we proxy through the main process where Node's fetch sets whatever
+  // headers we ask. Returns { ok, data } on success, { error } on
+  // failure. ZIP must be a 5-digit US postal code — anything else is
+  // refused without making the call.
+  ipcMain.handle('get-pollen', async (_e, zip) => {
+    const z = String(zip || '').trim();
+    if (!/^\d{5}$/.test(z)) return { error: 'invalid zip' };
+    const url = `https://www.pollen.com/api/forecast/current/pollen/${z}`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'Referer':    `https://www.pollen.com/forecast/current/pollen/${z}`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept':     'application/json, text/plain, */*',
+        },
+      });
+      if (!res.ok) return { error: `HTTP ${res.status}` };
+      const data = await res.json();
+      return { ok: true, data };
+    } catch (err) {
+      return { error: err?.message || 'fetch failed' };
+    }
+  });
 
   ipcMain.handle('get-screen-sources', () => getScreenSources());
 
@@ -1187,6 +1492,15 @@ function registerIpc() {
   ipcMain.handle('audio-set-in-mute',  (_e, mute) => audioService.setSystemMute(1, !!mute));
   ipcMain.handle('audio-get-mute-states', () => audioService.getSystemMuteStates());
   ipcMain.handle('audio-set-default-endpoint', (_e, { dataFlow, name }) => audioService.setDefaultEndpoint(dataFlow | 0, name));
+  // Toggle raw-PCM forwarding from the WASAPI loopback worker. Renderer
+  // calls this when a screen recording starts so loopback audio can be
+  // mixed into the recorder's MediaStream — and again on stop to release
+  // the per-callback IPC traffic. No-op on Linux until that backend grows
+  // the same forwarding hook.
+  ipcMain.handle('audio-loopback-pcm', (_e, on) => {
+    try { audioService.setPcmForward?.(!!on); } catch {}
+    return true;
+  });
 
   // Full app restart — relaunches the Electron process (main + renderer).
   // Used by the topbar restart button when something in main needs to come
@@ -1685,6 +1999,809 @@ function registerIpc() {
   });
   ipcMain.handle('set-youtube-zen-mode', (_e, on) => applyYoutubeZenMode(!!on));
 
+  // YouTube popout opacity — lets the user dial between fully opaque
+  // (1.0, normal viewing) and 60% transparent (0.4, so the zen dashboard
+  // panels show through behind the video). Clamped to [0.1, 1] so the
+  // window doesn't disappear entirely. The chrome buttons in the YT
+  // popout call this via the preload `youtubeHost.setOpacity` bridge.
+  // Visualizer "mirror active video" — returns a desktopCapturer source
+  // (id + name) for whatever's most likely the active video right now.
+  // Priority: the YouTube popout window if it's open (cleanest capture,
+  // since its content IS the video), otherwise the main dashboard window
+  // (catches BrowserView page videos at the cost of capturing chrome
+  // around them), otherwise the primary screen. Renderer feeds the id
+  // into navigator.mediaDevices.getUserMedia with chromeMediaSource:
+  // 'desktop'. Returns null if no source is enumerable (permissions
+  // denied, no display, etc).
+  ipcMain.handle('visualizer-get-video-source', async () => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['window', 'screen'],
+        thumbnailSize: { width: 0, height: 0 },
+      });
+      // 1. YT popout — its window title is "YouTube" (see _ytWin ctor).
+      let pick = sources.find(s => s.name === 'YouTube');
+      // 2. Dashboard window — captures BrowserView page videos too.
+      if (!pick && _mainWin && !_mainWin.isDestroyed()) {
+        const title = _mainWin.getTitle();
+        pick = sources.find(s => s.name === title);
+      }
+      // 3. Any window with "YouTube" / common video site in the name.
+      if (!pick) pick = sources.find(s => /\b(youtube|twitch|netflix|hulu|prime|disney)\b/i.test(s.name));
+      // 4. Last resort: the first screen.
+      if (!pick) pick = sources.find(s => s.id.startsWith('screen:')) || sources[0];
+      if (!pick) return null;
+      return { id: pick.id, name: pick.name };
+    } catch {
+      return null;
+    }
+  });
+
+  // List every desktopCapturer source so the visualizer source picker
+  // can show a dropdown of windows + screens. Thumbnail is a tiny PNG
+  // data URL the renderer can render inline (160×90 → ~5-8 KB each).
+  // Returns a Map<hwnd, { name, pid, title }> for every visible top-
+  // level window on Windows. Used by visualizer-list-sources to tag
+  // each desktopCapturer window with its owning application's process
+  // name, so the rec-room source picker can group by app. PowerShell
+  // EnumWindows is slow on first invocation (Add-Type JIT ~1 s) but
+  // subsequent picker opens within the same session are quicker as
+  // the .NET compile cache is reused.
+  async function _getVisibleWindowProcessMap() {
+    if (process.platform !== 'win32') return new Map();
+    const ps = `
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class WL {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc fn, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern int  GetWindowText(IntPtr h, StringBuilder sb, int n);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+}
+"@
+$out = New-Object System.Collections.ArrayList
+$delegate = [WL+EnumProc] {
+  param([IntPtr]$h, [IntPtr]$l)
+  if ([WL]::IsWindowVisible($h)) {
+    $sb = New-Object System.Text.StringBuilder 512
+    $len = [WL]::GetWindowText($h, $sb, 512)
+    if ($len -gt 0) {
+      $procId = 0
+      [WL]::GetWindowThreadProcessId($h, [ref]$procId) | Out-Null
+      try {
+        $name = (Get-Process -Id $procId -ErrorAction Stop).ProcessName
+        $null = $out.Add([pscustomobject]@{ hwnd = [int64]$h; pid = [int]$procId; name = $name })
+      } catch {}
+    }
+  }
+  return $true
+}
+[WL]::EnumWindows($delegate, [IntPtr]::Zero) | Out-Null
+$out | ConvertTo-Json -Compress
+`;
+    // Use -EncodedCommand (UTF-16LE base64) so the multi-line here-
+    // string for Add-Type survives the command-line argument escape
+    // pass. Passing the same script via -Command lost newlines and
+    // PowerShell parsed `Add-Type @"` as a one-line token, blowing up
+    // before the C# class was even compiled.
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+    return await new Promise((resolve) => {
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true });
+      let buf = '';
+      child.stdout.on('data', (d) => { buf += d.toString('utf8'); });
+      child.on('error', () => resolve(new Map()));
+      child.on('exit', () => {
+        try {
+          const arr = JSON.parse(buf || '[]');
+          const list = Array.isArray(arr) ? arr : [arr];
+          const map = new Map();
+          for (const e of list) {
+            if (e && Number.isFinite(e.hwnd)) map.set(Number(e.hwnd), { name: e.name, pid: e.pid });
+          }
+          resolve(map);
+        } catch { resolve(new Map()); }
+      });
+      // Hard cap — never hold the picker more than 4 s on this lookup.
+      // Bumped a tick because Add-Type's first invocation per process
+      // can take a full second on a cold .NET cache.
+      setTimeout(() => { try { child.kill(); } catch {} }, 4000);
+    });
+  }
+
+  ipcMain.handle('visualizer-list-sources', async () => {
+    try {
+      const [sources, procMap] = await Promise.all([
+        desktopCapturer.getSources({
+          types: ['window', 'screen'],
+          thumbnailSize: { width: 160, height: 90 },
+        }),
+        _getVisibleWindowProcessMap(),
+      ]);
+      // Debug dump — write the raw source ids + procMap entries to a
+      // temp file so we can verify HWND matching is correct after the
+      // EncodedCommand fix. Remove this block once diagnostics are no
+      // longer needed.
+      try {
+        const debug = {
+          procMapSize: procMap.size,
+          procMap: [...procMap.entries()].map(([hwnd, info]) => ({ hwnd, ...info })),
+          sources: sources.map(s => ({ id: s.id, name: s.name })),
+        };
+        const debugPath = path.join(app.getPath('temp'), 'dash3d-source-debug.json');
+        fs.writeFileSync(debugPath, JSON.stringify(debug, null, 2), 'utf8');
+      } catch (err) {
+        console.warn('[visualizer-list-sources] debug write failed:', err.message);
+      }
+      return sources.map(s => {
+        // Electron window source IDs on Windows are "window:<HWND>:0" —
+        // pull the HWND out so we can look up the owning process. On
+        // non-Windows platforms procMap stays empty and appName is ''.
+        let appName = '';
+        if (s.id.startsWith('window:')) {
+          const parts = s.id.split(':');
+          const hwnd = parseInt(parts[1], 10);
+          const info = Number.isFinite(hwnd) ? procMap.get(hwnd) : null;
+          if (info?.name) appName = info.name;
+        }
+        return {
+          id: s.id,
+          name: s.name,
+          kind: s.id.startsWith('screen:') ? 'screen' : 'window',
+          thumbnail: s.thumbnail?.toDataURL?.() || null,
+          appName,
+        };
+      });
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  // ── SCREENCAP: input-driven JPEG capture to <gallery>/screencap/ ──
+  // Renderer encodes the frame (it owns the MediaStream); main owns
+  // the file write + the powerMonitor poll that detects user input
+  // anywhere on the system. When idle-time drops below the previous
+  // poll's value (= new keypress/mouse activity), we ping the renderer
+  // to grab a frame. Throttle in the renderer prevents flooding when
+  // activity is continuous.
+  let _screencapPollTimer = null;
+  let _screencapLastIdle = Number.POSITIVE_INFINITY;
+  function _stopScreencapWatcher() {
+    if (_screencapPollTimer) {
+      clearInterval(_screencapPollTimer);
+      _screencapPollTimer = null;
+    }
+    _screencapLastIdle = Number.POSITIVE_INFINITY;
+  }
+  // Each SNAP session writes into its own timestamped subfolder under
+  // gallery/screencap/. Created on watch-start, used by screencap-save
+  // for every capture during the session, cleared on watch-stop so the
+  // next SNAP toggle creates a fresh folder.
+  let _screencapSessionDir = null;
+
+  ipcMain.handle('screencap-watch-start', () => {
+    _stopScreencapWatcher();
+    try {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const sessionName = `session-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+      _screencapSessionDir = path.join(galleryFolderPath(), 'screencap', sessionName);
+      fs.mkdirSync(_screencapSessionDir, { recursive: true });
+    } catch (err) {
+      console.warn('[screencap] session folder failed:', err.message);
+      _screencapSessionDir = null;
+    }
+    _screencapLastIdle = powerMonitor.getSystemIdleTime();
+    _screencapPollTimer = setInterval(() => {
+      if (!_mainWin || _mainWin.isDestroyed()) return;
+      const idle = powerMonitor.getSystemIdleTime();
+      // Idle time dropping (or staying at 0) means there was input
+      // since the last poll. Fire one trigger; renderer throttles.
+      if (idle < _screencapLastIdle || idle === 0) {
+        try { _mainWin.webContents.send('screencap-trigger'); } catch {}
+      }
+      _screencapLastIdle = idle;
+    }, 250);
+    return { ok: true, sessionDir: _screencapSessionDir };
+  });
+  ipcMain.handle('screencap-watch-stop', () => {
+    _stopScreencapWatcher();
+    _screencapSessionDir = null;
+    return { ok: true };
+  });
+  // Resolve a non-colliding path inside `dir`. If `baseName.ext` already
+  // exists, append `-1`, `-2`, … until we find a free slot. Used by
+  // screencap + screenrec so re-running a recording in the same second
+  // never overwrites an earlier file.
+  function _uniquePath(dir, baseName, ext) {
+    let name = `${baseName}${ext}`;
+    let full = path.join(dir, name);
+    let n = 0;
+    while (fs.existsSync(full)) {
+      n++;
+      name = `${baseName}-${n}${ext}`;
+      full = path.join(dir, name);
+    }
+    return { full, name };
+  }
+
+  // Build the next `<USER> NNNN` filename for the recordings folder. The
+  // prefix is the user's configured name when one is set, else literal
+  // "USER". The counter is global to the recordings folder (PROCESS and
+  // SCREENREC share it) so the user gets one continuous sequence.
+  // Pads to 4 digits; rolls past 9999 just by widening the number, no
+  // wrap. Scans existing files matching `<prefix> ####.*` so a fresh
+  // install starts at 0000 and subsequent saves keep climbing.
+  async function _nextUserSeqName(dir, ext) {
+    let prefix = 'USER';
+    try {
+      const cfg = await readConfig();
+      const n = (cfg?.userName || '').toString().trim();
+      if (n) prefix = n;
+    } catch {}
+    // Sanitize: strip filesystem-illegal characters from the username so
+    // a name like "A/B" can't break out of the folder.
+    const safePrefix = prefix.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim() || 'USER';
+    let files = [];
+    try { files = await fs.promises.readdir(dir); } catch {}
+    const esc = safePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('^' + esc + ' (\\d{4,})\\.', 'i');
+    let maxN = -1;
+    for (const f of files) {
+      const m = re.exec(f);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > maxN) maxN = n;
+      }
+    }
+    const next = maxN + 1;
+    const base = `${safePrefix} ${String(next).padStart(4, '0')}`;
+    return _uniquePath(dir, base, ext);
+  }
+
+  // Save a JPEG (renderer sends a base64 data URL or raw base64).
+  // Returns the absolute path written so the renderer can show toast.
+  ipcMain.handle('screencap-save', (_e, dataUrl) => {
+    try {
+      const m = String(dataUrl || '').match(/^data:image\/jpe?g;base64,(.+)$/);
+      const b64 = m ? m[1] : String(dataUrl || '');
+      if (!b64) return { ok: false, error: 'empty' };
+      // Active session folder when SNAP is on; fall back to the root
+      // screencap/ dir if a save somehow fires outside a session (e.g.
+      // race during shutdown).
+      const dir = _screencapSessionDir || path.join(galleryFolderPath(), 'screencap');
+      fs.mkdirSync(dir, { recursive: true });
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const base = `screencap-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3,'0')}`;
+      const { full, name } = _uniquePath(dir, base, '.jpg');
+      fs.writeFileSync(full, Buffer.from(b64, 'base64'));
+      return { ok: true, path: full, name };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── FFMPEG: detect bundled ffmpeg + hardware encoders ──────────────
+  // ffmpeg-static ships a Windows BtbN build that includes h264_nvenc /
+  // hevc_nvenc / av1_nvenc. We probe once at startup and cache the
+  // result so the renderer can route PROCESS SNAPS through the fast
+  // path (real ffmpeg, GPU when available) instead of MediaRecorder.
+  let _ffmpegInfo = null; // { path, available, hasNvenc, hasHevcNvenc, hasMp4 } | null while probing
+  const _ffmpegBin = (() => {
+    try {
+      // ffmpeg-static returns the path or null. In packaged builds with
+      // asar=false the path is real on disk; with asar it points inside
+      // the asar and ffmpeg won't be executable, but our build sets
+      // asar=false so this works in both dev and packaged runs.
+      const p = require('ffmpeg-static');
+      console.log('[ffmpeg-static] require returned:', p);
+      return (typeof p === 'string' && p) ? p : null;
+    } catch (err) {
+      console.warn('[ffmpeg-static] require failed:', err?.message || err);
+      return null;
+    }
+  })();
+  async function _probeFfmpeg() {
+    if (!_ffmpegBin) {
+      console.warn('[ffmpeg] no binary path resolved');
+      _ffmpegInfo = { path: null, available: false, hasNvenc: false, hasHevcNvenc: false, hasMp4: false, reason: 'ffmpeg-static require returned null' };
+      return _ffmpegInfo;
+    }
+    if (!fs.existsSync(_ffmpegBin)) {
+      console.warn('[ffmpeg] binary missing at', _ffmpegBin);
+      _ffmpegInfo = { path: _ffmpegBin, available: false, hasNvenc: false, hasHevcNvenc: false, hasMp4: false, reason: 'binary not found on disk' };
+      return _ffmpegInfo;
+    }
+    const result = await new Promise((resolve) => {
+      execFile(_ffmpegBin, ['-hide_banner', '-encoders'], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      });
+    });
+    if (result.err) {
+      console.warn('[ffmpeg] -encoders probe failed:', result.err.message, 'stderr:', result.stderr.slice(0, 200));
+      _ffmpegInfo = { path: _ffmpegBin, available: false, hasNvenc: false, hasHevcNvenc: false, hasMp4: false, reason: `execFile error: ${result.err.message}` };
+      return _ffmpegInfo;
+    }
+    _ffmpegInfo = {
+      path: _ffmpegBin,
+      available: !!result.stdout,
+      hasNvenc:     /\sh264_nvenc\s/.test(result.stdout),
+      hasHevcNvenc: /\shevc_nvenc\s/.test(result.stdout),
+      hasMp4:       true, // ffmpeg can always mux mp4
+    };
+    console.log('[ffmpeg] probe ok:', { available: _ffmpegInfo.available, hasNvenc: _ffmpegInfo.hasNvenc, path: _ffmpegBin });
+    return _ffmpegInfo;
+  }
+  // Kick off the probe immediately so it's ready by the time the user
+  // opens the rec room.
+  _probeFfmpeg().catch(() => {});
+  ipcMain.handle('ffmpeg-info', async () => {
+    return _ffmpegInfo || await _probeFfmpeg();
+  });
+
+  // ── FFMPEG: stitch snaps → video (GPU/NVENC fast path) ─────────────
+  // Receives { paths, format, outH, bitsPerSec, holdMs, useGpu, codec }.
+  // Writes a concat-demuxer list file to %TEMP%, spawns ffmpeg, streams
+  // progress back to the renderer via 'process-snaps-progress', and saves
+  // the result into <gallery>/recordings/processed-…<ext>.
+  ipcMain.handle('process-snaps-ffmpeg', async (e, opts) => {
+    const info = _ffmpegInfo || await _probeFfmpeg();
+    if (!info?.available) return { ok: false, error: 'ffmpeg not available' };
+    const paths   = Array.isArray(opts?.paths) ? opts.paths.filter(Boolean) : [];
+    const format  = (opts?.format === 'webm' || opts?.format === 'mkv' || opts?.format === 'mp4') ? opts.format : 'mp4';
+    const outH    = Number(opts?.outH) > 0 ? Math.round(opts.outH) : 0; // 0 = keep source
+    const bps     = Number(opts?.bitsPerSec) > 0 ? Math.round(opts.bitsPerSec) : 5_000_000;
+    const holdMs  = Math.max(33, Number(opts?.holdMs) || 1000);
+    const useGpu  = !!opts?.useGpu;
+    const codecReq = String(opts?.codec || 'h264');
+    if (paths.length < 2) return { ok: false, error: 'need at least 2 input frames' };
+
+    // Build the concat-demuxer list. ffmpeg's concat demuxer requires the
+    // last file to be repeated for the trailing `duration` to take effect,
+    // otherwise the final image is cut to a single frame.
+    // https://ffmpeg.org/ffmpeg-formats.html#concat
+    const escape = (p) => String(p).replace(/\\/g, '/').replace(/'/g, "'\\''");
+    const durSec = (holdMs / 1000).toFixed(4);
+    const lines = [];
+    for (const p of paths) {
+      lines.push(`file '${escape(p)}'`);
+      lines.push(`duration ${durSec}`);
+    }
+    lines.push(`file '${escape(paths[paths.length - 1])}'`);
+    const tmpDir = app.getPath('temp');
+    const listPath = path.join(tmpDir, `dash3d-snaps-${Date.now()}.txt`);
+    try { fs.writeFileSync(listPath, lines.join('\n'), 'utf8'); }
+    catch (err) { return { ok: false, error: 'failed to write concat list: ' + err.message }; }
+
+    // Output path: gallery/recordings/<USER> NNNN.<ext>. Prefix uses the
+    // configured userName (cfg.userName) when set, else literal "USER".
+    // Counter auto-increments across runs by scanning existing files.
+    const dir = path.join(galleryFolderPath(), 'recordings');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const ext = '.' + format;
+    const { full: outPath, name: outName } = await _nextUserSeqName(dir, ext);
+
+    // Pick the encoder. GPU path uses h264_nvenc / hevc_nvenc; CPU path
+    // uses libx264 / libx265. For WebM we always use VP9 (CPU — no
+    // widely-shipped NVENC VP9 encoder).
+    let vcodec = 'libx264';
+    let preset = ['-preset', 'medium'];
+    if (format === 'webm') {
+      vcodec = 'libvpx-vp9';
+      preset = ['-deadline', 'good', '-cpu-used', '4'];
+    } else if (useGpu && codecReq === 'hevc' && info.hasHevcNvenc) {
+      vcodec = 'hevc_nvenc';
+      preset = ['-preset', 'p4', '-tune', 'hq', '-rc', 'vbr'];
+    } else if (useGpu && info.hasNvenc) {
+      vcodec = 'h264_nvenc';
+      preset = ['-preset', 'p4', '-tune', 'hq', '-rc', 'vbr'];
+    } else if (codecReq === 'hevc') {
+      vcodec = 'libx265';
+    }
+
+    // Scale filter: lock width to even (yuv420p requires it). -2 keeps
+    // aspect ratio while forcing even dimensions.
+    const vf = outH > 0
+      ? `scale=-2:${outH}:flags=lanczos,format=yuv420p`
+      : 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p';
+
+    const args = [
+      '-hide_banner', '-y',
+      '-f', 'concat', '-safe', '0',
+      '-i', listPath,
+      '-vf', vf,
+      '-c:v', vcodec,
+      ...preset,
+      '-b:v', String(bps),
+      '-maxrate', String(Math.round(bps * 1.5)),
+      '-bufsize', String(bps * 2),
+      '-pix_fmt', 'yuv420p',
+      '-r', String(Math.max(1, Math.min(60, Math.round(1000 / holdMs)))),
+    ];
+    if (format === 'mp4') args.push('-movflags', '+faststart');
+    args.push('-progress', 'pipe:2'); // emit key=value progress on stderr
+    args.push(outPath);
+
+    const proc = spawn(info.path, args, { windowsHide: true });
+    const sender = e.sender;
+    const total = paths.length;
+    let lastFrame = 0;
+    let stderr = '';
+    proc.stderr?.on('data', (chunk) => {
+      const s = chunk.toString('utf8');
+      stderr += s;
+      if (stderr.length > 16384) stderr = stderr.slice(-16384);
+      // ffmpeg -progress emits one key=value per line; we sniff `frame=`
+      // both from -progress output and from the human progress bar
+      // (which writes \rframe= …).
+      const m = s.match(/frame=\s*(\d+)/);
+      if (m) {
+        const frame = Number(m[1]);
+        if (frame > lastFrame) {
+          lastFrame = frame;
+          try { sender?.send?.('process-snaps-progress', { frame, total, encoder: vcodec }); } catch {}
+        }
+      }
+    });
+    const code = await new Promise((resolve) => {
+      proc.on('error', () => resolve(-1));
+      proc.on('close', resolve);
+    });
+    try { fs.unlinkSync(listPath); } catch {}
+    if (code !== 0) {
+      try { fs.unlinkSync(outPath); } catch {}
+      return { ok: false, error: `ffmpeg exit ${code}: ${stderr.split('\n').slice(-6).join(' | ')}` };
+    }
+    let size = 0;
+    try { size = fs.statSync(outPath).size; } catch {}
+    return { ok: true, path: outPath, name: outName, size, encoder: vcodec };
+  });
+
+  // ── PROCESS SNAPS: save a stitched snap-to-video blob ────────────
+  // The renderer encodes everything (canvas + MediaRecorder) and ships
+  // the final blob as a single Uint8Array here. We write to
+  // <gallery>/recordings/ alongside live screen records so the rec
+  // room's recordings folder is the one place to find both.
+  ipcMain.handle('process-snaps-save', async (_e, bytes, ext) => {
+    try {
+      const dir = path.join(galleryFolderPath(), 'recordings');
+      fs.mkdirSync(dir, { recursive: true });
+      // Whitelist extensions so a bad renderer can't write arbitrary
+      // file types via this handler.
+      const safeExt = ['.mp4', '.mkv', '.webm'].includes(ext) ? ext : '.mkv';
+      const { full, name } = await _nextUserSeqName(dir, safeExt);
+      fs.writeFileSync(full, Buffer.from(bytes));
+      const size = fs.statSync(full).size;
+      return { ok: true, path: full, name, size };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── §generate ── COMFYUI workflow front-end ───────────────────────
+  // Three responsibilities here:
+  //   1. comfy-list-workflows: scan the configured directory for
+  //      *.json ComfyUI workflow files, return entries with display
+  //      name + kind (image/video/audio) derived from filename prefix.
+  //   2. comfy-load-workflow: read one workflow JSON safely (must live
+  //      inside the configured directory; symlink/path-traversal
+  //      attempts are rejected).
+  //   3. comfy-save-output: write a base64-encoded result back into the
+  //      gallery under generated/<kind>/<USER NNNN>.<ext>.
+  //
+  // The renderer talks to ComfyUI's HTTP API via the comfy-http IPC
+  // below — proxied through main because Electron's renderer origin
+  // can't reach loopback directly under app:// CORS rules.
+  function _comfyWorkflowDir() {
+    // Use the real user profile dir (os.homedir) — `os.userInfo().username`
+    // returns the NT account name, which can differ from the profile-
+    // folder name (Windows truncates long Microsoft-account emails).
+    // Configurable via cfg.comfyWorkflowDir.
+    return path.join(os.homedir(), 'OneDrive', 'Desktop', 'comfyistuff');
+  }
+  async function _comfyResolveDir() {
+    let dir = '';
+    try {
+      const cfg = await readConfig();
+      if (cfg?.comfyWorkflowDir) dir = String(cfg.comfyWorkflowDir);
+    } catch {}
+    if (!dir) dir = _comfyWorkflowDir();
+    return path.resolve(dir);
+  }
+  ipcMain.handle('comfy-list-workflows', async () => {
+    const dir = await _comfyResolveDir();
+    try {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      const out = [];
+      for (const e of entries) {
+        if (!e.isFile()) continue;
+        if (!/\.json$/i.test(e.name)) continue;
+        // Filename convention: <kind>_<rest>.json (image_/video_/audio_).
+        const m = e.name.match(/^(image|video|audio)[_-](.+)\.json$/i);
+        const kind = m ? m[1].toLowerCase() : 'unknown';
+        const slug = m ? m[2] : e.name.replace(/\.json$/i, '');
+        const display = slug.replace(/[_-]+/g, ' ').toUpperCase().trim();
+        out.push({ file: e.name, kind, display });
+      }
+      // Sort: image first, then video, then audio, then unknown; then alpha.
+      const ORDER = { image: 0, video: 1, audio: 2, unknown: 3 };
+      out.sort((a, b) => (ORDER[a.kind] - ORDER[b.kind]) || a.display.localeCompare(b.display));
+      return { ok: true, dir, entries: out };
+    } catch (err) {
+      return { ok: false, dir, entries: [], error: err.message };
+    }
+  });
+  ipcMain.handle('comfy-load-workflow', async (_e, file) => {
+    const dir = await _comfyResolveDir();
+    const target = path.resolve(dir, String(file || ''));
+    // Sandbox to the configured dir — block ".." traversal.
+    if (!target.startsWith(dir + path.sep) && target !== dir) {
+      return { ok: false, error: 'path outside workflow directory' };
+    }
+    try {
+      const raw = await fs.promises.readFile(target, 'utf8');
+      return { ok: true, json: JSON.parse(raw) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Save a generated output to gallery/generated/<kind>/. bytes is a
+  // Uint8Array (Buffer-like) handed back from the renderer; ext is the
+  // file extension WITH leading dot ('.png', '.mp4', '.wav', etc.).
+  ipcMain.handle('comfy-save-output', async (_e, kind, bytes, ext) => {
+    try {
+      const safeKind = ['image', 'video', 'audio'].includes(kind) ? kind : 'image';
+      const safeExt = /^\.[A-Za-z0-9]{2,5}$/.test(ext) ? ext : '.png';
+      const dir = path.join(galleryFolderPath(), 'generated', safeKind);
+      fs.mkdirSync(dir, { recursive: true });
+      const { full, name } = await _nextUserSeqName(dir, safeExt);
+      fs.writeFileSync(full, Buffer.from(bytes));
+      const size = fs.statSync(full).size;
+      return { ok: true, path: full, name, size };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Proxy ComfyUI HTTP calls through main. Uses Node's built-in
+  // http/https modules rather than Electron's `net.request` — the
+  // latter goes through Chromium's network stack which has known
+  // CONNECTION_REFUSED quirks with loopback on some Windows
+  // configurations (even when the port is verifiably listening). Node's
+  // http hits the OS socket directly and doesn't have the same issue.
+  // Body may be a string, a Uint8Array, or a plain object (auto-
+  // serialized as JSON).
+  ipcMain.handle('comfy-http', async (_e, opts) => {
+    const method = (opts?.method || 'GET').toUpperCase();
+    const urlStr = String(opts?.url || '');
+    const body   = opts?.body;
+    if (!urlStr || !/^https?:\/\//i.test(urlStr)) return { ok: false, error: 'invalid url' };
+    let parsed;
+    try { parsed = new URL(urlStr); } catch (e) { return { ok: false, error: 'bad url: ' + e.message }; }
+    const lib = parsed.protocol === 'https:' ? require('https') : require('http');
+    const headers = {};
+    let payload = null;
+    if (body != null) {
+      if (typeof body === 'string') {
+        payload = Buffer.from(body, 'utf8');
+      } else if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
+        payload = Buffer.from(body);
+      } else {
+        payload = Buffer.from(JSON.stringify(body), 'utf8');
+        headers['Content-Type'] = 'application/json';
+      }
+      headers['Content-Length'] = String(payload.length);
+    }
+    // Caller-supplied headers win — needed for multipart uploads that set
+    // their own Content-Type with a boundary.
+    if (opts?.headers && typeof opts.headers === 'object') {
+      for (const k of Object.keys(opts.headers)) {
+        headers[k] = String(opts.headers[k]);
+      }
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
+      const req = lib.request({
+        method,
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        headers,
+        // Long inactivity timeout (35 min) for video generations; for
+        // the initial socket connect we rely on the OS default.
+        timeout: 35 * 60 * 1000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          finish({
+            ok: res.statusCode >= 200 && res.statusCode < 400,
+            status: res.statusCode,
+            bytes: buf,
+          });
+        });
+        res.on('error', (err) => finish({ ok: false, error: err.message }));
+      });
+      req.on('error',   (err) => finish({ ok: false, error: err.code ? `${err.code} ${err.message}` : err.message }));
+      req.on('timeout', () => { try { req.destroy(new Error('timeout')); } catch {} });
+      if (payload) req.write(payload);
+      req.end();
+    });
+  });
+
+  // ── SCREEN RECORD: stream MediaRecorder chunks to a .mkv file ─────
+  // The renderer owns the MediaRecorder (it has the MediaStream).
+  // Each ondataavailable Blob gets sent here as a Uint8Array and
+  // appended to a write stream — that way long recordings don't blow
+  // renderer memory. Chromium outputs a WebM container, but WebM is
+  // EBML/Matroska and modern players (VLC, MPV, Windows Media) handle
+  // a .mkv extension on those bytes without complaint.
+  const _screenrecs = new Map(); // id → { stream, path }
+  ipcMain.handle('screenrec-start', async () => {
+    try {
+      const dir = path.join(galleryFolderPath(), 'recordings');
+      fs.mkdirSync(dir, { recursive: true });
+      const { full, name } = await _nextUserSeqName(dir, '.mkv');
+      const stream = fs.createWriteStream(full);
+      const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      _screenrecs.set(id, { stream, path: full, name });
+      return { ok: true, id, path: full, name };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('screenrec-chunk', (_e, id, bytes) => {
+    const rec = _screenrecs.get(id);
+    if (!rec) return { ok: false, error: 'unknown recording id' };
+    try {
+      // `bytes` arrives as a Buffer-like (Electron serializes Uint8Array
+      // and ArrayBuffer over IPC). Buffer.from handles both.
+      rec.stream.write(Buffer.from(bytes));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // ── KEYCAPTURE: global key hook via PowerShell + GetAsyncKeyState ──
+  // Spawns a PowerShell child that P/Invokes user32!GetAsyncKeyState at
+  // ~50 Hz, prints one line per fresh key-down edge. We map the VK code
+  // to a readable name and forward to the renderer. Stays system-wide
+  // because we read kernel state — no need to focus our window or to
+  // install a hook (no SetWindowsHookEx, no native dep).
+  //
+  // Important: this is an OBSERVATION-ONLY hook. It does NOT intercept
+  // or swallow keys (unlike globalShortcut.register). The user's keys
+  // still reach the focused app exactly as they normally would.
+  const _VK_NAMES = (() => {
+    const m = Object.create(null);
+    m[8] = 'BACKSPACE'; m[9] = 'TAB'; m[13] = 'ENTER'; m[16] = 'SHIFT';
+    m[17] = 'CTRL'; m[18] = 'ALT'; m[19] = 'PAUSE'; m[20] = 'CAPS';
+    m[27] = 'ESC'; m[32] = 'SPACE'; m[33] = 'PGUP'; m[34] = 'PGDN';
+    m[35] = 'END'; m[36] = 'HOME'; m[37] = '←'; m[38] = '↑'; m[39] = '→'; m[40] = '↓';
+    m[44] = 'PRTSC'; m[45] = 'INS'; m[46] = 'DEL';
+    for (let i = 48; i <= 57; i++) m[i] = String.fromCharCode(i);          // 0-9
+    for (let i = 65; i <= 90; i++) m[i] = String.fromCharCode(i);          // A-Z
+    m[91] = 'WIN'; m[92] = 'WIN'; m[93] = 'MENU';
+    for (let i = 96; i <= 105; i++) m[i] = 'NUM' + (i - 96);
+    m[106] = 'NUM*'; m[107] = 'NUM+'; m[109] = 'NUM-'; m[110] = 'NUM.'; m[111] = 'NUM/';
+    for (let i = 112; i <= 123; i++) m[i] = 'F' + (i - 111);               // F1-F12
+    m[144] = 'NUMLOCK'; m[145] = 'SCROLL';
+    m[160] = 'SHIFT'; m[161] = 'SHIFT'; m[162] = 'CTRL'; m[163] = 'CTRL';
+    m[164] = 'ALT';   m[165] = 'ALT';
+    m[186] = ';'; m[187] = '='; m[188] = ','; m[189] = '-'; m[190] = '.';
+    m[191] = '/'; m[192] = '`';
+    m[219] = '['; m[220] = '\\'; m[221] = ']'; m[222] = "'";
+    return m;
+  })();
+  function _spawnKeyHook() {
+    if (_keyHookProc) return { ok: true, alreadyRunning: true };
+    if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
+    // Single-quoted here-string so the C# source stays literal.
+    const ps = `
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class KH {
+  [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+}
+"@
+$prev = New-Object 'bool[]' 256
+while ($true) {
+  for ($i = 8; $i -lt 256; $i++) {
+    $s = [KH]::GetAsyncKeyState($i)
+    $down = ($s -band 0x8000) -ne 0
+    if ($down -and -not $prev[$i]) {
+      [Console]::Out.WriteLine($i)
+      [Console]::Out.Flush()
+    }
+    $prev[$i] = $down
+  }
+  Start-Sleep -Milliseconds 20
+}
+`;
+    try {
+      _keyHookProc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true });
+      let buf = '';
+      _keyHookProc.stdout.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        let nl;
+        while ((nl = buf.indexOf('\n')) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          // Hook is always running once spawned (pre-warm). We only
+          // forward keys to the renderer when the user has actually
+          // enabled the overlay, which avoids logging keystrokes for
+          // sessions that never used the feature.
+          if (!_keyHookEnabled) continue;
+          const vk = parseInt(line, 10);
+          if (!Number.isFinite(vk)) continue;
+          const name = _VK_NAMES[vk];
+          if (!name) continue;
+          if (_mainWin && !_mainWin.isDestroyed()) {
+            try { _mainWin.webContents.send('keycapture-key', { vk, name, ts: Date.now() }); } catch {}
+          }
+        }
+      });
+      _keyHookProc.on('exit', () => { _keyHookProc = null; });
+      _keyHookProc.on('error', (err) => { console.warn('[keycapture] proc error:', err.message); _keyHookProc = null; });
+      return { ok: true };
+    } catch (err) {
+      _keyHookProc = null;
+      return { ok: false, error: err.message };
+    }
+  }
+  // Pre-warm shortly after the main window shows so PowerShell's
+  // Add-Type JIT has finished by the time the user clicks KEYS.
+  // Privacy: spawned process polls GetAsyncKeyState constantly but
+  // events are only forwarded to the renderer once _keyHookEnabled is
+  // flipped on (i.e. after the user toggles KEYS in the UI).
+  setTimeout(() => { try { _spawnKeyHook(); } catch {} }, 2000);
+
+  ipcMain.handle('keycapture-start', () => {
+    _keyHookEnabled = true;
+    // If pre-warm hasn't fired yet (rare — e.g. user clicked KEYS in
+    // the first 2 s), spawn now.
+    if (!_keyHookProc) _spawnKeyHook();
+    return { ok: true };
+  });
+  ipcMain.handle('keycapture-stop', () => {
+    // Gate-off only; keep the process alive so re-enabling is instant.
+    // Kill happens at app quit via the before-quit hook.
+    _keyHookEnabled = false;
+    return { ok: true };
+  });
+
+  ipcMain.handle('screenrec-stop', async (_e, id) => {
+    const rec = _screenrecs.get(id);
+    if (!rec) return { ok: false, error: 'unknown recording id' };
+    _screenrecs.delete(id);
+    return await new Promise((resolve) => {
+      rec.stream.end(() => {
+        try {
+          const size = fs.statSync(rec.path).size;
+          resolve({ ok: true, path: rec.path, name: rec.name, size });
+        } catch (err) {
+          resolve({ ok: false, error: err.message });
+        }
+      });
+    });
+  });
+
+  ipcMain.handle('youtube-set-opacity', (_e, opacity) => {
+    if (!_ytWin || _ytWin.isDestroyed()) return { ok: false };
+    const o = Math.max(0.1, Math.min(1, Number(opacity)));
+    if (!Number.isFinite(o)) return { ok: false };
+    _ytWin.setOpacity(o);
+    return { ok: true, opacity: o };
+  });
+
   // yt-client bridge — renderer asks; main process owns the yt-dlp
   // binary + InnerTube/Bing/DDG/Google HTTPS + hidden BrowserWindow.
   // Errors stringify back so one broken video doesn't crash the popout.
@@ -2057,29 +3174,21 @@ async function getTempsInfo() {
     }
   }
 
-  // Fallback 2: LHM via HTTP on port 8085 (primary — LHM v0.9.x dropped
-  // WMI), then OHM via WMI for older systems still on OHM. HTTP first
-  // skips the slow PowerShell WMI query when the patched LHM is up.
-  if (result.cpu == null || result.cpuPower == null || result.gpus.some(g => g.temp == null || g.power == null)) {
-    const lhm = await sensorsService.getNativeFallback();
-    if (lhm) {
-      if (result.cpu == null && lhm.cpu != null) {
-        result.cpu = lhm.cpu;
-        result.sources.push('lhm:cpu');
-      }
-      if (result.cpuPower == null && lhm.cpuPower != null) {
-        result.cpuPower = lhm.cpuPower;
-      }
-      if (lhm.gpus?.length) {
-        let gotGpu = false;
-        for (let i = 0; i < lhm.gpus.length; i++) {
-          if (result.gpus[i]) {
-            if (result.gpus[i].temp  == null && lhm.gpus[i]      != null) { result.gpus[i].temp  = lhm.gpus[i]; gotGpu = true; }
-            if (result.gpus[i].power == null && lhm.gpusPower?.[i] != null) result.gpus[i].power = lhm.gpusPower[i];
-          }
-        }
-        if (gotGpu) result.sources.push('lhm:gpu');
-      }
+  // Fallback 2: native sensors service. On Windows this is a multi-
+  // probe non-elevated reader: ACPI thermal zones for CPU temp,
+  // `\Power Meter(*)\Power` for CPU watts (RAPL via the Windows Energy
+  // Estimation engine when available). Only fires when si left those
+  // fields null. GPU temp/power isn't covered here; NVIDIA users get
+  // it from nvidia-smi above, others gracefully degrade to null.
+  if (result.cpu == null || result.cpuPower == null) {
+    const native = await sensorsService.getNativeFallback();
+    if (native?.cpu != null && result.cpu == null) {
+      result.cpu = native.cpu;
+      result.sources.push('acpi:cpu');
+    }
+    if (native?.cpuPower != null && result.cpuPower == null) {
+      result.cpuPower = native.cpuPower;
+      result.sources.push('acpi:cpuPower');
     }
   }
 
@@ -2237,135 +3346,6 @@ function driveTypeName(t) {
     case 6: return 'RAM';
     default: return 'Unknown';
   }
-}
-
-// ─── TRANSFERS ─────────────────────────────────────────────────────
-// Active downloads / file transfers in the user's Downloads folder.
-// A file counts as "active" if it either has a partial-download
-// extension (browsers / torrent clients write to one of these while
-// the bytes are still streaming in) OR it grew between the previous
-// poll and this one. Per-file state is kept in TRANSFER_STATE so we
-// can compute bytes/sec across polls. Entries are pruned once they
-// stop growing for long enough that they're clearly done.
-const TRANSFER_STATE = new Map(); // path -> { size, mtimeMs, sampledAt, speed, firstSeen, peakSize }
-const TRANSFER_PARTIAL_EXT = /\.(crdownload|part|partial|download|opdownload|tmp|!ut|!qb|bc!|aria2)$/i;
-const TRANSFER_STALE_MS    = 8000;   // drop tracked file if untouched this long
-const TRANSFER_ACTIVE_MS   = 6000;   // mtime within this window counts as active
-const TRANSFER_BITS_EVERY  = 10;     // run Get-BitsTransfer once every N polls (PowerShell startup is slow)
-let   TRANSFER_BITS_TICK   = 0;
-
-async function getTransfersInfo() {
-  // Filesystem-poll path works on Linux too — the BITS-specific bit was
-  // already abstracted out via systemService.getActiveBitsTransfers(),
-  // which returns [] on non-Windows. Dropping the early-return guard
-  // lets the dashboard's downloads progress UI work on Linux too.
-  const dir = path.join(os.homedir(), 'Downloads');
-  let entries;
-  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
-  catch { return []; }
-
-  const now = Date.now();
-  const out = [];
-  const seenPaths = new Set();
-
-  for (const ent of entries) {
-    if (!ent.isFile()) continue;
-    const full = path.join(dir, ent.name);
-    let st;
-    try { st = await fs.promises.stat(full); } catch { continue; }
-    if (st.size <= 0 && !TRANSFER_PARTIAL_EXT.test(ent.name)) continue;
-
-    seenPaths.add(full);
-    const prev = TRANSFER_STATE.get(full);
-    const partial = TRANSFER_PARTIAL_EXT.test(ent.name);
-    const recent  = (now - st.mtimeMs) < TRANSFER_ACTIVE_MS;
-    const grew    = prev ? st.size > prev.size : false;
-
-    // Update tracked state for every observed file so we have a
-    // baseline next poll even if it's not active yet.
-    let speed = 0;
-    if (prev) {
-      const dt = (now - prev.sampledAt) / 1000;
-      if (dt > 0 && st.size >= prev.size) speed = (st.size - prev.size) / dt;
-      // Smooth wildly bursty samples a bit (exp moving average).
-      if (prev.speed > 0) speed = prev.speed * 0.5 + speed * 0.5;
-    }
-    const firstSeen = prev?.firstSeen ?? now;
-    const peakSize  = Math.max(prev?.peakSize ?? 0, st.size);
-    TRANSFER_STATE.set(full, {
-      size: st.size, mtimeMs: st.mtimeMs, sampledAt: now,
-      speed, firstSeen, peakSize,
-    });
-
-    const isActive = partial || recent || grew || (prev && (now - prev.sampledAt) < TRANSFER_STALE_MS && speed > 0);
-    if (!isActive) continue;
-
-    // We have no authoritative "total size" from the filesystem alone
-    // (Chrome's .crdownload doesn't expose the Content-Length). We can
-    // estimate by holding the largest size seen, which makes the bar
-    // grow monotonically. For a true progress %, BITS jobs (below)
-    // override this with real BytesTotal.
-    const total    = peakSize > st.size ? peakSize : null;
-    const progress = total && total > 0 ? Math.min(1, st.size / total) : null;
-
-    out.push({
-      id: full,
-      name: ent.name,
-      kind: partial ? 'download' : 'copy',
-      size: st.size,
-      total,
-      progress,
-      speed,
-      source: 'Downloads',
-      isPartial: partial,
-    });
-  }
-
-  // Get-BitsTransfer: catches Windows Update + any app routing through
-  // BITS. These DO expose a real total → real %. Throttled to one call
-  // every TRANSFER_BITS_EVERY polls because PowerShell startup is
-  // ~500 ms — running it every poll pegs a CPU core and starves other
-  // main-process work.
-  try {
-    const shouldRunBits = (++TRANSFER_BITS_TICK % TRANSFER_BITS_EVERY) === 1;
-    const arr = shouldRunBits ? await systemService.getActiveBitsTransfers() : [];
-    for (const j of arr) {
-      const tot = Number(j.BytesTotal) || 0;
-      const cur = Number(j.BytesTransferred) || 0;
-      const prev = TRANSFER_STATE.get('bits:' + j.id);
-      let speed = 0;
-      if (prev) {
-        const dt = (now - prev.sampledAt) / 1000;
-        if (dt > 0 && cur >= prev.size) speed = (cur - prev.size) / dt;
-        if (prev.speed > 0) speed = prev.speed * 0.5 + speed * 0.5;
-      }
-      TRANSFER_STATE.set('bits:' + j.id, { size: cur, mtimeMs: now, sampledAt: now, speed, firstSeen: prev?.firstSeen ?? now, peakSize: tot });
-      seenPaths.add('bits:' + j.id);
-      out.push({
-        id: 'bits:' + j.id,
-        name: j.DisplayName || 'BITS Transfer',
-        kind: 'bits',
-        size: cur,
-        total: tot > 0 ? tot : null,
-        progress: tot > 0 ? Math.min(1, cur / tot) : null,
-        speed,
-        source: String(j.TransferType || 'BITS').toUpperCase(),
-        isPartial: false,
-      });
-    }
-  } catch {}
-
-  // Garbage-collect tracked entries that vanished or went quiet so
-  // the Map doesn't grow forever.
-  for (const [k, v] of TRANSFER_STATE) {
-    if (!seenPaths.has(k) && (now - v.sampledAt) > TRANSFER_STALE_MS) {
-      TRANSFER_STATE.delete(k);
-    }
-  }
-
-  // Active first, by speed.
-  out.sort((a, b) => (b.speed || 0) - (a.speed || 0));
-  return out;
 }
 
 async function getStoragePosix() {

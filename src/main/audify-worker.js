@@ -14,6 +14,17 @@ const { RtAudio, RtAudioFormat, RtAudioApi } = audify;
 const { createFftEngine } = require('./audio-fft');
 
 let rt = null;
+// PCM forwarding gate. Enabled by main when a screen recording starts
+// so the renderer can pipe loopback audio into the recording's MediaStream
+// (Chromium's chromeMediaSource: 'desktop' doesn't capture audio from
+// window sources; this worker has the real samples already, so we just
+// forward them when asked). Disabled otherwise to avoid IPC traffic.
+let _pcmOn = false;
+// Batch N callbacks before posting so we don't spam IPC ~93 Hz at
+// 48 kHz/512. 4 ≈ 23 messages/sec ≈ 43 ms of audio per chunk — small
+// enough to feel synchronous to the recorder, large enough to be cheap.
+const PCM_BATCH = 4;
+let _pcmBatch = [];
 function start() {
   try {
     rt = new RtAudio(RtAudioApi.WINDOWS_WASAPI);
@@ -82,6 +93,29 @@ function start() {
         } else {
           process.parentPort.postMessage({ rms: result.rms, deviceName: dev.name });
         }
+        // PCM forwarding: copy this callback's samples into a fresh
+        // Float32Array (the audify buffer gets reused) and batch
+        // PCM_BATCH callbacks before posting. Posting a typed array
+        // through utilityProcess.postMessage uses structured clone.
+        if (_pcmOn) {
+          _pcmBatch.push(new Float32Array(samples));
+          if (_pcmBatch.length >= PCM_BATCH) {
+            // Concatenate the batch into one interleaved buffer.
+            let total = 0;
+            for (const a of _pcmBatch) total += a.length;
+            const merged = new Float32Array(total);
+            let off = 0;
+            for (const a of _pcmBatch) { merged.set(a, off); off += a.length; }
+            _pcmBatch.length = 0;
+            try {
+              process.parentPort.postMessage({
+                pcm: merged,
+                sampleRate,
+                channels,
+              });
+            } catch {}
+          }
+        }
       },
       null,
     );
@@ -101,6 +135,8 @@ process.parentPort.on('message', (e) => {
     rt = null;
     process.exit(0);
   }
+  if (e.data === 'pcm-on')  { _pcmOn = true;  _pcmBatch.length = 0; }
+  if (e.data === 'pcm-off') { _pcmOn = false; _pcmBatch.length = 0; }
 });
 
 start();

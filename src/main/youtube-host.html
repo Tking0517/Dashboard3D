@@ -134,6 +134,8 @@
     <input class="search yt"  id="search-yt"  type="search" placeholder="YOUTUBE…"     autocomplete="off" spellcheck="false" />
     <input class="search gen" id="search-gen" type="search" placeholder="WEB VIDEOS…"  autocomplete="off" spellcheck="false" />
     <button id="back" title="Back to results">&#8592;</button>
+    <button id="opaque"  class="is-active" title="Opaque (default)">100%</button>
+    <button id="seethru" title="60% transparent — see the zen dashboard">SEE THRU</button>
     <button id="aot" class="is-active" title="Always on top">⫐</button>
     <button id="close" class="close" title="Close">×</button>
   </div>
@@ -152,9 +154,11 @@
     const hdr      = $('hdr');
     const searchYt = $('search-yt');
     const searchGen= $('search-gen');
-    const aotBtn   = $('aot');
-    const backBtn  = $('back');
-    const closeBtn = $('close');
+    const aotBtn      = $('aot');
+    const backBtn     = $('back');
+    const closeBtn    = $('close');
+    const opaqueBtn   = $('opaque');
+    const seethruBtn  = $('seethru');
     const viewResults = $('view-results');
     const viewPlayer  = $('view-player');
     const emptyState  = $('empty-state');
@@ -195,6 +199,23 @@
 
     // ─── Window controls ─────────────────────────────────────────────
     closeBtn.onclick = () => window.close();
+    // Opacity buttons — OPAQUE keeps the window at 100% (default), SEE
+    // THRU drops it to 40% so the zen-mode dashboard panels behind the
+    // YT window show through. The is-active class flips between the
+    // two so it's clear which mode is currently set.
+    function _setYtOpacityState(opaque) {
+      opaqueBtn.classList.toggle('is-active',  opaque);
+      seethruBtn.classList.toggle('is-active', !opaque);
+    }
+    opaqueBtn.onclick = async () => {
+      try { await window.youtubeHost.setOpacity(1.0); } catch {}
+      _setYtOpacityState(true);
+    };
+    seethruBtn.onclick = async () => {
+      try { await window.youtubeHost.setOpacity(0.4); } catch {}
+      _setYtOpacityState(false);
+    };
+
     aotBtn.onclick   = async () => {
       const next = await window.youtubeHost.toggleAlwaysOnTop();
       aotBtn.classList.toggle('is-active', !!next);

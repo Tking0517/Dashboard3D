@@ -189,10 +189,16 @@ function restartLoopback(win) {
   setTimeout(() => startLoopback(win), 350);
 }
 
+// Linux PCM forwarding hasn't been built yet; expose a stub so the
+// adapter interface matches the Windows backend (renderer always calls
+// audioService.setPcmForward without platform-switching).
+function setPcmForward() {}
+
 module.exports = {
   startLoopback,
   stopLoopback,
   restartLoopback,
+  setPcmForward,
   setSystemMute,
   getSystemMuteStates,
   setDefaultEndpoint,

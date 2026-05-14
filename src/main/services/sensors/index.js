@@ -12,10 +12,11 @@
 //   } | null>
 //
 //   launchSensorBackend() → void
-//     Fire-and-forget. On Windows this kicks the bundled
-//     LibreHardwareMonitor.exe if it isn't already running (UAC prompt
-//     on first launch). On Linux it's a no-op — hwmon sensors are
-//     always present in the kernel, no daemon needed.
+//     Fire-and-forget. On Windows this is now a no-op — the backend
+//     reads CPU temp directly via WMI's ACPI thermal zone class, so no
+//     external monitor process / UAC prompt is required. On Linux it's
+//     also a no-op (hwmon kernel sensors are always present).
+//     Kept as an exported method for interface stability.
 
 module.exports = process.platform === 'win32'
   ? require('./win')

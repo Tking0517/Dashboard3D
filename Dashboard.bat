@@ -38,6 +38,10 @@ xcopy /E /I /Y "%ROOT%src\main\services" "%ROOT%Dashboard3D-win32-x64\resources\
 :: a full electron-packager rebuild. The bundled yt-dlp binaries are
 :: in bin/ — /E mirrors them too.
 xcopy /E /I /Y "%ROOT%node_modules\yt-client" "%ROOT%Dashboard3D-win32-x64\resources\app\node_modules\yt-client" >nul
+:: ffmpeg-static — ~80MB Windows BtbN build with h264_nvenc/hevc_nvenc.
+:: Powers the rec-room PROCESS snap-stitcher's GPU fast path. Mirror
+:: into packaged resources so the deployed exe finds the binary.
+xcopy /E /I /Y "%ROOT%node_modules\ffmpeg-static" "%ROOT%Dashboard3D-win32-x64\resources\app\node_modules\ffmpeg-static" >nul
 
 if exist "%APP_EXE%" (
   start "" "%APP_EXE%"

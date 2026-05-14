@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.9.0-alpha.1] — 2026-05-14
+
+**Feature drop — GENERATE room (ComfyUI), background music, RETRO CRT theme, LHM-free sensor stack, rec-room overhaul.**
+
+### GENERATE — ComfyUI workflow front-end
+- **New combo-pane tab `GENERATE`** — drop ComfyUI workflow JSON files into a configured folder (`comfyWorkflowDir`, default `~/OneDrive/Desktop/comfyistuff`) and each becomes a typed tab (`IMAGE` / `VIDEO` / `AUDIO`) in the dashboard. Filename convention `<kind>_<name>.json` sets the tab kind and display label.
+- **Page-style form layout** instead of one box per ComfyUI node:
+  - Hero block (always visible) — IMAGE/VIDEO INPUT, PROMPT, NEGATIVE PROMPT, DIMENSIONS sliders.
+  - Collapsible ADVANCED SETTINGS holds everything else (samplers, schedulers, model names, LoRAs, seeds…) in a compact 2-col grid.
+  - Output preview pinned under RUN with aspect-preserving letterbox and a session thumbnail strip — click a thumb to swap it into the main slot.
+- **ComfyUI v3 subgraph flattening** — the workflows ship as a thin top-level node referencing `definitions.subgraphs[].nodes`. Discovery walks subgraph contents, classification tags prompts/media/dimensions by node type AND by the subgraph instance label that proxies to them. Submission flattens subgraphs back into a flat API-format node dict, normalizing the v3 object-form internal links into the tuple form the API converter expects.
+- **Smart role detection** —
+  - `PrimitiveStringMultiline` wins as the positive prompt (v3 convention); falls back to `CLIPTextEncode`, then any `*TextEncode*` for audio workflows.
+  - `LoadImage` / `LoadImageMask` / `VHS_LoadVideo` / `LoadVideo` / `LoadAudio` recognized as media-input nodes; first scalar widget surfaced as the file picker.
+  - `width` / `height` / `megapixels` / `fps` / `duration` / `scale` / `batch_size` (and their subgraph-relabelled equivalents on `PrimitiveInt`-style nodes) lift into the DIMENSIONS hero with range sliders.
+- **Media uploader** — file picker uploads to ComfyUI's `/upload/image` over multipart form-data (manually assembled in the renderer because Electron's app origin can't reach loopback directly), writes the returned filename back into the loader widget so the workflow uses the new asset at RUN time. Thumbnail preview shown after upload.
+- **CANCEL + FLUSH MEMORY** in the header — CANCEL POSTs `/interrupt` plus a queue-delete fallback and flips a flag that breaks the local poll loop. FLUSH POSTs `/free` with `unload_models: true, free_memory: true` so VRAM/RAM is released without restarting ComfyUI.
+- **UI/API converter hardening** — drops `MarkdownNote` / `Note` annotation nodes, treats `Reroute` / `PrimitiveNode` as passthroughs (resolves links transitively to the real producer), filters out unknown node types via `/object_info`, and now only puts widget-backed inputs (STRING, INT, FLOAT, BOOLEAN, COMBO) into the widget-slot list so dangling link-only inputs can't shift widget alignment.
+- **`comfy-http` IPC** in main — Node `http`/`https` instead of Electron's `net.request` (Chromium's net stack refused loopback on some Windows configurations even when the port was verifiably listening). Accepts caller-supplied headers for the multipart uploader, with a 35-minute inactivity timeout for long video generations.
+
+### Background music
+- **New `MUSIC` combo-pane** with 11 genres × ~10 procedurally-synthesised tracks each (~110 total): `plundercore`, `vaporwave`, `synthwave`, `lofi`, `darkambient`, `eightbit`, `smoothjazz`, `taverncore`, `cyberpunk`, `soundtrack`, `daft`. Every track is a Web Audio composition (FM bells, sawtooth+detune pads, breathing pumping pads, vocoder leads, etc.) — no audio files shipped.
+- **Transport bar** — prev / play-pause / stop / next / volume buttons sized to match the rest of the UI.
+- **Visualiser** — bar-graph styled to match other dashboard graphs; 4× the previous resolution, dynamic to pane width.
+- **5-minute auto-cycle** within the current genre.
+- **FAVS playlist** — heart toggle per track, persisted via `cfg.bgmFavorites`. A virtual `FAVS` genre aggregates favorites across all genres.
+
+### RETRO CRT theme
+- **New `retro` theme family** — vacuum-tube look: heavy multi-layer halation glows on text and borders, dot-matrix mask overlay simulating phosphor pixels, animated scanlines.
+- **10 phosphor variants** — amber, green, blue, white, red, magenta, cyan, mint, violet, gold, ice. Shared core via `[data-theme^="retro"]` attribute prefix selector.
+
+### Backgrounds
+- 6 new background patterns: `triangles-fine`, `triangles-bold`, `iso-grid`, `spiderweb`, `spiderweb-tight`, `radial`. CSS conic-gradient for the radial spokes; layered radial+linear gradients for the dot-matrix CRT mask.
+
+### Sensors — LibreHardwareMonitor removed
+- **No more `LibreHardwareMonitor.exe` dependency** — eliminates the elevation prompt, the persistent process tray icon, and the cold-start GPU spike from sensor enumeration.
+- **CPU temp** read via WMI `MSAcpi_ThermalZoneTemperature`, `Win32_PerfFormattedData_Counters_ThermalZoneInformation`, and `Win32_TemperatureProbe`. PDH counter `\Thermal Zone Information(*)\Temperature` as a fallback for the same data without admin.
+- **CPU power** via Windows Power Meter PDH counter `\Power Meter(*)\Power`.
+- GPU temp / power still uses NVML / `nvidia-smi` (per-vendor); the LHM HTTP path remains opt-in as an override.
+
+### Rec room
+- **Right-click + Del key delete** with a confirm dialog. Copy/paste support (Windows clipboard for files).
+- **Folder navigation** — single-click = select/highlight, double-click = enter; PROCESS expands folders to their image children for batch stitching.
+- **Shift-click range selection** (Windows-style) — `shift` replaces range from anchor, `ctrl+shift` adds range, anchor only moves on a plain click.
+- **Live time-crunch preview** — the rec-room player re-renders at the current speed slider value while you drag, so you can see what the export will look like before committing.
+- **CROP auto-disables** when the player switches to a recorded video, so the recorded source plays at native dimensions.
+- **Screen recording captures system audio** via the WASAPI loopback PCM pipe (already in place for the visualiser) → renderer `AudioContext` → `MediaStreamDestination` → `MediaRecorder`. Audio is in the file even when the user's own speakers are muted.
+
+### Process pipeline
+- **ffmpeg-static + NVENC** — bundled `ffmpeg-static` package, GPU encoder path when CUDA is available, falls back to x264 otherwise. Image-stitch → MP4 (not WebM) by default.
+- **`USER NNNN.mp4` / `Tom NNNN.mp4` naming** — sequential 4-digit names so outputs sort chronologically without timestamp clutter.
+
+### Misc UI polish
+- **Snow boot animation** replaced with a heavy radial blur that fades off slower, ending right as the dashboard fully reveals.
+- **`invert` darkness percentage** moved from 0.30 → 0.70 (a long iteration with the user — 0.15 was too dark, 0.30 was the start, 0.70 hit the target). `dim` mode removed entirely.
+- **Zen mode clock** now uses `var(--accent)` instead of hard-coded white so it matches the active theme.
+
+### Config + portability
+- New keys on `default-config.json`: `comfyHost` (`http://127.0.0.1:8000`), `comfyWorkflowDir` (empty = use `~/OneDrive/Desktop/comfyistuff`).
+- Reminder: the packaged build reads its config from `<exe-dir>/userdata/config.json` (portable mode) — NOT `%APPDATA%/Dashboard3D/`. Dev mode (`npm run dev`) still uses `%APPDATA%`. This trapped one debugging session for a while; it's now documented in main's `portableDataDir()`.
+
 ## [0.7.0-alpha.1] — 2026-05-11
 
 **Alpha milestone — Linux build runs on real hardware.**

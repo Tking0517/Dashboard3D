@@ -157,6 +157,41 @@ body.font-writing {
   --font-tech:    'Source Serif', Georgia, serif;
 }
 
+/* Single-typeface themes — every readout gets one font for a uniform
+   look. Both --font-display and --font-tech swap to the same family
+   so headlines and body data feel like one voice. Each entry sets
+   web-safe fallbacks so the theme still applies if the bundled woff
+   isn't loaded yet. */
+body.font-inter      { --font-display:'Inter','Helvetica Neue',sans-serif; --font-tech:'Inter','Helvetica Neue',sans-serif; }
+body.font-jetbrains  { --font-display:'JetBrains Mono','Consolas',monospace; --font-tech:'JetBrains Mono','Consolas',monospace; }
+body.font-plex-sans  { --font-display:'IBM Plex Sans','Inter',sans-serif; --font-tech:'IBM Plex Sans','Inter',sans-serif; }
+body.font-plex-mono  { --font-display:'IBM Plex Mono','Consolas',monospace; --font-tech:'IBM Plex Mono','Consolas',monospace; }
+body.font-source     { --font-display:'Source Serif',Georgia,serif; --font-tech:'Source Serif',Georgia,serif; }
+body.font-lora       { --font-display:'Lora',Georgia,serif; --font-tech:'Lora',Georgia,serif; }
+body.font-space      { --font-display:'Space Grotesk','Inter',sans-serif; --font-tech:'Space Grotesk','Inter',sans-serif; }
+
+/* System / OS-installed sans-serifs */
+body.font-helvetica  { --font-display:'Helvetica Neue',Arial,sans-serif; --font-tech:'Helvetica Neue',Arial,sans-serif; }
+body.font-arial      { --font-display:Arial,'Helvetica Neue',sans-serif; --font-tech:Arial,'Helvetica Neue',sans-serif; }
+body.font-segoe      { --font-display:'Segoe UI',system-ui,sans-serif; --font-tech:'Segoe UI',system-ui,sans-serif; }
+body.font-system     { --font-display:system-ui,-apple-system,'Segoe UI',sans-serif; --font-tech:system-ui,-apple-system,'Segoe UI',sans-serif; }
+body.font-verdana    { --font-display:Verdana,Geneva,sans-serif; --font-tech:Verdana,Geneva,sans-serif; }
+body.font-tahoma     { --font-display:Tahoma,Geneva,sans-serif; --font-tech:Tahoma,Geneva,sans-serif; }
+body.font-trebuchet  { --font-display:'Trebuchet MS',Tahoma,sans-serif; --font-tech:'Trebuchet MS',Tahoma,sans-serif; }
+body.font-comic      { --font-display:'Comic Sans MS',cursive; --font-tech:'Comic Sans MS',cursive; }
+body.font-impact     { --font-display:Impact,'Arial Black',sans-serif; --font-tech:Impact,'Arial Black',sans-serif; }
+
+/* System / OS-installed serifs */
+body.font-georgia    { --font-display:Georgia,'Times New Roman',serif; --font-tech:Georgia,'Times New Roman',serif; }
+body.font-times      { --font-display:'Times New Roman',Times,serif; --font-tech:'Times New Roman',Times,serif; }
+body.font-cambria    { --font-display:Cambria,Georgia,serif; --font-tech:Cambria,Georgia,serif; }
+body.font-palatino   { --font-display:'Palatino Linotype','Book Antiqua',Palatino,serif; --font-tech:'Palatino Linotype','Book Antiqua',Palatino,serif; }
+body.font-garamond   { --font-display:Garamond,'Times New Roman',serif; --font-tech:Garamond,'Times New Roman',serif; }
+
+/* System / OS-installed monos */
+body.font-console    { --font-display:Consolas,'Courier New',monospace; --font-tech:Consolas,'Courier New',monospace; }
+body.font-courier    { --font-display:'Courier New',Courier,monospace; --font-tech:'Courier New',Courier,monospace; }
+
 /* ════════════════════════════════════════════════════════════════
    §2 · THEMES
    Each [data-theme="..."] block overrides --accent, --amber, --red,
@@ -433,6 +468,177 @@ body.font-writing {
   --dim:    #1c1816;
 }
 
+/* RETRO themes — vacuum-tube CRT / VFD aesthetic. The selector
+   prefix `[data-theme^="retro"]` matches the default amber AND every
+   phosphor variant below, so all retro-* themes share the same glow
+   stack, scanlines, and dot-matrix mask while differing only in the
+   `--accent`/`--text` palette. */
+
+/* AMBER — P3 phosphor, the most common vintage terminal colour. */
+[data-theme="retro"],
+[data-theme="retro-amber"] {
+  --accent: #ffaa44;
+  --amber:  #ffd060;
+  --red:    #ff7c4c;
+  --ok:     #aedb6e;
+  --text:   #ffce88;
+  --muted:  #966842;
+  --dim:    #2a1810;
+}
+/* GREEN — P31 Apple II / Commodore monochrome bright green. */
+[data-theme="retro-green"] {
+  --accent: #4dff4d;
+  --amber:  #aaff44;
+  --red:    #ff5566;
+  --ok:     #88ff66;
+  --text:   #aaffaa;
+  --muted:  #3d8a3d;
+  --dim:    #0a200a;
+}
+/* BLUE — IBM 3270 mainframe terminal blue. */
+[data-theme="retro-blue"] {
+  --accent: #4d8cff;
+  --amber:  #66ccff;
+  --red:    #ff5577;
+  --ok:     #66ffcc;
+  --text:   #aaccff;
+  --muted:  #3a5a8a;
+  --dim:    #0a1428;
+}
+/* WHITE — P4 TV phosphor, neutral monochrome. */
+[data-theme="retro-white"] {
+  --accent: #e8e8e8;
+  --amber:  #ffffff;
+  --red:    #ff7c7c;
+  --ok:     #aaffaa;
+  --text:   #f8f8f8;
+  --muted:  #686868;
+  --dim:    #181818;
+}
+/* RED — military radar P56, gunmetal warning red. */
+[data-theme="retro-red"] {
+  --accent: #ff5544;
+  --amber:  #ffaa44;
+  --red:    #ff3322;
+  --ok:     #ffcc88;
+  --text:   #ffaa88;
+  --muted:  #884438;
+  --dim:    #200808;
+}
+/* MAGENTA — synthwave / Vegas neon pink. */
+[data-theme="retro-magenta"] {
+  --accent: #ff44aa;
+  --amber:  #ff88cc;
+  --red:    #ff5577;
+  --ok:     #aaffcc;
+  --text:   #ffaadd;
+  --muted:  #883a66;
+  --dim:    #200818;
+}
+/* CYAN — Tron / Star-Trek-LCARS cool cyan. */
+[data-theme="retro-cyan"] {
+  --accent: #44eeff;
+  --amber:  #88ffff;
+  --red:    #ff7766;
+  --ok:     #aaffcc;
+  --text:   #aaeeff;
+  --muted:  #386a78;
+  --dim:    #081820;
+}
+/* MINT — soft mint-phosphor, easier on the eye than full green. */
+[data-theme="retro-mint"] {
+  --accent: #88ffcc;
+  --amber:  #ccffdd;
+  --red:    #ff7799;
+  --ok:     #aaffcc;
+  --text:   #c8ffe0;
+  --muted:  #588870;
+  --dim:    #0c2818;
+}
+/* VIOLET — hi-fi VFD violet, late-90s home stereo. */
+[data-theme="retro-violet"] {
+  --accent: #cc88ff;
+  --amber:  #ddaaff;
+  --red:    #ff77aa;
+  --ok:     #aaffcc;
+  --text:   #d8b0ff;
+  --muted:  #6a4880;
+  --dim:    #180a28;
+}
+/* GOLD — warm old-TV gold, slightly more yellow than amber. */
+[data-theme="retro-gold"] {
+  --accent: #ffcc44;
+  --amber:  #ffe888;
+  --red:    #ff7c4c;
+  --ok:     #aedb6e;
+  --text:   #ffddaa;
+  --muted:  #886c2c;
+  --dim:    #261a08;
+}
+/* ICE — server-room cold pale blue. */
+[data-theme="retro-ice"] {
+  --accent: #aaccff;
+  --amber:  #ccddff;
+  --red:    #ff8899;
+  --ok:     #aaffdd;
+  --text:   #ddeeff;
+  --muted:  #4a6a8a;
+  --dim:    #0c1828;
+}
+
+/* ── Shared retro effects (apply to every retro-* variant) ─────────
+   Heavy phosphor halation on text + box-shadow bloom on chrome +
+   CRT scanlines + VFD dot-matrix mask. The `^="retro"` selector
+   matches all retro-* themes; each variant's --accent drives the
+   colour of every layer below. */
+body[data-theme^="retro"] {
+  text-shadow:
+    0 0 4px   color-mix(in srgb, var(--accent) 95%, transparent),
+    0 0 12px  color-mix(in srgb, var(--accent) 80%, transparent),
+    0 0 28px  color-mix(in srgb, var(--accent) 55%, transparent),
+    0 0 56px  color-mix(in srgb, var(--accent) 30%, transparent),
+    0 0 100px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+body[data-theme^="retro"] .panel,
+body[data-theme^="retro"] .audio-grid,
+body[data-theme^="retro"] .topbar-controls {
+  box-shadow:
+    0 0 14px  color-mix(in srgb, var(--accent) 65%, transparent),
+    0 0 36px  color-mix(in srgb, var(--accent) 50%, transparent),
+    0 0 80px  color-mix(in srgb, var(--accent) 30%, transparent),
+    0 0 140px color-mix(in srgb, var(--accent) 15%, transparent),
+    0 0 220px color-mix(in srgb, var(--accent) 7%,  transparent);
+}
+body[data-theme^="retro"]::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 99998;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 3px,
+    rgba(0, 0, 0, 0.18) 3px,
+    rgba(0, 0, 0, 0.18) 4px
+  );
+}
+body[data-theme^="retro"]::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 99999;
+  background-image:
+    radial-gradient(
+      circle at 50% 50%,
+      transparent 1px,
+      rgba(0, 0, 0, 0.42) 1.8px
+    );
+  background-size: 4px 4px;
+  mix-blend-mode: multiply;
+}
+
 /* Alert theme — auto-engaged when offline, on errors, or when CPU/GPU load
    crosses 90%. Same animation cadence as every other theme; the strobe
    peaks 70% brighter via swapped keyframes (panel-pulse-alert / element-
@@ -469,28 +675,20 @@ body.font-writing {
 }
 
 /* ════════════════════════════════════════════════════════════════
-   §11 · UTILITIES (invert / dim / eco-mode)
+   §11 · UTILITIES (invert / eco-mode)
    Body-class filters that compose on top of any theme. .theme-invert
    inverts the app + hue-rotates so colors don't go negative; brightness
-   pulls the would-be-white surface back to ~30% gray so the inverted
-   view doesn't blast the room. .theme-dim halves brightness for low-
-   light use. Both combine. .is-eco-mode disables non-essential
+   pulls the would-be-white surface down to 15% so the inverted view
+   stays comfortable in a dim room. .is-eco-mode disables non-essential
    animations to save CPU on low-power machines.
    ════════════════════════════════════════════════════════════════ */
 
-/* Invert + dim toggles. hue-rotate keeps color identity through invert
-   (blue stays blue-ish). brightness() after invert pulls the would-be-
-   white surface back to roughly mid-gray so the inverted view doesn't
-   blast the room — close to 50% with a slight bias darker. dim chains
-   on top by simply multiplying the brightness factor. */
+/* Invert toggle. hue-rotate keeps color identity through invert (blue
+   stays blue-ish). brightness(0.7) shaves the edge off the inverted
+   white so the view reads as a softly-toned dark mode rather than a
+   deep dim — the invert does most of the work. */
 body.theme-invert #app {
-  filter: invert(1) hue-rotate(180deg) brightness(0.3);
-}
-body.theme-dim #app {
-  filter: brightness(0.5);
-}
-body.theme-invert.theme-dim #app {
-  filter: invert(1) hue-rotate(180deg) brightness(0.18);
+  filter: invert(1) hue-rotate(180deg) brightness(0.7);
 }
 
 /* Zen overlay: big centered clock + weather summary, only visible while
@@ -514,12 +712,46 @@ body.theme-invert.theme-dim #app {
   transition: opacity 550ms ease 550ms, transform 550ms ease 550ms;
   color: var(--text);
 }
+/* Zen exit button — top-center, theme-tinted. Visible only while zen
+   is active (parent .zen-overlay is opacity 0 outside zen). pointer-
+   events override on the button so it actually receives clicks even
+   though .zen-overlay is pointer-events: none. */
+.zen-exit-btn {
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: color-mix(in srgb, var(--bg, #0b0d0f) 80%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  cursor: pointer;
+  pointer-events: auto;
+  border-radius: 2px;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 30%, transparent);
+  transition: background 120ms ease, color 120ms ease,
+              border-color 120ms ease, box-shadow 120ms ease;
+}
+.zen-exit-btn svg { width: 14px; height: 14px; }
+.zen-exit-btn:hover {
+  background: color-mix(in srgb, var(--accent) 25%, var(--bg, #0b0d0f));
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
 body.is-zen .zen-overlay {
   opacity: 1;
   transform: translateY(0);
 }
-/* Non-focal zen elements render 60% darker than the clock/date/weather/power. */
-body.is-zen .zen-overlay > *:not(.zen-clock):not(.zen-date):not(.zen-weather):not(.zen-power),
+/* Non-focal zen elements render 60% darker than the clock/date/weather/power.
+   The exit button stays at full brightness so it remains obvious. */
+body.is-zen .zen-overlay > *:not(.zen-clock):not(.zen-date):not(.zen-weather):not(.zen-power):not(.zen-exit-btn),
 body.is-zen .audio-grid {
   opacity: 0.4;
   transition: opacity 600ms ease;
@@ -531,9 +763,11 @@ body.is-zen .audio-grid {
   gap: 18px;
   font-family: var(--font-display);
   font-weight: 300;
-  /* Lift the clock 40% above the rest of the zen overlay's brightness so
-     the time stays the focal element after the global dim is applied. */
-  filter: brightness(1.4);
+  /* Theme-coloured: the clock paints in the active palette's accent so
+     each theme reads with its own identity, rather than pumping --text
+     past white via a brightness boost (which made every theme's clock
+     look identically pure-white). */
+  color: var(--accent);
 }
 .zen-time {
   /* Back on Rajdhani (the display font). To keep the centered clock from
@@ -856,6 +1090,12 @@ body.is-zen-leaving::after  { animation: zen-black-peak  950ms ease forwards; }
   0%, 100% { opacity: 0; }
   50%      { opacity: 1; }
 }
+
+/* Hide the cursor 3 s into zen mode (class added by JS). Removed again
+   on leaveZen — the existing mousemove handler exits zen anyway, so the
+   pointer reappears the moment the user moves it. */
+body.is-zen-cursor-hidden,
+body.is-zen-cursor-hidden * { cursor: none !important; }
 
 /* In zen mode, the two audio meters stop being chunky bottom corners and
    become a full-width pair across the bottom — short, wide, and out of the
@@ -1238,6 +1478,180 @@ body[data-bg-pattern="circuit"] .bg-grid {
       color-mix(in srgb, var(--accent) 8%, transparent) 79px 80px);
   background-size: 80px 80px, auto, auto;
 }
+/* Denser triangle lattice — three diagonal grids at 60° offsets with
+   tight 30 px spacing for a busier mesh feel. */
+body[data-bg-pattern="triangles-fine"] .bg-grid {
+  background-image:
+    repeating-linear-gradient(60deg,  transparent 0 29px,
+      color-mix(in srgb, var(--accent) 10%, transparent) 29px 30px),
+    repeating-linear-gradient(-60deg, transparent 0 29px,
+      color-mix(in srgb, var(--accent) 10%, transparent) 29px 30px),
+    repeating-linear-gradient(0deg,   transparent 0 29px,
+      color-mix(in srgb, var(--accent) 10%, transparent) 29px 30px);
+  background-size: auto;
+}
+/* Bolder triangle lattice — 80 px cells with heavier 2 px strokes for
+   architectural drafting feel. */
+body[data-bg-pattern="triangles-bold"] .bg-grid {
+  background-image:
+    repeating-linear-gradient(60deg,  transparent 0 78px,
+      color-mix(in srgb, var(--accent) 14%, transparent) 78px 80px),
+    repeating-linear-gradient(-60deg, transparent 0 78px,
+      color-mix(in srgb, var(--accent) 14%, transparent) 78px 80px),
+    repeating-linear-gradient(0deg,   transparent 0 78px,
+      color-mix(in srgb, var(--accent) 14%, transparent) 78px 80px);
+  background-size: auto;
+}
+/* Isometric grid — only 30°/90°/150° lines, no horizontal/vertical.
+   Reads as the construction grid for an isometric drawing. */
+body[data-bg-pattern="iso-grid"] .bg-grid {
+  background-image:
+    repeating-linear-gradient(30deg,  transparent 0 39px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 39px 40px),
+    repeating-linear-gradient(150deg, transparent 0 39px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 39px 40px),
+    repeating-linear-gradient(90deg,  transparent 0 39px,
+      color-mix(in srgb, var(--accent) 6%, transparent) 39px 40px);
+  background-size: auto;
+}
+/* Spiderweb — concentric radial rings centered on the screen + 12
+   radial spokes via conic-gradient. The conic wedges fan out from
+   center so spokes look wider toward the edges, like a real web. */
+body[data-bg-pattern="spiderweb"] .bg-grid {
+  background-image:
+    repeating-radial-gradient(circle at 50% 50%,
+      transparent 0 79px,
+      color-mix(in srgb, var(--accent) 12%, transparent) 79px 80px),
+    conic-gradient(from 0deg at 50% 50%,
+      color-mix(in srgb, var(--accent) 10%, transparent) 0deg 0.5deg,
+      transparent 0.5deg 30deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 30deg 30.5deg,
+      transparent 30.5deg 60deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 60deg 60.5deg,
+      transparent 60.5deg 90deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 90deg 90.5deg,
+      transparent 90.5deg 120deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 120deg 120.5deg,
+      transparent 120.5deg 150deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 150deg 150.5deg,
+      transparent 150.5deg 180deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 180deg 180.5deg,
+      transparent 180.5deg 210deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 210deg 210.5deg,
+      transparent 210.5deg 240deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 240deg 240.5deg,
+      transparent 240.5deg 270deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 270deg 270.5deg,
+      transparent 270.5deg 300deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 300deg 300.5deg,
+      transparent 300.5deg 330deg,
+      color-mix(in srgb, var(--accent) 10%, transparent) 330deg 330.5deg,
+      transparent 330.5deg 360deg);
+  background-size: 100% 100%;
+  background-position: center center;
+  background-repeat: no-repeat;
+}
+/* Spiderweb tight — denser rings (40 px) + 16 radial spokes (22.5°).
+   Reads as a tighter, more dramatic web pattern. */
+body[data-bg-pattern="spiderweb-tight"] .bg-grid {
+  background-image:
+    repeating-radial-gradient(circle at 50% 50%,
+      transparent 0 39px,
+      color-mix(in srgb, var(--accent) 13%, transparent) 39px 40px),
+    conic-gradient(from 0deg at 50% 50%,
+      color-mix(in srgb, var(--accent) 11%, transparent) 0deg 0.4deg,
+      transparent 0.4deg 22.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 22.5deg 22.9deg,
+      transparent 22.9deg 45deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 45deg 45.4deg,
+      transparent 45.4deg 67.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 67.5deg 67.9deg,
+      transparent 67.9deg 90deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 90deg 90.4deg,
+      transparent 90.4deg 112.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 112.5deg 112.9deg,
+      transparent 112.9deg 135deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 135deg 135.4deg,
+      transparent 135.4deg 157.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 157.5deg 157.9deg,
+      transparent 157.9deg 180deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 180deg 180.4deg,
+      transparent 180.4deg 202.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 202.5deg 202.9deg,
+      transparent 202.9deg 225deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 225deg 225.4deg,
+      transparent 225.4deg 247.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 247.5deg 247.9deg,
+      transparent 247.9deg 270deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 270deg 270.4deg,
+      transparent 270.4deg 292.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 292.5deg 292.9deg,
+      transparent 292.9deg 315deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 315deg 315.4deg,
+      transparent 315.4deg 337.5deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 337.5deg 337.9deg,
+      transparent 337.9deg 360deg);
+  background-size: 100% 100%;
+  background-position: center center;
+  background-repeat: no-repeat;
+}
+/* Radial — pure spokes, no rings. 24 radial lines = every 15°. The
+   bare-bones "sunburst" or starfield-bridge cousin of spiderweb. */
+body[data-bg-pattern="radial"] .bg-grid {
+  background-image:
+    conic-gradient(from 0deg at 50% 50%,
+      color-mix(in srgb, var(--accent) 11%, transparent) 0deg 0.4deg,
+      transparent 0.4deg 15deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 15deg 15.4deg,
+      transparent 15.4deg 30deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 30deg 30.4deg,
+      transparent 30.4deg 45deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 45deg 45.4deg,
+      transparent 45.4deg 60deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 60deg 60.4deg,
+      transparent 60.4deg 75deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 75deg 75.4deg,
+      transparent 75.4deg 90deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 90deg 90.4deg,
+      transparent 90.4deg 105deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 105deg 105.4deg,
+      transparent 105.4deg 120deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 120deg 120.4deg,
+      transparent 120.4deg 135deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 135deg 135.4deg,
+      transparent 135.4deg 150deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 150deg 150.4deg,
+      transparent 150.4deg 165deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 165deg 165.4deg,
+      transparent 165.4deg 180deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 180deg 180.4deg,
+      transparent 180.4deg 195deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 195deg 195.4deg,
+      transparent 195.4deg 210deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 210deg 210.4deg,
+      transparent 210.4deg 225deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 225deg 225.4deg,
+      transparent 225.4deg 240deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 240deg 240.4deg,
+      transparent 240.4deg 255deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 255deg 255.4deg,
+      transparent 255.4deg 270deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 270deg 270.4deg,
+      transparent 270.4deg 285deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 285deg 285.4deg,
+      transparent 285.4deg 300deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 300deg 300.4deg,
+      transparent 300.4deg 315deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 315deg 315.4deg,
+      transparent 315.4deg 330deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 330deg 330.4deg,
+      transparent 330.4deg 345deg,
+      color-mix(in srgb, var(--accent) 11%, transparent) 345deg 345.4deg,
+      transparent 345.4deg 360deg);
+  background-size: 100% 100%;
+  background-position: center center;
+  background-repeat: no-repeat;
+}
 
 @keyframes bg-grid-pulse {
   0%, 100% { filter: brightness(0.55); }
@@ -1444,43 +1858,11 @@ body[data-bg-pattern="circuit"] .bg-grid {
 }
 #theme-btn:hover    svg { transform: scale(1.1); }
 #invert-btn:hover   svg { transform: rotate(180deg); }
-#dim-btn.is-active,
 #camera-btn.is-active,
 #terminal-btn.is-active {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-/* Saved-layout slot buttons — empty slots dim out so the user can see
-   which numbered slots have layouts stored. STORE armed-mode pulses the
-   three slots amber to signal "next click writes here". */
-.topbar-slot {
-  font-family: var(--font-tech);
-  font-size: clamp(11px, 2.4cqi, 14px);
-  letter-spacing: 0.06em;
-  font-variant-numeric: tabular-nums;
-}
-.topbar-slot.is-empty { opacity: 0.35; }
-.topbar-slot.is-active {
-  border-color: var(--accent, currentColor);
-  background: color-mix(in srgb, currentColor 14%, transparent);
-}
-#save-layout-btn.is-armed {
-  border-color: var(--amber);
-  color: var(--amber);
-  background: color-mix(in srgb, var(--amber) 14%, transparent);
-}
-body.is-layout-save-armed .topbar-slot {
-  border-color: var(--amber);
-  color: var(--amber);
-  opacity: 1;
-  animation: layout-slot-pulse 0.7s ease-in-out infinite alternate;
-}
-body.is-eco-mode.is-layout-save-armed .topbar-slot { animation: none; background: color-mix(in srgb, var(--amber) 12%, transparent); }
-@keyframes layout-slot-pulse {
-  from { background: transparent; }
-  to   { background: color-mix(in srgb, var(--amber) 22%, transparent); }
 }
 
 /* Terminal / diagnostics overlay — styled to match the rest of the HUD
@@ -1711,6 +2093,24 @@ body.is-eco-mode.is-layout-save-armed .topbar-slot { animation: none; background
    regardless of the user's saved drag position. */
 body.is-zen .webcam-panel:not([hidden]) .webcam-pixel { display: block; }
 body.is-zen .webcam-panel:not([hidden]) video        { opacity: 0; }
+
+/* Zen video backdrop — the visualizer <video> gets hoisted to <body>
+   during zen (see _zenVideoEnter in app.js) and pinned as a fullscreen
+   layer. Full opacity so the video IS the zen background; the zen
+   overlay (clock / weather / forecast) sits above at z-index 50. The
+   black bg fills letterbox bars when aspect ratio differs from the
+   viewport. pointer-events off so input still falls through. */
+body.is-zen video[data-zen-moved] {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  object-fit: contain !important;
+  opacity: 1 !important;
+  background: #000 !important;
+  z-index: 5 !important;
+  pointer-events: none !important;
+}
 body.is-zen .webcam-panel {
   filter: brightness(0.5);
   /* !important needed to override inline left/top set by the drag handler. */
@@ -2465,17 +2865,177 @@ body.is-combo-fold-light .audio-grid {
   display: block;
 }
 .profile-pic-img[hidden] { display: none; }
+/* SVG happy-face placeholder. currentColor pulls from --accent so the
+   face re-tints with every theme; opacity drops a hair below full so it
+   reads as "default" rather than competing with the live clock. */
 .profile-pic-placeholder {
-  font-family: var(--font-tech);
-  font-size: 9px;
-  letter-spacing: 0.22em;
-  color: var(--muted);
-  opacity: 0.55;
-  text-transform: uppercase;
+  width: 70%;
+  height: 70%;
+  color: var(--accent);
+  opacity: 0.6;
+  transition: opacity 120ms ease;
+}
+.profile-pic:hover .profile-pic-placeholder {
+  opacity: 0.95;
 }
 .profile-pic:has(.profile-pic-img:not([hidden])) .profile-pic-placeholder {
   display: none;
 }
+
+/* Live webcam feed — when the camera (#camera-btn) is on, the webcam's
+   getUserMedia stream is attached to this <video> and it covers the
+   profile-pic circle. Mirrored horizontally to match the webcam popout
+   panel's mirroring so the user sees themselves the way a mirror would.
+   When .is-live is on the parent, the img + placeholder are forced
+   hidden so the video is the only visible layer. */
+.profile-pic-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  z-index: 2;
+  background: var(--bg);
+}
+.profile-pic-video[hidden] { display: none; }
+.profile-pic.is-live .profile-pic-img,
+.profile-pic.is-live .profile-pic-placeholder {
+  display: none;
+}
+.profile-pic {
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.profile-pic:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* Profile-picture picker — modal scoped to the gallery folder. */
+.picture-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, #000 82%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  font-family: var(--font-tech);
+}
+.picture-picker-overlay[hidden] { display: none; }
+.picture-picker-card {
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  background: var(--bg, #0b0d0f);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 25%, transparent);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.picture-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px dashed var(--rule-dim);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+.picture-picker-title {
+  color: var(--accent);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.picture-picker-code {
+  font-size: 9px;
+  opacity: 0.5;
+  letter-spacing: 0.22em;
+}
+.picture-picker-clear,
+.picture-picker-close {
+  margin-left: auto;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text-dim);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: color 100ms ease, border-color 100ms ease;
+}
+.picture-picker-close {
+  margin-left: 0;
+  padding: 2px 10px;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+.picture-picker-clear:hover,
+.picture-picker-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.picture-picker-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+.picture-picker-tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.picture-picker-tile:hover {
+  border-color: var(--accent);
+  transform: scale(1.02);
+}
+.picture-picker-tile.is-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 12px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.picture-picker-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.picture-picker-tile-name {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 3px 6px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.picture-picker-empty {
+  margin: 0;
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  opacity: 0.6;
+  text-transform: uppercase;
+}
+.picture-picker-empty[hidden] { display: none; }
 
 .time-row {
   display: grid;
@@ -2658,6 +3218,60 @@ body.is-combo-fold-light .audio-grid {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--accent);
+}
+
+/* Hero condition glyph — now an inline SVG with currentColor stroke/
+   fill so it picks up the active theme accent. No more emoji (which
+   had hardcoded colours: yellow sun, gray cloud, blue rain). The
+   accent shadow stays for the matching glow halo. */
+.weather-icon-big {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width:  clamp(36px, 16cqi, 84px);
+  height: clamp(36px, 16cqi, 84px);
+  line-height: 1;
+  color: var(--accent);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 45%, transparent));
+  user-select: none;
+}
+.weather-icon-big svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* AIR quality lives in the LEFT column under the condition (CLEAR /
+   RAINING / etc.) — tight tech-mono, theme-accent color, label inline
+   with value so the cell reads like a continuation of the condition
+   status. */
+.weather-air-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.weather-air-cell .micro-label {
+  font-size: clamp(7px, 2cqi, 10px);
+}
+#weather-air {
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2.2cqi, 12px);
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* POLLEN lives in the right column — bumped up a notch from the prior
+   matching size so the index + category + triggers row reads at the
+   same weight as the DETAIL line above it. */
+#weather-pollen {
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.5cqi, 13px);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 .weather-right {
   flex: 1;
@@ -2970,7 +3584,6 @@ body.is-combo-fold-light .audio-grid {
 /* ── PANEL · Network (live traffic + drive I/O share these atoms) */
 .panel-network   {}
 .panel-driveio   {}
-.panel-transfers {}
 .net-body { gap: 14px; }
 
 /* The two rows split the panel's vertical space equally so the sparklines
@@ -3256,75 +3869,6 @@ body.is-combo-fold-light .audio-grid {
   text-transform: uppercase;
 }
 
-/* ── PANEL · Transfers (mirrors storage rows visually) ────────── */
-.transfers-body { overflow-y: auto; }
-.transfers-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.transfer-row { display: flex; flex-direction: column; gap: 4px; }
-.transfer-row-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-  font-family: var(--font-tech);
-  font-size: clamp(8px, 2.4cqi, 13px);
-}
-.transfer-name {
-  color: var(--text);
-  font-family: var(--font-display);
-  font-size: clamp(11px, 3.2cqi, 17px);
-  font-weight: 500;
-  letter-spacing: 0.05em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.transfer-name em {
-  color: var(--muted);
-  font-style: normal;
-  font-size: clamp(7px, 2.2cqi, 12px);
-  font-family: var(--font-tech);
-  margin-left: 8px;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-}
-.transfer-vals {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.08em;
-  font-size: clamp(7px, 2.2cqi, 12px);
-  text-transform: uppercase;
-  white-space: nowrap;
-  flex: 0 0 auto;
-}
-.transfer-vals .speed { color: var(--accent); }
-.seg-transfer { background:
-  repeating-linear-gradient(90deg,
-    var(--accent) 0, var(--accent) 6px,
-    transparent 6px, transparent 8px); }
-.seg-bar-fill.indeterminate {
-  width: 100% !important;
-  opacity: 0.45;
-  background:
-    repeating-linear-gradient(90deg,
-      var(--accent) 0, var(--accent) 6px,
-      transparent 6px, transparent 18px);
-  animation: transfer-pulse 1.2s linear infinite;
-}
-@keyframes transfer-pulse {
-  0%   { background-position: 0 0; }
-  100% { background-position: 24px 0; }
-}
-body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
-.transfers-empty {
-  padding-top: 2px;
-}
-
 /* ════════════════════════════════════════════════════════════════
    §8 · PRODUCTIVITY (combo panel + all panes)
    The combo panel is the dashboard's main work area. It hosts one
@@ -3421,6 +3965,654 @@ body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
   letter-spacing: 0.06em;
   color: var(--text-dim);
 }
+
+/* ── §combo-pane-music ── BACKGROUND MUSIC pane ─────────────────────
+   Procedurally-generated ambient. Pane layout is a stack: a "now playing"
+   strip, the genre + volume controls, transport row, and a level meter
+   canvas at the bottom. Density matches the rest of the dashboard —
+   tighter than the original spacious draft. */
+.combo-pane-music {
+  gap: 8px;
+  padding: 8px 10px;
+  overflow: hidden;
+  font-family: var(--font-tech);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+.bgm-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--rule-dim);
+  padding-bottom: 4px;
+}
+.bgm-now {
+  font-family: var(--font-display);
+  font-size: clamp(11px, 2.4cqi, 14px);
+  color: var(--accent);
+  letter-spacing: 0.14em;
+}
+.bgm-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.bgm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bgm-label {
+  flex: 0 0 56px;
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+.bgm-genres,
+.bgm-tracks {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.bgm-genre,
+.bgm-track {
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--text);
+  font-family: inherit;
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.bgm-genre:hover,
+.bgm-track:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.bgm-genre.is-active,
+.bgm-track.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.bgm-volume {
+  flex: 1 1 auto;
+  accent-color: var(--accent);
+  height: 18px;
+}
+.bgm-volume-val {
+  flex: 0 0 38px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-size: clamp(9px, 2cqi, 11px);
+}
+/* Transport bar — full-width row of PREV / PLAY-PAUSE / STOP / NEXT.
+   Tightened to match the panel-action / tasks-action densities used
+   elsewhere in the dashboard. Play button still has flex: 2 so it
+   reads as the primary action. */
+.bgm-transport-row {
+  gap: 4px;
+}
+.bgm-transport-btn {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  min-height: 26px;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.bgm-transport-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.bgm-transport-btn:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+}
+.bgm-transport-btn:active {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.bgm-transport-play {
+  flex: 2 1 0;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: var(--accent);
+}
+/* Favorite heart button — tints red when the current track is favorited. */
+.bgm-transport-fav { color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
+.bgm-transport-fav.is-active {
+  color: var(--red);
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+}
+/* FAVS genre button — heart-tinted so it visually stands out as the
+   "playlist" entry rather than another music style. */
+.bgm-genre-favs { color: color-mix(in srgb, var(--red) 80%, var(--text)); }
+.bgm-genre-favs.is-active {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  border-color: var(--red);
+  color: var(--red);
+}
+/* Empty-FAVS hint. */
+.bgm-track-empty {
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  padding: 3px 4px;
+}
+.bgm-transport-play:hover {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.bgm-transport-play.is-active {
+  background: color-mix(in srgb, var(--accent) 36%, transparent);
+}
+/* Small square +/- volume buttons flanking the slider. */
+.bgm-icon-btn {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.bgm-icon-btn:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: var(--accent);
+}
+.bgm-meter {
+  width: 100%;
+  height: 100px;
+  border: 1px solid var(--rule-dim);
+  background: rgba(0, 0, 0, 0.6);
+  margin-top: auto;
+}
+
+/* ── §combo-pane-generate ── COMFYUI GENERATE pane ─────────────────
+   Modular ComfyUI front-end. Tab strip per workflow, per-tab form for
+   the extracted prompt/seed/image-input fields, RUN button, status
+   line, and output preview. Density matches the rest of the dashboard
+   (tasks-/explore-pane scale). */
+.combo-pane-generate {
+  gap: 8px;
+  padding: 8px 10px;
+  overflow: hidden;
+  font-family: var(--font-tech);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+.gen-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--rule-dim);
+  padding-bottom: 4px;
+  flex-shrink: 0;
+}
+.gen-now {
+  font-family: var(--font-display);
+  font-size: clamp(11px, 2.4cqi, 14px);
+  color: var(--accent);
+  letter-spacing: 0.14em;
+  flex: 1 1 auto;
+}
+.gen-status {
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+.gen-status.is-online { color: var(--ok); }
+.gen-status.is-error  { color: var(--red); }
+.gen-action {
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: clamp(10px, 2.2cqi, 12px);
+  cursor: pointer;
+}
+.gen-action:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.gen-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  background: transparent;
+}
+.gen-action-cancel {
+  border-color: color-mix(in srgb, var(--red, #d33) 55%, transparent);
+  color: var(--red, #d66);
+}
+.gen-action-cancel:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red, #d33) 16%, transparent);
+}
+.gen-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.gen-tab {
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--text);
+  font-family: inherit;
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.gen-tab .gen-tab-kind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 4px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border-radius: 1px;
+  font-size: 0.85em;
+}
+.gen-tab[data-kind="video"] .gen-tab-kind { background: color-mix(in srgb, var(--amber) 22%, transparent); color: var(--amber); }
+.gen-tab[data-kind="audio"] .gen-tab-kind { background: color-mix(in srgb, var(--red)   22%, transparent); color: var(--red); }
+.gen-tab:hover { border-color: var(--accent); color: var(--accent); }
+.gen-tab.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.gen-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px 2px 2px;
+}
+/* Page-style section header — a thin labeled rule above each block. */
+.gen-section-head {
+  font-family: var(--font-tech, var(--font-display));
+  font-size: clamp(9px, 1.9cqi, 11px);
+  letter-spacing: 0.24em;
+  color: var(--accent);
+  text-transform: uppercase;
+  padding: 2px 0 1px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+/* Hero prompt blocks — full-width tall textareas. */
+.gen-prompt-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gen-prompt-textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+.gen-prompt-negative .gen-prompt-textarea {
+  min-height: 60px;
+  border-color: color-mix(in srgb, var(--red, var(--accent)) 35%, var(--rule-dim));
+}
+/* Media (image/video) input block. */
+.gen-media-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gen-media-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-media-btn {
+  display: inline-block;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-tech, var(--font-display));
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.2em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gen-media-btn:hover { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+.gen-media-name {
+  font-family: var(--font-mono);
+  font-size: clamp(9px, 1.9cqi, 11px);
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+.gen-media-preview {
+  max-width: 100%;
+  max-height: 160px;
+  width: auto;
+  height: auto;
+  border: 1px solid var(--rule-dim);
+  background: #000;
+  align-self: flex-start;
+}
+.gen-media-preview[hidden] { display: none; }
+/* Compact 2-column settings grid — label : control. Multi-line strings
+   (rare in params) span the full row via .is-wide. */
+.gen-params-grid {
+  display: grid;
+  grid-template-columns: minmax(110px, 28%) 1fr;
+  column-gap: 10px;
+  row-gap: 4px;
+  align-items: center;
+}
+.gen-grid-row {
+  display: contents;
+}
+.gen-grid-row.is-wide {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  grid-column: 1 / -1;
+}
+.gen-grid-label {
+  font-size: clamp(9px, 1.9cqi, 11px);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Dimensions grid — slider + number per row, 2 rows side-by-side on
+   wider panes so width/height pair up. */
+.gen-dims-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gen-dims-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 12px;
+  row-gap: 6px;
+}
+.gen-dim-row {
+  display: grid;
+  grid-template-columns: minmax(60px, 22%) 1fr 64px;
+  align-items: center;
+  gap: 6px;
+}
+.gen-dim-label {
+  font-size: clamp(9px, 1.9cqi, 11px);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.gen-dim-num {
+  text-align: right;
+}
+.gen-dim-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  outline: none;
+  cursor: pointer;
+}
+.gen-dim-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  cursor: pointer;
+}
+/* If a row has only the number (no slider — happens when min/max are
+   unknown), the middle column collapses. */
+.gen-dim-row > .gen-dim-num:nth-child(2) {
+  grid-column: 2 / 4;
+}
+/* Collapsible ADVANCED section. */
+.gen-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  padding-top: 4px;
+  margin-top: 2px;
+}
+.gen-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gen-advanced > summary::-webkit-details-marker { display: none; }
+.gen-advanced-chev {
+  display: inline-block;
+  font-size: 10px;
+  transition: transform 0.12s ease;
+}
+.gen-advanced[open] .gen-advanced-chev {
+  transform: rotate(90deg);
+}
+.gen-advanced > .gen-params-grid {
+  margin-top: 4px;
+}
+.gen-empty {
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  padding: 16px 4px;
+  text-align: center;
+}
+.gen-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.gen-row-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-label {
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.gen-input,
+.gen-textarea {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: clamp(10px, 2cqi, 12px);
+  padding: 4px 6px;
+  border-radius: 0;
+}
+.gen-input:focus,
+.gen-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.gen-textarea {
+  min-height: 60px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.gen-input-row {
+  display: flex;
+  gap: 4px;
+}
+.gen-input-row .gen-input { flex: 1 1 auto; }
+.gen-run-btn {
+  padding: 10px 14px;
+  margin-top: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-size: clamp(11px, 2.4cqi, 14px);
+  letter-spacing: 0.24em;
+  cursor: pointer;
+}
+.gen-run-btn:hover {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+.gen-run-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.gen-run-btn.is-running {
+  background: color-mix(in srgb, var(--amber) 22%, transparent);
+  border-color: var(--amber);
+  color: var(--amber);
+}
+/* Output area sits below the form (after RUN). Main preview keeps its
+   aspect ratio via object-fit: contain on a fixed-height letterbox.
+   The thumbnail strip accumulates every output from this session —
+   click a thumb to swap it into the main slot. */
+.gen-output {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--rule-dim);
+  padding: 8px 0 4px;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+.gen-output[hidden] { display: none; }
+.gen-output-main {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+  min-height: 180px;
+  max-height: 320px;
+  overflow: hidden;
+}
+.gen-output-img:not([hidden]),
+.gen-output-video:not([hidden]) {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: #000;
+}
+.gen-output-audio:not([hidden]) {
+  display: block;
+  width: 100%;
+}
+/* When hidden, browsers' UA `[hidden] { display: none }` rule wins
+   only if no later rule overrides it — `:not([hidden])` above is the
+   guard, but be explicit for clarity. */
+.gen-output-img[hidden],
+.gen-output-video[hidden],
+.gen-output-audio[hidden] { display: none !important; }
+.gen-output-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.gen-output-label {
+  font-size: clamp(9px, 2cqi, 11px);
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+.gen-output-name {
+  font-family: var(--font-mono);
+  font-size: clamp(9px, 2cqi, 11px);
+  color: var(--accent);
+  text-transform: none;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+.gen-output-thumbs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 56px;
+  max-height: 64px;
+  padding-bottom: 2px;
+}
+.gen-output-thumbs:empty {
+  display: none;
+}
+.gen-output-thumb {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border: 1px solid var(--rule-dim);
+  background: #000;
+  cursor: pointer;
+  position: relative;
+  padding: 0;
+}
+.gen-output-thumb:hover { border-color: var(--accent); }
+.gen-output-thumb.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.gen-output-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.gen-output-thumb .gen-output-thumb-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  font-family: var(--font-tech, var(--font-display));
+  background: linear-gradient(135deg, rgba(0,0,0,0.6), rgba(0,0,0,0.85));
+}
+/* (Legacy node-section rules removed — layout is now page-style with a
+   hero prompt/media block above a compact 2-col SETTINGS grid.) */
+.gen-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
 .tasks-toolbar {
   display: flex;
   align-items: center;
@@ -3480,6 +4672,42 @@ body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
 }
 .tasks-hero-row-wide {
   grid-column: 1 / -1;
+}
+/* Combined-stat row — label on the left, value on the right, single
+   line. Used by the three top-level stat lines (APP USAGE / UNDERLYING
+   SYSTEM / USAGE TOTAL) so each concept reads as one row. Hover + click
+   match the process-row pattern: tint on hover, persistent outline on
+   selection. */
+.tasks-hero-stat {
+  flex-direction: row !important;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 50%, transparent);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+.tasks-hero-stat:last-of-type { border-bottom: none; }
+.tasks-hero-stat:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.tasks-hero-stat.is-selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -1px;
+}
+.tasks-hero-stat.is-selected .tasks-hero-label,
+.tasks-hero-stat.is-selected .tasks-hero-value { opacity: 1; }
+.tasks-hero-stat .tasks-hero-label {
+  flex: 0 0 auto;
+  letter-spacing: 0.2em;
+  opacity: 0.7;
+}
+.tasks-hero-stat .tasks-hero-value {
+  flex: 1 1 auto;
+  text-align: right;
+  font-size: 11px;
 }
 .tasks-hero-label {
   font-size: 9px;
@@ -4019,11 +5247,14 @@ body.is-eco-mode .seg-bar-fill.indeterminate { animation: none; opacity: 0.55; }
 .theme-name-trigger {
   appearance: none;
   cursor: pointer;
-  background: transparent;
-  border: 1px solid transparent;
+  /* Match the muted look of every other topbar chip (.theme-name has
+     color: var(--muted)). Previously inherited a brighter body color
+     which made the active theme name pop out next to its siblings. */
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--rule-dim);
   font: inherit;
-  color: inherit;
-  padding: 2px 6px;
+  padding: 0 8px;
   border-radius: 2px;
   transition: border-color 100ms ease, background 100ms ease, color 100ms ease;
 }
@@ -4293,6 +5524,11 @@ body.is-eco-mode .audio-grid {
   color: var(--text);
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
   cursor: pointer;
+  /* user-select: none so shift-click range-selects rows instead of
+     starting a browser text selection between the previous and new
+     click points (which otherwise steals the click and breaks shift). */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .explore-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); }
 .explore-row.is-selected {
@@ -4399,28 +5635,586 @@ body.is-eco-mode .audio-grid {
    Big player on top, scrollable file list below. The list shows
    only video files pulled from the gallery folder — image-format
    files stay in the GALLERY tab. */
-.combo-pane-visualizer { gap: 8px; }
+.combo-pane-visualizer { gap: 8px; position: relative; }
 
-.visualizer-player-wrap {
-  position: relative;
-  flex: 0 0 auto;
-  aspect-ratio: 16 / 9;
-  max-height: 60%;
-  background: #000;
+/* Capture-source picker — popover over the file list, opened from the
+   SOURCE button. List of windows + screens with thumbnails. */
+.visualizer-source-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.92);
   border: 1px solid var(--rule-dim);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.visualizer-source-picker[hidden] { display: none; }
+.visualizer-source-picker-head {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.6);
+  border-bottom: 1px solid var(--rule-dim);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-transform: uppercase;
 }
-.visualizer-video {
-  position: relative;
+.visualizer-source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.visualizer-source-row {
+  display: grid;
+  grid-template-columns: 80px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  color: var(--text);
+}
+.visualizer-source-row:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+/* Application section header inside the source picker. Sticky so the
+   app name stays visible while scrolling its own group. The "· N"
+   suffix shows the window count per app, e.g. CHROME · 4. */
+.visualizer-source-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.78);
+  border-bottom: 1px solid var(--rule-dim);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.2cqi, 11px);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+.visualizer-source-thumb {
+  width: 80px;
+  height: 45px;
+  object-fit: cover;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+  display: block;
+}
+.visualizer-source-thumb.is-empty {
+  background: repeating-linear-gradient(45deg, #111 0 6px, #1a1a1a 6px 12px);
+}
+.visualizer-source-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.visualizer-source-kind {
+  color: var(--muted);
+  font-size: 0.85em;
+  letter-spacing: 0.12em;
+}
+
+/* Screencap REC button flash — brief border highlight each save. */
+#visualizer-screencap-btn.is-flashing {
+  box-shadow: 0 0 10px var(--red), inset 0 0 6px var(--red);
+  border-color: var(--red);
+  color: var(--red);
+}
+#visualizer-screencap-btn.is-active {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+#visualizer-screenrec-btn.is-active {
+  color: var(--red);
+  border-color: var(--red);
+  animation: screenrec-pulse 1.1s ease-in-out infinite;
+}
+#visualizer-crop-btn.is-active,
+#visualizer-keys-btn.is-active,
+#visualizer-osd-btn.is-active,
+#visualizer-fit-btn.is-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Crop-fit preview canvas — live drawImage of the cropped region from
+   the video, sized to fill the wrap. Sits on top of the (still-
+   playing) video element when FIT is engaged so the underlying video
+   keeps producing frames for us to sample. */
+.visualizer-crop-preview {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   display: block;
   background: #000;
+  z-index: 3;
+}
+.visualizer-crop-preview[hidden] { display: none; }
+/* In crop-fit mode, the underlying video keeps playing (we need its
+   frames) but visually we only want the cropped preview. Hide the
+   bare video + still-image so nothing else competes. */
+.visualizer-player-wrap.is-crop-fit .visualizer-video { visibility: hidden; }
+.visualizer-player-wrap.is-crop-fit .visualizer-still { display: none; }
+.visualizer-player-wrap.is-crop-fit .visualizer-empty { display: none; }
+
+/* OSD picker — same shell as the source/quality pickers. */
+.visualizer-osd-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.92);
+  border: 1px solid var(--rule-dim);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.visualizer-osd-picker[hidden] { display: none; }
+.visualizer-osd-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  color: var(--text);
+}
+.visualizer-osd-row:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.visualizer-osd-row.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  border-left: 3px solid var(--accent);
+  padding-left: 9px;
+}
+.visualizer-osd-row.is-active .visualizer-source-name::after {
+  content: ' ●';
+  color: var(--accent);
+}
+
+/* Free-capture crop overlay — fills the player wrap, dims everything
+   outside the rect via the rect's massive box-shadow cutout. 8 handles
+   for resize; drag the rect body to move. */
+.visualizer-crop {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none; /* overlay container ignores hits; only the rect catches them */
+}
+.visualizer-crop[hidden] { display: none; }
+.visualizer-crop-rect {
+  position: absolute;
+  left: 20%;
+  top: 20%;
+  width: 60%;
+  height: 60%;
+  pointer-events: auto;
+  cursor: move;
+  border: 1.5px dashed var(--accent);
+  background: transparent;
+  /* The huge spread shadow paints everything outside the rect at 55%
+     opacity black — a classic "cut-out" dimmer effect. */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  box-sizing: border-box;
+}
+.visualizer-crop-label {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-shadow: 0 0 6px var(--accent);
+  pointer-events: none;
+}
+.visualizer-crop-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border: 1px solid #000;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.visualizer-crop-handle.is-h-nw { left: -6px;          top: -6px;          cursor: nwse-resize; }
+.visualizer-crop-handle.is-h-n  { left: calc(50% - 5px); top: -6px;        cursor: ns-resize; }
+.visualizer-crop-handle.is-h-ne { right: -6px;         top: -6px;          cursor: nesw-resize; }
+.visualizer-crop-handle.is-h-e  { right: -6px;         top: calc(50% - 5px); cursor: ew-resize; }
+.visualizer-crop-handle.is-h-se { right: -6px;         bottom: -6px;       cursor: nwse-resize; }
+.visualizer-crop-handle.is-h-s  { left: calc(50% - 5px); bottom: -6px;     cursor: ns-resize; }
+.visualizer-crop-handle.is-h-sw { left: -6px;          bottom: -6px;       cursor: nesw-resize; }
+.visualizer-crop-handle.is-h-w  { left: -6px;          top: calc(50% - 5px); cursor: ew-resize; }
+.visualizer-crop-rect:hover { border-color: color-mix(in srgb, var(--accent) 80%, white 20%); }
+.visualizer-crop-rect.is-dragging { border-style: solid; }
+
+/* Quality picker — same shell as the source picker, but the rows are
+   thumbnail-less and there's a CUSTOM section pinned at the bottom. */
+.visualizer-quality-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.92);
+  border: 1px solid var(--rule-dim);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.visualizer-quality-picker[hidden] { display: none; }
+.visualizer-quality-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  color: var(--text);
+}
+.visualizer-quality-row:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.visualizer-quality-row.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  border-left: 3px solid var(--accent);
+  padding-left: 9px;
+}
+.visualizer-quality-custom {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--rule-dim);
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.2cqi, 11px);
+  color: var(--muted);
+}
+.visualizer-quality-custom-row {
+  display: grid;
+  grid-template-columns: 50px 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.visualizer-quality-custom-row label {
+  letter-spacing: 0.16em;
+  color: var(--accent);
+}
+.visualizer-quality-custom-row select,
+.visualizer-quality-custom-row input[type="range"] {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  border: 1px solid var(--rule-dim);
+  font-family: inherit;
+  padding: 2px 4px;
+}
+.visualizer-quality-custom-row input[type="range"] { padding: 0; accent-color: var(--accent); }
+.visualizer-quality-custom-row span {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  min-width: 60px;
+  text-align: right;
+}
+@keyframes screenrec-pulse {
+  0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--red) 50%, transparent); }
+  50%      { box-shadow: 0 0 14px var(--red), inset 0 0 6px color-mix(in srgb, var(--red) 60%, transparent); }
+}
+
+.visualizer-player-wrap {
+  position: relative;
+  /* Grow to fill the available vertical space in the pane (column-
+     flex), capped at 60% so the captures list still gets room. width
+     stays 100% of the pane. We drop the previous aspect-ratio: 16/9
+     because it combined with flex: 0 0 auto and a 100%/100% video
+     child caused circular sizing — the wrap was shrinking to the
+     source's intrinsic dimensions and rendering a tiny thumbnail in
+     the middle of the pane instead of filling it. */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 60%;
+  width: 100%;
+  background: #000;
+  border: 1px solid var(--rule-dim);
+}
+/* When a source-aspect is known (mirror or file playback), shape the
+   wrap to match — width auto, aspect from the --source-aspect custom
+   property — and centre horizontally. Bounded by max-height: 60% +
+   max-width: 100%; the browser picks whichever constraint binds first.
+   Portrait sources end up tall + narrow filling the available height
+   instead of pillarboxed inside a landscape rectangle. */
+.visualizer-player-wrap.is-source-aspect {
+  width: auto;
+  /* Cap by both the pane's available room AND the source's intrinsic
+     pixels — whichever is smaller. So a 720p file maxes at 1280×720 on
+     a 1920-wide pane (no blurry upscale), and a 4K mirror maxes at the
+     pane's 60% height. --source-max-width / --source-max-height are
+     pushed by _refreshWrapShape() in app.js. */
+  max-width:  min(100%, var(--source-max-width,  100%));
+  max-height: min(60%,  var(--source-max-height, 60%));
+  aspect-ratio: var(--source-aspect);
+  margin-left: auto;
+  margin-right: auto;
+}
+.visualizer-video {
+  /* Absolute fill of the wrap (with object-fit: contain) so the video
+     scales up to use the full wrap area, letterboxing for any aspect
+     mismatch — instead of falling back to its intrinsic capture size. */
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+  object-fit: contain;
   z-index: 2;
 }
-.visualizer-video:not([src]) { display: none; }
+/* Hide the player when there's nothing to play — except when we're in
+   mirror mode, where the stream is bound via srcObject (not src) and
+   the [src] check would otherwise leave the element display:none and
+   only the captured audio audible. */
+.visualizer-player-wrap:not(.is-mirroring) .visualizer-video:not([src]) { display: none; }
+.visualizer-player-wrap.is-mirroring .visualizer-video { display: block; }
+
+/* Inline still-image viewer for snaps. Hidden until .is-still is set
+   on the wrap; when shown it sits over the (now-paused) video element
+   on the same z-index. object-fit:contain keeps the snap's aspect. */
+.visualizer-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: none;
+  z-index: 3;
+}
+.visualizer-player-wrap.is-still .visualizer-still { display: block; }
+.visualizer-player-wrap.is-still .visualizer-video { display: none; }
+.visualizer-player-wrap.is-still .visualizer-empty { display: none; }
+
+/* MUTE button — amber when muted to read distinct from the cyan
+   "feature active" buttons. */
+#visualizer-mute-btn.is-active {
+  color: var(--amber);
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+}
+
+/* Multi-select row highlight — accent fill so it stands distinct from
+   the .is-playing single-current-item indicator. */
+.visualizer-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--accent);
+  border-left: 3px solid var(--accent);
+  padding-left: 7px;
+}
+
+/* PROCESS button — disabled grays out, becomes accent when armed. */
+#visualizer-process-btn {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+#visualizer-process-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+#visualizer-process-btn.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* Process picker — same outer shell as the source / quality / OSD
+   pickers; a richer body for the multi-row settings + slider. */
+.visualizer-process-picker {
+  position: absolute;
+  /* Cover the whole rec-room pane again — but the picker now has its
+     own inline preview slot, so it doesn't need to leave room for the
+     player wrap underneath. The slot stretches to fill remaining
+     vertical space inside the picker. */
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.94);
+  border: 1px solid var(--rule-dim);
+  box-shadow: 0 0 28px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+/* Inline preview slot — `flex: 1` so it greedily eats whatever vertical
+   space the rows above don't claim, giving the cycling snaps a big
+   visible area at the bottom of the picker. Centered + letterboxed so
+   the image's natural aspect is preserved. */
+.visualizer-process-preview-slot {
+  flex: 1 1 auto;
+  min-height: 120px;
+  margin-top: 8px;
+  position: relative;
+  background: #000;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.visualizer-process-preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  display: none;
+  object-fit: contain;
+}
+.visualizer-process-preview-slot.is-running .visualizer-process-preview-img { display: block; }
+.visualizer-process-preview-slot.is-running .visualizer-process-preview-empty { display: none; }
+.visualizer-process-preview-empty {
+  font-family: var(--font-tech);
+  font-size: clamp(10px, 2.2cqi, 12px);
+  letter-spacing: 0.24em;
+  color: color-mix(in srgb, var(--accent) 55%, var(--muted));
+  text-transform: uppercase;
+}
+.visualizer-process-picker[hidden] { display: none; }
+.visualizer-process-picker em {
+  font-style: normal;
+  color: var(--amber);
+  font-weight: 700;
+}
+.visualizer-process-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.2cqi, 11px);
+  color: var(--text);
+}
+.visualizer-process-row {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.visualizer-process-label {
+  color: var(--accent);
+  letter-spacing: 0.18em;
+}
+.visualizer-process-radios {
+  display: flex;
+  gap: 4px;
+  grid-column: 2 / span 2;
+}
+.visualizer-process-radios button {
+  flex: 1 1 0;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  padding: 4px 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: 0.12em;
+}
+.visualizer-process-radios button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.visualizer-process-radios button.is-active {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#visualizer-process-speed {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.visualizer-process-speed-val {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 180px;
+  text-align: right;
+  grid-column: 2 / span 2;
+  margin-top: 2px;
+}
+/* PROCESS + PREVIEW share a horizontal row so the user can launch the
+   live preview without leaving the picker — PROCESS commits the encode,
+   PREVIEW just toggles the in-pane snap-cycle so they can dial the
+   time-crunch slider while watching speed. */
+.visualizer-process-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.visualizer-process-go {
+  flex: 2 1 0;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: clamp(10px, 2.4cqi, 12px);
+  letter-spacing: 0.22em;
+  cursor: pointer;
+}
+.visualizer-process-preview {
+  flex: 1 1 0;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  font-family: inherit;
+  font-size: clamp(10px, 2.4cqi, 12px);
+  letter-spacing: 0.22em;
+  cursor: pointer;
+}
+.visualizer-process-preview:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.visualizer-process-preview.is-active {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.visualizer-process-go:hover {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+.visualizer-process-go:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.visualizer-process-status {
+  min-height: 1.4em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.visualizer-process-status.is-error {
+  color: var(--red);
+}
+.visualizer-player-wrap.is-mirroring .visualizer-audio-canvas,
+.visualizer-player-wrap.is-mirroring .visualizer-empty { display: none; }
 /* Audio-bars mirror canvas — clone of the SPEAKERS panel that paints
    inside the visualizer pane whenever no video is active. Hidden the
    moment a video starts (sits behind the <video>; the player's solid
@@ -4506,8 +6300,24 @@ body.is-eco-mode .audio-grid {
   color: var(--text);
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
   cursor: pointer;
+  /* Same reason as .explore-row — no text selection on shift-click so
+     range-select fires cleanly. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .visualizer-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+.visualizer-row.is-dir .visualizer-row-name {
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+.visualizer-row.is-up {
+  background: rgba(0, 0, 0, 0.55);
+  border-bottom: 1px solid var(--rule-dim);
+}
+.visualizer-row.is-up .visualizer-row-name {
+  color: var(--amber);
+  letter-spacing: 0.18em;
+}
 .visualizer-row.is-playing {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
@@ -4518,7 +6328,9 @@ body.is-eco-mode .audio-grid {
   text-overflow: ellipsis;
   min-width: 0;
 }
-.visualizer-row-name::before { content: '▸ '; color: var(--accent); }
+/* Inline glyphs are now drawn from JS (▣ / ▶ / ◇ / ∙) so the row name
+   no longer needs the universal '▸ ' prefix. Folder rows already pick
+   up the accent colour via .is-dir below. */
 .visualizer-row-size,
 .visualizer-row-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
@@ -4900,6 +6712,147 @@ body.is-eco-mode .audio-grid {
   font-family: var(--font-tech);
 }
 .browser-stage[data-mode="results"] .browser-results { display: flex; }
+
+/* History overlay — same absolute-positioned z-index-1 pattern as the
+   splash + results overlays. Shown when data-mode="history" on the
+   stage. Renderer detaches the BrowserView while history is open so
+   the native BV doesn't paint over this HTML. */
+.browser-history {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  background: #0a0a0a;
+  z-index: 1;
+  font-family: var(--font-tech);
+  min-height: 0;
+}
+.browser-stage[data-mode="history"]   #browser-history          { display: flex; }
+.browser-stage[data-mode="bookmarks"] #browser-bookmarks-panel  { display: flex; }
+
+/* Per-list-row × delete button — only used by the bookmarks list. */
+.browser-history-list .h-remove {
+  align-self: flex-end;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  padding: 1px 7px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: border-color 120ms ease, color 120ms ease;
+  margin-top: -22px;
+  margin-right: 0;
+}
+.browser-history-list .h-remove:hover {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.browser-history-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule-dim);
+  font-size: clamp(10px, 1.6cqi, 14px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.browser-history-title {
+  flex: 1;
+  color: var(--accent);
+}
+.browser-history-clear,
+.browser-history-close {
+  font-family: var(--font-tech);
+  letter-spacing: 0.18em;
+  background: rgba(0,0,0,0.5);
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.browser-history-close { font-size: 14px; padding: 2px 9px; }
+.browser-history-clear:hover,
+.browser-history-close:hover {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.browser-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent) 35%, transparent) transparent;
+}
+.browser-history-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 60%, transparent);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+.browser-history-list li:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.browser-history-list .h-title {
+  color: var(--text);
+  font-size: clamp(10px, 1.5cqi, 13px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.browser-history-list .h-url {
+  color: var(--muted);
+  font-size: clamp(8px, 1.2cqi, 11px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.browser-history-list .h-ts {
+  color: var(--accent);
+  font-size: clamp(8px, 1.1cqi, 10px);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.browser-history-empty {
+  display: none;
+  text-align: center;
+  padding: 32px 18px;
+  color: var(--muted);
+  font-size: clamp(10px, 1.4cqi, 13px);
+  letter-spacing: 0.18em;
+}
+.browser-history-list:empty + .browser-history-empty,
+.browser-history-empty:not([hidden]) { display: block; }
+
+/* Clear-data nav button — amber warn state on hover so it visually
+   signals "destructive action" without being scary at rest. */
+.browser-navbtn.browser-navbtn-warn:hover {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+/* Opacity-toggle buttons — text labels instead of icons, narrow so they
+   sit alongside the SVG-icon nav buttons without ballooning the row. */
+.browser-opacity-btn {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 0 7px;
+  min-width: 48px;
+  width: auto;
+}
+.browser-opacity-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 .browser-results {
   /* Scroll the WHOLE results overlay rather than the grid internally —
      LOAD MORE just extends the column so the user scrolls naturally. */
@@ -5220,3 +7173,447 @@ body.is-eco-mode .audio-grid {
   white-space: nowrap;
   z-index: 2;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   BOOT SCANLINES
+   A fixed-position overlay that paints horizontal CRT-style scanlines
+   across the whole viewport while `body.is-booting` is active, plus a
+   moving "tracking bar" drifting top-to-bottom for the "tuning in"
+   feel that pairs with the boot SFX. The element is always in the DOM;
+   we just toggle its opacity via the body class so a transition can
+   smoothly fade it out when boot ends (display:none would clip the
+   transition). pointer-events:none so it never blocks clicks.
+   ───────────────────────────────────────────────────────────────────── */
+/* Canvas-rendered static-noise overlay — many random-length horizontal
+   stripes redrawn each frame in the theme accent. mix-blend-mode:
+   lighten was picked after iterating: 'screen' was too contrasty
+   (additive on top of the glow) and 'overlay' multiplied the grain
+   down to invisible on the dashboard's near-black base. lighten just
+   takes max(base, blend) per pixel — so the grain shows at its drawn
+   brightness without piling on extra intensity, and where the bloom
+   underneath is already brighter than the grain pixel, the glow wins
+   and still reads through. */
+/* Snow canvas retired — kept in the DOM (index.html still ships it) but
+   hidden entirely. Boot now uses a light body-level blur that fades off
+   instead of a fullscreen TV-noise overlay. */
+.boot-static {
+  display: none;
+}
+
+/* "Warming tube" blur + stacked phosphor glow on the WHOLE body.
+   Two drop-shadows in the filter chain: a tight inner glow + a wider
+   outer halo, like an old CRT's phosphor bleed before the gun has
+   warmed up. body's rasterized output includes the .boot-static
+   canvas, so the blur wraps the snow noise too.
+   Driven by `is-boot-glowing`, which the JS holds for 3 s (vs the
+   snow's 1.5 s) — the glow LINGERS after the snow has cleared, which
+   is the visual signature of a tube TV still finding its color
+   balance. body fills the viewport exactly (html,body height:100%)
+   so the filter-induced containing-block change has no positional
+   side effects on the fixed-position dashboard panels. */
+body {
+  filter:
+    blur(0)
+    drop-shadow(0 0 0 transparent)
+    drop-shadow(0 0 0 transparent)
+    drop-shadow(0 0 0 transparent);
+  /* Long, soft fade so the boot blur drifts off through the panel-
+     flicker + brightness-ramp window instead of snapping clear. */
+  transition: filter 3s ease-out;
+}
+/* Triple-stacked drop-shadow phosphor bloom — three glow radii layer
+   on top of one another to read as a heavy CRT halo: a hot inner core
+   (6 px, 90% alpha), a mid spread (20 px, 55%), and a wide outer
+   wash (60 px, 28%). Together they make the dashboard look like the
+   beam has just struck the phosphor and the tube is still finding
+   its color temperature. */
+body.is-boot-glowing {
+  /* Heavy boot blur — reads as the tube still struggling to focus
+     before the picture stabilizes. The body filter transition above
+     (3 s ease-out) carries the blur from this peak back down to zero
+     when the class drops at ~3 s in. */
+  filter:
+    blur(8px)
+    drop-shadow(0 0 0 transparent)
+    drop-shadow(0 0 0 transparent)
+    drop-shadow(0 0 0 transparent);
+}
+
+/* Bloom — per-element glow on the underlying UI during the tube warm-
+   up. Panels, audio grids, and the topbar each get a box-shadow halo
+   in the active theme accent, plus a text-shadow on their inner text
+   so labels and numbers also bloom. Driven by the same is-boot-glowing
+   class as the body filter, with a matching transition timing so the
+   bloom fades AWAY at the same beat the blur clears. The shadow
+   stacks two radii: an inner sharper halo (12 px) for the close glow,
+   and a wider outer wash (32 px) for the bigger phosphor spill. */
+.panel,
+#audio-out-grid,
+#audio-in-grid,
+.topbar-controls {
+  /* Base transition so removing is-boot-glowing animates back to no
+     shadow, not snap. 0.3 s delay matches the body filter's so the
+     bloom + the blur clear together. */
+  transition: box-shadow 0.6s ease 0.3s, text-shadow 0.6s ease 0.3s;
+}
+body.is-boot-glowing .panel,
+body.is-boot-glowing #audio-out-grid,
+body.is-boot-glowing #audio-in-grid,
+body.is-boot-glowing .topbar-controls {
+  /* Per-element bloom disabled — set to none so the boot flicker plays
+     without the phosphor halo on panels + labels. To bring it back,
+     restore the 12 px / 32 px box-shadow stack and 4 px / 14 px
+     text-shadow stack in var(--accent). */
+  box-shadow:  none;
+  text-shadow: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   BOOT FLICKER
+   Every panel + audio visualizer + topbar starts at 40% brightness so the
+   HUD looks dim-and-asleep on the very first paint, then JS stagger-applies
+   `.is-flicker-in` to each element to run a CRT-style flicker keyframe.
+   Spreading the wake-up over ~2.5s also covers the cold-start data-fetch
+   spike (systeminformation, nvidia-smi, weather, LHM enumeration).
+   ─────────────────────────────────────────────────────────────────────────
+   Two things to watch for here:
+   1. `.panel` carries `animation: panel-pulse 8s … infinite` site-wide,
+      whose keyframes set `filter:` — that overrides any plain `filter:`
+      declaration. So the dim-on-boot rule has to set `animation: none`
+      to win, and the per-panel flicker rule needs `!important` to beat
+      that `none`.
+   2. The flicker animation uses `forwards` to hold brightness(1) at the
+      end, so a panel that has flickered in stays lit until the body
+      `is-booting` flag is lifted (which also stops the dim rule). The
+      JS does NOT remove `.is-flicker-in` per-panel; it sweeps all of
+      them at once when boot ends.
+   ───────────────────────────────────────────────────────────────────── */
+/* Panels + audio grids start hidden so the user never sees the grid →
+   fixed-position snap when init applies cfg.panelSizes. The `.is-flicker-in`
+   rule below flips visibility back on at the moment the flicker animation
+   starts, by which point JS has already written the final left/top — so
+   panels appear in their settled position rather than animating into it. */
+body.is-booting .panel,
+body.is-booting #audio-out-grid,
+body.is-booting #audio-in-grid {
+  animation: none !important;
+  filter: brightness(0.08);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Topbar + background grid don't snap-position (CSS-anchored from page
+   load), so they stay visible-but-dim through boot and just ride the
+   brightness flicker like everything else. */
+body.is-booting .topbar-controls,
+body.is-booting .bg-grid {
+  animation: none !important;
+  filter: brightness(0.08);
+  pointer-events: none;
+}
+
+/* Warehouse-fluorescent rhythm: hesitant single flick → long dim pause →
+   a couple stuttering flashes → pause → big flash that settles to
+   half-bright → gradual warm-up to full. step-end timing snaps between
+   keyframes instead of smoothly interpolating, which is what gives the
+   "ballast just kicked on" feel rather than a gentle fade. */
+/* Three flicker variants — 1, 2, or 3 dim flicks then a small upward
+   step, all ending at brightness(0.55) so the panel SETTLES at a dim
+   "powered but not warmed up" level. The final brightness lift from
+   0.55 → 1.0 is handled by the `.is-final-bright` rule below, which
+   fires across every flicker target at once after info-trickle ends.
+   Keeps the per-panel boot phase reading as flicker-only, with a
+   single coordinated brightness grow at the end of the whole boot. */
+@keyframes boot-flicker-1 {
+  0%    { filter: brightness(0.06); }
+  18%   { filter: brightness(0.06); }
+  19%   { filter: brightness(0.26); }   /* one weak flick */
+  21%   { filter: brightness(0.06); }
+  35%   { filter: brightness(0.08); }
+  50%   { filter: brightness(0.14); }
+  68%   { filter: brightness(0.28); }
+  82%   { filter: brightness(0.40); }
+  92%   { filter: brightness(0.50); }
+  100%  { filter: brightness(0.55); }   /* settle dim — final ramp lifts to 1.0 */
+}
+@keyframes boot-flicker-2 {
+  0%    { filter: brightness(0.06); }
+  12%   { filter: brightness(0.06); }
+  13%   { filter: brightness(0.24); }   /* first flick */
+  15%   { filter: brightness(0.06); }
+  26%   { filter: brightness(0.06); }
+  27%   { filter: brightness(0.32); }   /* second flick */
+  29%   { filter: brightness(0.08); }
+  42%   { filter: brightness(0.10); }
+  55%   { filter: brightness(0.18); }
+  70%   { filter: brightness(0.30); }
+  83%   { filter: brightness(0.42); }
+  93%   { filter: brightness(0.52); }
+  100%  { filter: brightness(0.55); }
+}
+@keyframes boot-flicker-3 {
+  0%    { filter: brightness(0.05); }
+  8%    { filter: brightness(0.05); }
+  9%    { filter: brightness(0.22); }   /* first */
+  11%   { filter: brightness(0.05); }
+  20%   { filter: brightness(0.05); }
+  21%   { filter: brightness(0.28); }   /* second */
+  23%   { filter: brightness(0.07); }
+  32%   { filter: brightness(0.07); }
+  33%   { filter: brightness(0.34); }   /* third */
+  35%   { filter: brightness(0.10); }
+  46%   { filter: brightness(0.12); }
+  60%   { filter: brightness(0.20); }
+  74%   { filter: brightness(0.32); }
+  86%   { filter: brightness(0.45); }
+  95%   { filter: brightness(0.53); }
+  100%  { filter: brightness(0.55); }
+}
+
+/* Coordinated final brightness ramp — applied to every boot-flicker
+   target (panels, audio grids, topbar, bg-grid) after info-trickle
+   finishes. Each surface ramps from its settled 0.55 dim brightness
+   up to full 1.0 simultaneously, so the dashboard reads as "warming
+   to full power" the moment all the data is in place. The selector
+   matches `.is-flicker-in.is-final-bright` so its specificity beats
+   the plain `.is-flicker-in` rule above; declared AFTER that rule so
+   in a specificity tie it would still win. */
+@keyframes final-bright-up {
+  from { filter: brightness(0.55); }
+  to   { filter: brightness(1.00); }
+}
+body.is-booting .panel.is-flicker-in.is-final-bright,
+body.is-booting #audio-out-grid.is-flicker-in.is-final-bright,
+body.is-booting #audio-in-grid.is-flicker-in.is-final-bright,
+body.is-booting .topbar-controls.is-flicker-in.is-final-bright,
+body.is-booting .bg-grid.is-flicker-in.is-final-bright {
+  animation: final-bright-up 1500ms ease-out forwards !important;
+}
+
+body.is-booting .panel.is-flicker-in,
+body.is-booting #audio-out-grid.is-flicker-in,
+body.is-booting #audio-in-grid.is-flicker-in,
+body.is-booting .topbar-controls.is-flicker-in,
+body.is-booting .bg-grid.is-flicker-in {
+  visibility: visible;
+  /* `--flicker-anim` is set inline per element by the boot-flicker JS
+     (one of boot-flicker-1 / -2 / -3, picked at random). Default falls
+     back to the 2-flick variant if JS didn't run. Linear timing — the
+     keyframes themselves carry the snap-then-ramp shape. */
+  animation: var(--flicker-anim, boot-flicker-2) 1200ms linear forwards !important;
+  pointer-events: auto;
+}
+
+/* ── Info trickle ────────────────────────────────────────────────────
+   During boot, panels show only their chrome (header title, footer
+   label, micro-labels) — every dynamic value/visualization stays
+   invisible. After each panel's flicker settles, JS adds `.info-on`
+   and assigns a random per-element `--info-delay` so the data fades
+   in on its own staggered schedule rather than appearing all at once.
+   ──────────────────────────────────────────────────────────────── */
+body.is-booting .panel:not(.info-on) .bigvalue,
+body.is-booting .panel:not(.info-on) .micro-val,
+body.is-booting .panel:not(.info-on) .footer-readout,
+body.is-booting .panel:not(.info-on) .panel-id,
+body.is-booting .panel:not(.info-on) .meter,
+body.is-booting .panel:not(.info-on) .core-grid,
+body.is-booting .panel:not(.info-on) .gpu-grid,
+body.is-booting .panel:not(.info-on) .mem-history-grid,
+body.is-booting .panel:not(.info-on) .net-spark,
+body.is-booting .panel:not(.info-on) .disk-spark,
+body.is-booting .panel:not(.info-on) .storage-list,
+body.is-booting .panel:not(.info-on) .storage-row,
+body.is-booting .panel:not(.info-on) .gpu-mem,
+body.is-booting .panel:not(.info-on) .gpu-mem-row,
+body.is-booting .panel:not(.info-on) .temp-row,
+body.is-booting .panel:not(.info-on) .net-row,
+body.is-booting .panel:not(.info-on) .weather-cond,
+body.is-booting .panel:not(.info-on) .weather-icon-big,
+body.is-booting .panel:not(.info-on) .seg-bar {
+  opacity: 0;
+}
+
+/* `.info-on` doesn't scope to body.is-booting so the animation keeps
+   playing even after the boot flag is lifted. animation-forwards holds
+   opacity at 1 after the animation finishes, so the elements stay
+   visible regardless of when body.is-booting drops. */
+.panel.info-on .bigvalue,
+.panel.info-on .micro-val,
+.panel.info-on .footer-readout,
+.panel.info-on .panel-id,
+.panel.info-on .meter,
+.panel.info-on .core-grid,
+.panel.info-on .gpu-grid,
+.panel.info-on .mem-history-grid,
+.panel.info-on .net-spark,
+.panel.info-on .disk-spark,
+.panel.info-on .storage-list,
+.panel.info-on .storage-row,
+.panel.info-on .gpu-mem,
+.panel.info-on .gpu-mem-row,
+.panel.info-on .temp-row,
+.panel.info-on .net-row,
+.panel.info-on .weather-cond,
+.panel.info-on .weather-icon-big,
+.panel.info-on .seg-bar {
+  animation: info-trickle 300ms ease forwards;
+  animation-delay: var(--info-delay, 0ms);
+}
+@keyframes info-trickle {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Bar fills lock at 0 during boot so they grow into their inline-set
+   width/height the moment info-on lands. Scoped to body.is-booting so
+   once boot ends the rule no longer matches and ongoing data updates
+   (which write inline width/height directly via setMetricBar etc.)
+   are instant — no lingering transition on live telemetry. The 900ms
+   ease and `--info-delay` reuse the same per-grid offset the opacity
+   trickle uses, so the fade and the grow share a timeline. */
+body.is-booting .panel:not(.info-on) [class*='bar-fill'] {
+  width:  0 !important;
+  height: 0 !important;
+}
+body.is-booting .panel.info-on [class*='bar-fill'] {
+  transition:
+    width  1500ms cubic-bezier(0.25, 0.8, 0.25, 1) var(--info-delay, 0ms),
+    height 1500ms cubic-bezier(0.25, 0.8, 0.25, 1) var(--info-delay, 0ms);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Color rebalance — each panel was reading as one or two colors max
+   because almost every meter / bar / value pulled `var(--accent)`.
+   Each rule below locally shadows --accent on a specific sub-area so
+   that area picks up amber / ok / red without touching the global
+   palette. Effect: most panels now show 3–4 distinct colors at rest
+   (accent + amber + ok-green + the existing muted chrome). Rules are
+   intentionally scoped to sub-elements (rows, grids, lists) rather
+   than whole panels so the panel title/footer chrome still uses the
+   theme accent and the panel reads as part of the same family.
+   ───────────────────────────────────────────────────────────────── */
+
+/* Boot-status ticker — scrolling welcome text in the PRODUCTIVITY
+   header. Lives inside #combo-code as a single inline-block span. The
+   parent's `width` + `overflow:hidden` make it a clipping window; the
+   inner track translateX-loops forever until a mode-tab click ends
+   ticker mode. CRITICAL: the panel-header is pinned to its intrinsic
+   default height while ticker is active, AND .combo-ticker-track uses
+   `font-size: inherit` + `line-height: 1` so the larger ticker text
+   doesn't grow the header row. Without those, the header would expand
+   when the ticker turned on, pushing the mode-tab strip and everything
+   below it down — which read as "the whole bar keeps moving". */
+.panel-combo[data-boot-status="ticker"] .panel-header {
+  /* Three-column layout for ticker mode: title sizes to content (auto),
+     combo-code fills the remaining space (1fr), fold-group sits at the
+     right edge (auto). The base rule uses `1fr auto auto auto` which
+     made combo-code's explicit width-clamp crowd the fold-group out of
+     the visible area on wide panels. With 1fr on combo-code instead,
+     the fold buttons keep their natural slot at the right. */
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+.panel-combo[data-boot-status="ticker"] #combo-code {
+  /* No fixed width — the grid 1fr column gives us all remaining space.
+     min-width:0 lets the cell shrink below its content (otherwise the
+     long ticker text would force the grid wider than the panel). */
+  width: auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  /* Match the header's intrinsic line height — without this, the
+     larger ticker font would push line-height taller and grow the row. */
+  line-height: 1;
+  height: 1em;
+}
+.panel-combo[data-boot-status="ticker"] #combo-tag { display: none; }
+.combo-ticker-track {
+  display: inline-block;
+  white-space: nowrap;
+  /* Inherit the panel-header's font-size so the ticker doesn't grow
+     the row. Letter-spacing + color stay distinctive. */
+  font-size: inherit;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  line-height: 1;
+}
+@keyframes combo-ticker-scroll {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(-100%); }
+}
+
+/* RAM panel — 60-second memory-history grid uses amber so RAM doesn't
+   stack as solid cyan beside CPU and GPU. */
+.mem-history-grid {
+  --accent: var(--amber);
+}
+
+/* GPU panel — VRAM rows use ok-green to separate them visually from
+   the cyan GPU UTIL bars in the same panel. */
+.gpu-mem,
+.gpu-mem-row,
+.gpu-mem-fill {
+  --accent: var(--ok);
+}
+
+/* STORAGE panel — drive list bars amber so the right-column stack
+   alternates with the GPU/thermal cyan above and below. */
+.panel-storage .storage-list,
+.panel-storage .storage-row,
+.panel-storage .seg-bar-fill {
+  --accent: var(--amber);
+}
+
+/* THERMAL panel — three rows for CPU/GPU0/GPU1; today they all draw
+   cyan unless a sensor crosses the warn/high thresholds. Tint per row
+   gives the panel an at-a-glance three-color identity. CPU keeps the
+   theme accent; GPU0 → amber; GPU1 → ok-green. */
+.panel-thermal .temp-row:nth-of-type(2) { --accent: var(--amber); }
+.panel-thermal .temp-row:nth-of-type(3) { --accent: var(--ok); }
+
+/* DRIVE I/O — read row keeps accent (existing), write row amber via
+   its inline `.amber` class (existing), but the queue/transfers
+   sub-strip below can use ok-green for the third color. */
+.panel-driveio .panel-footer { --accent: var(--ok); }
+
+/* CHRONO — alt-zone clock keeps its existing amber tint (per design);
+   the date / day-code micro grid at the bottom gets an ok-green
+   tertiary so the bottom of the panel reads green where it currently
+   reads accent. */
+.panel-clock .micro-grid { --accent: var(--ok); }
+
+/* Audio visualizers follow the same info-on contract as panels:
+   bars-row + meta-row are invisible during the flicker phase, then
+   fade in on the synchronized trickle. The bars-row also grows from
+   the bottom via scaleY so the canvas appears to rise from the floor
+   the same way DOM bar-fills do in CPU/GPU/RAM panels.
+   Selectors are scoped by `body.is-booting` so the rules disappear
+   the moment boot ends — the live audio worker keeps painting the
+   canvas as normal after that, no lingering transforms. */
+body.is-booting #audio-out-grid:not(.info-on) .audio-bars-row,
+body.is-booting #audio-in-grid:not(.info-on)  .audio-bars-row,
+body.is-booting #audio-out-grid:not(.info-on) .audio-meta-row,
+body.is-booting #audio-in-grid:not(.info-on)  .audio-meta-row {
+  opacity: 0;
+}
+body.is-booting #audio-out-grid:not(.info-on) .audio-bars-row,
+body.is-booting #audio-in-grid:not(.info-on)  .audio-bars-row {
+  transform: scaleY(0);
+  transform-origin: center bottom;
+}
+
+#audio-out-grid.info-on .audio-bars-row,
+#audio-in-grid.info-on  .audio-bars-row,
+#audio-out-grid.info-on .audio-meta-row,
+#audio-in-grid.info-on  .audio-meta-row {
+  animation: info-trickle 300ms ease forwards;
+  animation-delay: var(--info-delay, 0ms);
+}
+#audio-out-grid.info-on .audio-bars-row,
+#audio-in-grid.info-on  .audio-bars-row {
+  transform: scaleY(1);
+  transition: transform 1500ms cubic-bezier(0.25, 0.8, 0.25, 1) var(--info-delay, 0ms);
+}
+

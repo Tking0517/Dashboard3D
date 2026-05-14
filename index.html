@@ -8,7 +8,14 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   </head>
-  <body>
+  <body class="is-booting is-boot-distorted is-boot-glowing">
+    <!-- CRT static-noise overlay, only visible while body.is-booting is
+         active. Canvas-rendered horizontal stripes in the active theme
+         accent — composited via mix-blend-mode: screen so it brightens
+         the dashboard chrome instead of pasting flat color over it.
+         Tick loop self-terminates the frame after body.is-booting drops,
+         and CSS opacity fades it out smoothly. -->
+    <canvas class="boot-static" aria-hidden="true"></canvas>
     <div id="app">
       <div class="bg-grid"></div>
       <div class="bg-grid-overlay" id="bg-grid-overlay"></div>
@@ -108,6 +115,16 @@
            and current weather. Populated by the existing tickClock and
            loadWeather functions; CSS handles show/hide + fade-in. -->
       <div class="zen-overlay" aria-hidden="true">
+        <!-- Visible exit affordance — top-center, picks up --accent from
+             the current theme. Click leaves zen. Keyboard Escape still
+             works too (caught in main.js before-input-event so it fires
+             even when a BrowserView has focus). -->
+        <button id="zen-exit-btn" class="zen-exit-btn" type="button" title="Exit zen (Esc)" aria-label="Exit zen mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 6 L18 18 M18 6 L6 18"/>
+          </svg>
+          <span class="zen-exit-label">EXIT ZEN · ESC</span>
+        </button>
         <div class="zen-clock">
           <!-- Invisible mirror balances the visible AM/PM on the right so the
                time element's center stays pinned to viewport center even as
@@ -250,6 +267,18 @@
             <button type="button" class="theme-menu-item" data-theme-pick="earth-eink">EINK</button>
             <button type="button" class="theme-menu-item" data-theme-pick="earth-sepia">SEPIA</button>
             <button type="button" class="theme-menu-item" data-theme-pick="earth-charcoal">CHARCOAL</button>
+            <div class="theme-menu-section">RETRO</div>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro">AMBER</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-green">GREEN</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-blue">BLUE</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-white">WHITE</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-red">RED</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-magenta">MAGENTA</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-cyan">CYAN</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-mint">MINT</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-violet">VIOLET</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-gold">GOLD</button>
+            <button type="button" class="theme-menu-item" data-theme-pick="retro-ice">ICE</button>
           </div>
         </div>
 
@@ -270,13 +299,6 @@
           </svg>
         </button>
 
-        <button id="dim-btn" class="topbar-btn" type="button" title="Dim 50%" aria-label="Dim 50%">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="5"/>
-            <path d="M12 3 V5  M12 19 V21  M3 12 H5  M19 12 H21  M5.6 5.6 L7 7  M17 17 L18.4 18.4  M5.6 18.4 L7 17  M17 7 L18.4 5.6"/>
-          </svg>
-        </button>
-
         <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
 
         <!-- ── Panel debug group ────────────────────────────────────── -->
@@ -290,19 +312,18 @@
           </svg>
         </button>
 
-        <!-- Saved layout slots. STORE arms save mode (~5s); next slot
-             click writes the current layout to that slot. Empty slots are
-             dimmed; click a filled slot to restore that layout. -->
-        <button id="save-layout-btn" class="topbar-btn" type="button" title="Store current layout (click, then click a slot 1/2/3)" aria-label="Store layout">
+        <!-- Auto-orient — recomputes the panel layout to fit the current
+             viewport: left + right side columns, productivity centered,
+             audio grids at the bottom of each column. Same code path as
+             the first-launch side-arrange, just on demand. -->
+        <button id="auto-orient-btn" class="topbar-btn" type="button" title="Auto-orient — re-fit all panels to the current window (left/right columns, productivity centered, audio at bottom)" aria-label="Auto-orient panels">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 4 H17 L20 7 V20 H4 V5 Z"/>
-            <rect x="8" y="4"  width="8" height="5"/>
-            <rect x="7" y="13" width="10" height="7"/>
+            <rect x="2"  y="3"  width="4"  height="18"/>
+            <rect x="8"  y="3"  width="8"  height="14"/>
+            <rect x="18" y="3"  width="4"  height="18"/>
+            <path d="M8 19 L16 19" stroke-dasharray="2 2"/>
           </svg>
         </button>
-        <button id="layout-slot-1" class="topbar-btn topbar-slot" type="button" data-slot="1" title="Layout slot 1" aria-label="Layout slot 1">1</button>
-        <button id="layout-slot-2" class="topbar-btn topbar-slot" type="button" data-slot="2" title="Layout slot 2" aria-label="Layout slot 2">2</button>
-        <button id="layout-slot-3" class="topbar-btn topbar-slot" type="button" data-slot="3" title="Layout slot 3" aria-label="Layout slot 3">3</button>
 
         <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
 
@@ -402,7 +423,8 @@
                 <div class="time-row clock-primary-time">
                   <div class="time-meta">
                     <span class="micro-label">LOCAL</span>
-                    <span class="micro-val accent" id="clock-tz">—</span>
+                    <span class="micro-val accent" id="clock-local-name">—</span>
+                    <span class="micro-label" id="clock-tz">—</span>
                   </div>
                   <div class="bigvalue bigvalue-primary">
                     <span class="caret">&#9656;</span>
@@ -410,10 +432,36 @@
                     <span class="bigvalue-unit" id="clock-ampm">--</span>
                   </div>
                 </div>
-                <!-- Profile picture slot — user-supplied image goes here. -->
-                <div class="profile-pic" id="profile-pic" title="Profile picture">
+                <!-- Profile picture slot — click to pick from gallery.
+                     The default placeholder is a pixelated smiley drawn
+                     with 1×1 SVG rects on a 12×12 grid; fill is
+                     currentColor so the face re-tints with the theme.
+                     shape-rendering=crispEdges keeps each pixel sharp. -->
+                <div class="profile-pic" id="profile-pic" title="Click to pick a profile picture">
+                  <video id="profile-pic-video" class="profile-pic-video" autoplay muted playsinline hidden></video>
                   <img id="profile-pic-img" class="profile-pic-img" alt="" hidden />
-                  <span class="profile-pic-placeholder">USER</span>
+                  <svg class="profile-pic-placeholder" viewBox="0 0 12 12" fill="currentColor" shape-rendering="crispEdges" aria-hidden="true">
+                    <!-- Face outline (rough circle) -->
+                    <rect x="3" y="0" width="6" height="1"/>
+                    <rect x="2" y="1" width="1" height="1"/>
+                    <rect x="9" y="1" width="1" height="1"/>
+                    <rect x="1" y="2" width="1" height="1"/>
+                    <rect x="10" y="2" width="1" height="1"/>
+                    <rect x="0" y="3" width="1" height="6"/>
+                    <rect x="11" y="3" width="1" height="6"/>
+                    <rect x="1" y="9" width="1" height="1"/>
+                    <rect x="10" y="9" width="1" height="1"/>
+                    <rect x="2" y="10" width="1" height="1"/>
+                    <rect x="9" y="10" width="1" height="1"/>
+                    <rect x="3" y="11" width="6" height="1"/>
+                    <!-- Eyes (2×2 blocks at cols 3-4 and 7-8, rows 4-5) -->
+                    <rect x="3" y="4" width="2" height="2"/>
+                    <rect x="7" y="4" width="2" height="2"/>
+                    <!-- Smile (corners curve up at row 7, base at row 8) -->
+                    <rect x="2" y="7" width="1" height="1"/>
+                    <rect x="9" y="7" width="1" height="1"/>
+                    <rect x="3" y="8" width="6" height="1"/>
+                  </svg>
                 </div>
               </div>
 
@@ -475,12 +523,21 @@
             </header>
             <div class="panel-body weather-body">
               <div class="weather-left">
+                <div class="weather-icon-big" id="weather-icon-big" aria-hidden="true">—</div>
                 <div class="bigvalue">
                   <span class="caret">&#9656;</span>
                   <span class="bigvalue-num" id="weather-temp">—</span>
                   <span class="bigvalue-unit">&deg;F</span>
                 </div>
                 <div class="weather-cond" id="weather-cond">—</div>
+                <div class="micro-cell weather-air-cell">
+                  <span class="micro-label">AIR</span>
+                  <span class="micro-val" id="weather-air">—</span>
+                </div>
+                <div class="micro-cell weather-air-cell">
+                  <span class="micro-label">MOON</span>
+                  <span class="micro-val" id="weather-moon">—</span>
+                </div>
               </div>
               <div class="weather-right">
                 <label class="micro-label">CITY</label>
@@ -499,6 +556,10 @@
                 <div class="micro-cell">
                   <span class="micro-label">DETAIL</span>
                   <span class="micro-val" id="weather-detail">—</span>
+                </div>
+                <div class="micro-cell">
+                  <span class="micro-label">POLLEN</span>
+                  <span class="micro-val" id="weather-pollen">—</span>
                 </div>
               </div>
             </div>
@@ -641,9 +702,11 @@
               <button type="button" class="combo-mode-tab" data-mode="chat">CHAT</button>
               <button type="button" class="combo-mode-tab" data-mode="paper">PAPER</button>
               <button type="button" class="combo-mode-tab" data-mode="explore">EXPLORE</button>
-              <button type="button" class="combo-mode-tab" data-mode="visualizer">VISUALIZER</button>
+              <button type="button" class="combo-mode-tab" data-mode="visualizer">REC ROOM</button>
               <button type="button" class="combo-mode-tab" data-mode="browser">BROWSER</button>
               <button type="button" class="combo-mode-tab" data-mode="tasks">TASKS</button>
+              <button type="button" class="combo-mode-tab" data-mode="music">MUSIC</button>
+              <button type="button" class="combo-mode-tab" data-mode="generate">GENERATE</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -781,15 +844,37 @@
                 </div>
               </div>
 
-              <!-- VISUALIZER pane (video player; videos auto-route from gallery) -->
+              <!-- REC ROOM pane (screen mirror + snap + screen-record studio) -->
               <div class="combo-pane combo-pane-visualizer">
                 <div class="visualizer-player-wrap">
-                  <canvas id="visualizer-audio-canvas" class="visualizer-audio-canvas"></canvas>
                   <video id="visualizer-video" class="visualizer-video" controls preload="metadata"></video>
-                  <div class="visualizer-empty" id="visualizer-empty">SYSTEM AUDIO · CLICK A VIDEO BELOW TO PLAY</div>
+                  <!-- Inline still-image viewer for snap (.jpg) clicks.
+                       Stays hidden until the wrap gets the .is-still class,
+                       so it never steals from video/mirror playback. -->
+                  <img id="visualizer-still" class="visualizer-still" alt="">
+                  <!-- FIT-crop preview canvas. Live drawImage of just the
+                       crop region from the video element, sized to fill the
+                       wrap. Shown only when CROP + FIT are both on. -->
+                  <canvas id="visualizer-crop-preview" class="visualizer-crop-preview" hidden></canvas>
+                  <div class="visualizer-empty" id="visualizer-empty">REC ROOM · CHOOSE A SOURCE AND HIT MIRROR</div>
+                  <!-- Free-capture crop rect overlay. Hidden until CROP is engaged.
+                       8 handles for resize + drag-anywhere-in-body to move. -->
+                  <div class="visualizer-crop" id="visualizer-crop" hidden>
+                    <div class="visualizer-crop-rect" id="visualizer-crop-rect">
+                      <span class="visualizer-crop-label">FREE CAPTURE</span>
+                      <span class="visualizer-crop-handle is-h-nw" data-handle="nw"></span>
+                      <span class="visualizer-crop-handle is-h-n"  data-handle="n"></span>
+                      <span class="visualizer-crop-handle is-h-ne" data-handle="ne"></span>
+                      <span class="visualizer-crop-handle is-h-e"  data-handle="e"></span>
+                      <span class="visualizer-crop-handle is-h-se" data-handle="se"></span>
+                      <span class="visualizer-crop-handle is-h-s"  data-handle="s"></span>
+                      <span class="visualizer-crop-handle is-h-sw" data-handle="sw"></span>
+                      <span class="visualizer-crop-handle is-h-w"  data-handle="w"></span>
+                    </div>
+                  </div>
                 </div>
                 <div class="visualizer-list-head">
-                  <span class="visualizer-list-title">VIDEOS</span>
+                  <span class="visualizer-list-title">CAPTURES</span>
                   <span class="visualizer-list-now" id="visualizer-now">—</span>
                   <button type="button" class="explore-action" id="visualizer-prev-btn" title="Previous">
                     <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2" height="14"/><path d="M20 5 L8 12 L20 19 Z"/></svg>
@@ -801,8 +886,133 @@
                   <button type="button" class="explore-action" id="visualizer-next-btn" title="Next">
                     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5 L16 12 L4 19 Z"/><rect x="18" y="5" width="2" height="14"/></svg>
                   </button>
-                  <button type="button" class="explore-action explore-action-wide" id="visualizer-vizoff-btn" title="Toggle audio visualization">V-ON</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-mute-btn" title="Mute playback audio (recording and mirror)">SOUND</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-mirror-btn" title="Mirror the currently-playing video (YouTube popout, browser tabs, any media)">MIRROR</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-source-btn" title="Choose which window or screen to mirror">SOURCE</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-fit-btn" title="Fill the rec-room player with just the cropped region (only effective while CROP is on)">FIT</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-crop-btn" title="Free capture — define a draggable rectangle and record only inside it">CROP</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-keys-btn" title="Overlay pressed keys onto the recording (recording-only; not visible on this screen)">KEYS</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-osd-btn" title="On-screen display: time, date, and live FPS overlays (recording-only)">OSD</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-quality-btn" title="Recording quality and resolution presets / custom bitrate">Q:MED</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-screencap-btn" title="Save a JPEG to gallery/screencap on each keystroke or mouse click (throttled)">SNAP</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-screenrec-btn" title="Continuous video record of the mirror source to gallery/recordings/*.mkv">REC</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-process-btn" title="Stitch the selected snaps into a video (shift/ctrl click to multi-select in the screencap folder)" disabled>PROCESS</button>
+                  <button type="button" class="explore-action explore-action-wide" id="visualizer-delete-btn" title="Move the selected captures (or the currently-playing item) to the Recycle Bin" disabled>DELETE</button>
                   <button type="button" class="explore-action" id="visualizer-refresh-btn"   title="Refresh">↻</button>
+                </div>
+                <!-- Popover: capture source picker. Populated on open via desktopCapturer. -->
+                <div class="visualizer-source-picker" id="visualizer-source-picker" hidden>
+                  <div class="visualizer-source-picker-head">
+                    <span>CAPTURE SOURCE</span>
+                    <button type="button" class="explore-action" id="visualizer-source-close" title="Close">×</button>
+                  </div>
+                  <ul class="visualizer-source-list" id="visualizer-source-list"></ul>
+                </div>
+                <!-- Popover: stitch selected snaps into a video. Format,
+                     resolution, compression preset, and a percentage-based
+                     time-crunch slider that controls snap pacing. -->
+                <div class="visualizer-process-picker" id="visualizer-process-picker" hidden>
+                  <div class="visualizer-source-picker-head">
+                    <span>PROCESS SNAPS · <em id="visualizer-process-count">0</em> SELECTED</span>
+                    <button type="button" class="explore-action" id="visualizer-process-close" title="Close">×</button>
+                  </div>
+                  <div class="visualizer-process-body">
+                    <div class="visualizer-process-row">
+                      <span class="visualizer-process-label">FORMAT</span>
+                      <div class="visualizer-process-radios" data-group="format">
+                        <button type="button" data-val="mp4" class="is-active">MP4</button>
+                        <button type="button" data-val="mkv">MKV</button>
+                        <button type="button" data-val="webm">WEBM</button>
+                      </div>
+                    </div>
+                    <div class="visualizer-process-row">
+                      <span class="visualizer-process-label">RES</span>
+                      <div class="visualizer-process-radios" data-group="res">
+                        <button type="button" data-val="source" class="is-active">Source</button>
+                        <button type="button" data-val="720">720p</button>
+                        <button type="button" data-val="1080">1080p</button>
+                        <button type="button" data-val="2160">2160p</button>
+                      </div>
+                    </div>
+                    <div class="visualizer-process-row">
+                      <span class="visualizer-process-label">COMPRESS</span>
+                      <div class="visualizer-process-radios" data-group="quality">
+                        <button type="button" data-val="lite">LITE</button>
+                        <button type="button" data-val="std" class="is-active">STD</button>
+                        <button type="button" data-val="crisp">CRISP</button>
+                      </div>
+                    </div>
+                    <div class="visualizer-process-row">
+                      <span class="visualizer-process-label">TIME CRUNCH</span>
+                      <input type="range" id="visualizer-process-speed" min="100" max="3000" step="50" value="200">
+                      <span id="visualizer-process-speed-val" class="visualizer-process-speed-val">200%</span>
+                    </div>
+                    <div class="visualizer-process-actions">
+                      <button type="button" id="visualizer-process-preview" class="visualizer-process-preview" title="Play a lightweight live preview of the current time-crunch speed in the slot below">▶ PREVIEW</button>
+                      <button type="button" id="visualizer-process-go" class="visualizer-process-go">PROCESS</button>
+                    </div>
+                    <!-- Inline preview slot — cycles through the selected snaps
+                         at the current TIME CRUNCH pace. Lives inside the
+                         picker so the player wrap underneath isn't required. -->
+                    <div class="visualizer-process-preview-slot">
+                      <img id="visualizer-process-preview-img" class="visualizer-process-preview-img" alt="">
+                      <div class="visualizer-process-preview-empty" id="visualizer-process-preview-empty">PRESS ▶ PREVIEW TO PLAY</div>
+                    </div>
+                    <div id="visualizer-process-status" class="visualizer-process-status"></div>
+                  </div>
+                </div>
+                <!-- Popover: on-screen display toggles. Time, date, and live
+                     FPS counter — all rendered to the recording canvas only. -->
+                <div class="visualizer-osd-picker" id="visualizer-osd-picker" hidden>
+                  <div class="visualizer-source-picker-head">
+                    <span>ON-SCREEN DISPLAY (RECORDING ONLY)</span>
+                    <button type="button" class="explore-action" id="visualizer-osd-close" title="Close">×</button>
+                  </div>
+                  <ul class="visualizer-source-list">
+                    <li class="visualizer-osd-row" data-osd="time"><span class="visualizer-source-name">TIME</span><span class="visualizer-source-kind">HH:MM:SS</span></li>
+                    <li class="visualizer-osd-row" data-osd="date"><span class="visualizer-source-name">DATE</span><span class="visualizer-source-kind">YYYY-MM-DD</span></li>
+                    <li class="visualizer-osd-row" data-osd="fps"><span class="visualizer-source-name">FPS</span><span class="visualizer-source-kind">live frame rate</span></li>
+                  </ul>
+                </div>
+                <!-- Popover: recording quality. 4 profile presets + a custom
+                     resolution/bitrate section for fine control. -->
+                <div class="visualizer-quality-picker" id="visualizer-quality-picker" hidden>
+                  <div class="visualizer-source-picker-head">
+                    <span>RECORDING QUALITY</span>
+                    <button type="button" class="explore-action" id="visualizer-quality-close" title="Close">×</button>
+                  </div>
+                  <ul class="visualizer-source-list" id="visualizer-quality-list">
+                    <li class="visualizer-quality-row" data-profile="lite"><span class="visualizer-source-name">LITE</span><span class="visualizer-source-kind">720p · 1.5 Mbps · 30 fps</span></li>
+                    <li class="visualizer-quality-row" data-profile="med"><span class="visualizer-source-name">MEDIUM</span><span class="visualizer-source-kind">Source · 5 Mbps · 30 fps</span></li>
+                    <li class="visualizer-quality-row" data-profile="large"><span class="visualizer-source-name">LARGE</span><span class="visualizer-source-kind">Source · 12 Mbps · 60 fps</span></li>
+                    <li class="visualizer-quality-row" data-profile="max"><span class="visualizer-source-name">MAX</span><span class="visualizer-source-kind">Source · 40 Mbps · 60 fps · near lossless</span></li>
+                  </ul>
+                  <div class="visualizer-quality-custom">
+                    <div class="visualizer-quality-custom-row">
+                      <label for="visualizer-quality-res">RES</label>
+                      <select id="visualizer-quality-res">
+                        <option value="source">Source</option>
+                        <option value="1080">1080p</option>
+                        <option value="720">720p</option>
+                        <option value="480">480p</option>
+                      </select>
+                    </div>
+                    <div class="visualizer-quality-custom-row">
+                      <label for="visualizer-quality-bitrate">RATE</label>
+                      <input type="range" id="visualizer-quality-bitrate" min="500" max="50000" step="500" value="5000">
+                      <span id="visualizer-quality-bitrate-val">5.0 Mbps</span>
+                    </div>
+                    <div class="visualizer-quality-custom-row">
+                      <label for="visualizer-quality-fps">FPS</label>
+                      <select id="visualizer-quality-fps">
+                        <option value="30">30</option>
+                        <option value="60">60</option>
+                        <option value="120">120</option>
+                      </select>
+                      <span></span>
+                    </div>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-quality-apply">APPLY CUSTOM</button>
+                  </div>
                 </div>
                 <ul class="visualizer-list" id="visualizer-list"></ul>
               </div>
@@ -841,11 +1051,49 @@
                   <button type="button" class="browser-navbtn" id="browser-bookmark-btn" title="Bookmark this page">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 4 H18 V21 L12 16 L6 21 Z"/></svg>
                   </button>
+                  <button type="button" class="browser-navbtn" id="browser-history-btn" title="History — recent visits">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <circle cx="12" cy="12" r="9"/>
+                      <polyline points="12,6 12,12 16,14"/>
+                      <path d="M3 12 A9 9 0 0 1 6 6"/>
+                    </svg>
+                  </button>
+                  <button type="button" class="browser-navbtn" id="browser-bookmarks-btn" title="Bookmarks — all saved pages">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2 L14.7 8.6 L22 9.2 L16.5 13.9 L18.2 21 L12 17.3 L5.8 21 L7.5 13.9 L2 9.2 L9.3 8.6 Z"/>
+                    </svg>
+                  </button>
+                  <button type="button" class="browser-navbtn browser-opacity-btn is-active" id="browser-opaque-btn" title="Opaque (default)">100%</button>
+                  <button type="button" class="browser-navbtn browser-opacity-btn" id="browser-seethru-btn" title="60% transparent — see the zen dashboard through the page">SEE THRU</button>
+                  <button type="button" class="browser-navbtn browser-navbtn-warn" id="browser-clear-btn" title="Clear cache + history (keeps sign-ins)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <path d="M5 7 H19"/>
+                      <path d="M9 7 V4 H15 V7"/>
+                      <path d="M7 7 L8 21 H16 L17 7"/>
+                    </svg>
+                  </button>
                 </div>
                 <div class="browser-bookmarks" id="browser-bookmarks">
                   <span class="browser-bookmarks-empty" id="browser-bookmarks-empty">NO BOOKMARKS · CLICK THE FLAG TO SAVE THIS PAGE</span>
                 </div>
                 <div class="browser-stage" id="browser-stage" data-mode="splash">
+                  <div class="browser-history" id="browser-history" hidden>
+                    <div class="browser-history-head">
+                      <span class="browser-history-title">HISTORY</span>
+                      <button type="button" class="browser-history-clear" id="browser-history-clear-btn" title="Clear browsing history">CLEAR</button>
+                      <button type="button" class="browser-history-close" id="browser-history-close-btn" title="Close history">×</button>
+                    </div>
+                    <ul class="browser-history-list" id="browser-history-list"></ul>
+                    <p class="browser-history-empty" id="browser-history-empty" hidden>NO VISITS YET · BROWSE A FEW PAGES AND COME BACK</p>
+                  </div>
+                  <div class="browser-history" id="browser-bookmarks-panel" hidden>
+                    <div class="browser-history-head">
+                      <span class="browser-history-title">BOOKMARKS</span>
+                      <button type="button" class="browser-history-close" id="browser-bookmarks-close-btn" title="Close bookmarks">×</button>
+                    </div>
+                    <ul class="browser-history-list" id="browser-bookmarks-list"></ul>
+                    <p class="browser-history-empty" id="browser-bookmarks-panel-empty" hidden>NO BOOKMARKS · CLICK THE FLAG ON A PAGE TO SAVE IT</p>
+                  </div>
                   <div class="browser-splash" id="browser-splash">
                     <div class="browser-splash-title">PRIVATE BROWSING</div>
                     <form class="browser-splash-form" id="browser-splash-address-form" autocomplete="off">
@@ -915,31 +1163,19 @@
                     <span class="tasks-hero-label" data-tasks-line="app">APP</span>
                     <span class="tasks-hero-value" data-tasks-line="appval">—</span>
                   </div>
-                  <!-- RAM row: app · other · system -->
-                  <div class="tasks-hero-row">
-                    <span class="tasks-hero-label" data-tasks-line="apprm">APP RAM</span>
-                    <span class="tasks-hero-value" data-tasks-line="apprmval">—</span>
+                  <!-- Three combined-stat rows. Each shows RAM + CPU
+                       together so the user reads one figure per concept. -->
+                  <div class="tasks-hero-row tasks-hero-row-wide tasks-hero-stat">
+                    <span class="tasks-hero-label" data-tasks-line="appstat">APP USAGE</span>
+                    <span class="tasks-hero-value" data-tasks-line="appstatval">—</span>
                   </div>
-                  <div class="tasks-hero-row">
-                    <span class="tasks-hero-label" data-tasks-line="othrm">OTHER RAM</span>
-                    <span class="tasks-hero-value" data-tasks-line="othrmval">—</span>
+                  <div class="tasks-hero-row tasks-hero-row-wide tasks-hero-stat">
+                    <span class="tasks-hero-label" data-tasks-line="othstat">UNDERLYING SYSTEM</span>
+                    <span class="tasks-hero-value" data-tasks-line="othstatval">—</span>
                   </div>
-                  <div class="tasks-hero-row">
-                    <span class="tasks-hero-label" data-tasks-line="sysrm">SYS RAM</span>
-                    <span class="tasks-hero-value" data-tasks-line="sysrmval">—</span>
-                  </div>
-                  <!-- CPU row: app · other · system -->
-                  <div class="tasks-hero-row">
-                    <span class="tasks-hero-label" data-tasks-line="appcpu">APP CPU</span>
-                    <span class="tasks-hero-value" data-tasks-line="appcpuval">—</span>
-                  </div>
-                  <div class="tasks-hero-row">
-                    <span class="tasks-hero-label" data-tasks-line="othcpu">OTHER CPU</span>
-                    <span class="tasks-hero-value" data-tasks-line="othcpuval">—</span>
-                  </div>
-                  <div class="tasks-hero-row">
-                    <span class="tasks-hero-label" data-tasks-line="syscpu">SYS CPU</span>
-                    <span class="tasks-hero-value" data-tasks-line="syscpuval">—</span>
+                  <div class="tasks-hero-row tasks-hero-row-wide tasks-hero-stat">
+                    <span class="tasks-hero-label" data-tasks-line="totstat">USAGE TOTAL</span>
+                    <span class="tasks-hero-value" data-tasks-line="totstatval">—</span>
                   </div>
                   <!-- Meta row -->
                   <div class="tasks-hero-row">
@@ -967,6 +1203,101 @@
                   <span class="tasks-section-tag" data-tasks-line="svctag">—</span>
                 </div>
                 <ul class="tasks-svc-list" id="tasks-svc-list"></ul>
+              </div>
+
+              <!-- MUSIC pane — procedurally-generated ambient background
+                   music. Genre dropdown picks a "patch" (plunder-core =
+                   chopped-sample-flavoured drones + rhythmic hits +
+                   wandering bass). Web Audio loops the pattern forever. -->
+              <div class="combo-pane combo-pane-music">
+                <div class="bgm-head">
+                  <span class="bgm-now" id="bgm-now">— STOPPED —</span>
+                </div>
+                <div class="bgm-controls">
+                  <div class="bgm-row">
+                    <span class="bgm-label">GENRE</span>
+                    <div class="bgm-genres" id="bgm-genres">
+                      <button type="button" class="bgm-genre bgm-genre-favs" data-bgm-genre="favs">♥ FAVS</button>
+                      <button type="button" class="bgm-genre is-active" data-bgm-genre="plundercore">PLUNDER CORE</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="vaporwave">VAPORWAVE</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="synthwave">SYNTHWAVE</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="lofi">LO-FI</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="darkambient">DARK AMBIENT</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="eightbit">8 BIT</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="smoothjazz">SMOOTH JAZZ</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="daft">DAFT</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="soundtrack">SOUNDTRACK</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="cyberpunk">CYBERPUNK</button>
+                      <button type="button" class="bgm-genre" data-bgm-genre="taverncore">TAVERNCORE</button>
+                    </div>
+                  </div>
+                  <div class="bgm-row">
+                    <span class="bgm-label">TRACK</span>
+                    <div class="bgm-tracks" id="bgm-tracks"></div>
+                  </div>
+                  <div class="bgm-row">
+                    <span class="bgm-label">VOL</span>
+                    <button type="button" id="bgm-vol-down" class="bgm-icon-btn" title="Volume down (-5%)" aria-label="Volume down">−</button>
+                    <input type="range" id="bgm-volume" class="bgm-volume" min="0" max="100" step="1" value="35">
+                    <button type="button" id="bgm-vol-up" class="bgm-icon-btn" title="Volume up (+5%)" aria-label="Volume up">+</button>
+                    <span id="bgm-volume-val" class="bgm-volume-val">35%</span>
+                  </div>
+                  <div class="bgm-row bgm-transport-row">
+                    <button type="button" id="bgm-prev-btn" class="bgm-transport-btn" title="Previous track" aria-label="Previous track">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="2" height="14"/><path d="M21 5 L9 12 L21 19 Z"/></svg>
+                    </button>
+                    <button type="button" id="bgm-play-btn" class="bgm-transport-btn bgm-transport-play" title="Play / Pause" aria-label="Play / Pause">
+                      <svg class="bgm-play-icon"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
+                      <svg class="bgm-pause-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+                    </button>
+                    <button type="button" id="bgm-stop-btn" class="bgm-transport-btn" title="Stop" aria-label="Stop">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14"/></svg>
+                    </button>
+                    <button type="button" id="bgm-next-btn" class="bgm-transport-btn" title="Next track" aria-label="Next track">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5 L15 12 L3 19 Z"/><rect x="17" y="5" width="2" height="14"/></svg>
+                    </button>
+                    <button type="button" id="bgm-fav-btn" class="bgm-transport-btn bgm-transport-fav" title="Toggle favorite" aria-label="Toggle favorite">
+                      <svg class="bgm-fav-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21 C 6 16 3 12 3 8 A 4.5 4.5 0 0 1 12 6 A 4.5 4.5 0 0 1 21 8 C 21 12 18 16 12 21 Z"/></svg>
+                      <svg class="bgm-fav-filled" viewBox="0 0 24 24" fill="currentColor" hidden><path d="M12 21 C 6 16 3 12 3 8 A 4.5 4.5 0 0 1 12 6 A 4.5 4.5 0 0 1 21 8 C 21 12 18 16 12 21 Z"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <!-- Output-level meter — segmented EQ bars matching the
+                     system audio visualizer style (audio-colour gradient,
+                     red peak markers, glass-floor reflection). Source is
+                     the BGM master-bus AnalyserNode, not the system
+                     loopback, so it shows just what we're synthesizing. -->
+                <canvas id="bgm-meter" class="bgm-meter" width="320" height="120"></canvas>
+              </div>
+
+              <!-- GENERATE pane — ComfyUI front-end. One tab per workflow
+                   JSON in the configured workflow directory. Each tab
+                   surfaces the workflow's extracted prompt + seed +
+                   image-input fields and submits via /prompt. -->
+              <div class="combo-pane combo-pane-generate">
+                <div class="gen-head">
+                  <span class="gen-now" id="gen-now">— READY —</span>
+                  <span class="gen-status" id="gen-status">CHECKING COMFYUI…</span>
+                  <button type="button" id="gen-cancel-btn" class="gen-action gen-action-cancel" title="Interrupt the current generation" disabled>✕ CANCEL</button>
+                  <button type="button" id="gen-flush-btn"  class="gen-action" title="Unload models and free VRAM/RAM">⟲ FLUSH</button>
+                  <button type="button" id="gen-refresh-btn" class="gen-action" title="Rescan workflow folder">↻</button>
+                </div>
+                <div class="gen-tabs" id="gen-tabs"></div>
+                <div class="gen-body" id="gen-body">
+                  <div class="gen-empty" id="gen-empty">NO WORKFLOWS FOUND — DROP COMFYUI JSON FILES INTO THE CONFIGURED FOLDER AND HIT ↻</div>
+                </div>
+                <div class="gen-output" id="gen-output" hidden>
+                  <div class="gen-output-meta">
+                    <span class="gen-output-label">LAST OUTPUT</span>
+                    <span id="gen-output-name" class="gen-output-name"></span>
+                  </div>
+                  <div class="gen-output-main">
+                    <img    id="gen-output-img"   class="gen-output-img"   alt="" hidden>
+                    <video  id="gen-output-video" class="gen-output-video" controls preload="metadata" hidden></video>
+                    <audio  id="gen-output-audio" class="gen-output-audio" controls preload="metadata" hidden></audio>
+                  </div>
+                  <div class="gen-output-thumbs" id="gen-output-thumbs"></div>
+                </div>
               </div>
 
             </div>
@@ -1176,25 +1507,23 @@
             </footer>
           </section>
 
-          <!-- Active downloads / file transfers panel -->
-          <section class="panel panel-transfers">
-            <header class="panel-header">
-              <span class="panel-title">TRANSFERS <em>H8</em></span>
-              <span class="panel-code">ACTIVE I/O</span>
-              <span class="panel-id" id="transfers-count">—</span>
-            </header>
-            <div class="panel-body transfers-body">
-              <div class="transfers-list" id="transfers-list">
-                <div class="storage-empty transfers-empty">NO ACTIVE TRANSFERS</div>
-              </div>
-            </div>
-            <footer class="panel-footer">
-              <span class="footer-label">TRANSFER STATUS</span>
-              <span class="footer-readout" id="transfers-status">IDLE</span>
-            </footer>
-          </section>
-
         </div>
+      </div>
+    </div>
+
+    <!-- Profile-picture picker. Opens when the user clicks .profile-pic
+         in the clock panel. Lists every image in the dashboard's gallery
+         folder (recursive); pick one to set as your avatar. -->
+    <div id="picture-picker-overlay" class="picture-picker-overlay" hidden>
+      <div class="picture-picker-card">
+        <header class="picture-picker-head">
+          <span class="picture-picker-title">PROFILE PICTURE</span>
+          <span class="picture-picker-code">GALLERY</span>
+          <button id="picture-picker-clear" class="picture-picker-clear" type="button" title="Remove profile picture">CLEAR</button>
+          <button id="picture-picker-close" class="picture-picker-close" type="button" title="Close">×</button>
+        </header>
+        <div id="picture-picker-grid" class="picture-picker-grid"></div>
+        <p class="picture-picker-empty" id="picture-picker-empty" hidden>NO IMAGES IN GALLERY · DROP ONE INTO THE EXPLORE PANE</p>
       </div>
     </div>
 
