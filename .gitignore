@@ -6,7 +6,10 @@ Thumbs.db
 Dashboard3D-win32-x64/
 dashboard3d-linux-x64/
 build-portable/
-linux-kiosk/iso-build/
+linux-kiosk/iso-build/out/
+linux-kiosk/iso-build/work/
+*.iso
 tools/
 gallery/
 userdata/
+archive/

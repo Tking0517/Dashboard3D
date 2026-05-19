@@ -1,0 +1,33 @@
+[Unit]
+Description=Dashboard3D appliance session
+# Take over tty1 from the normal login console.
+Conflicts=getty@tty1.service
+# seatd must be up first — gamescope opens its seat through it.
+Wants=seatd.service
+After=getty@tty1.service systemd-user-sessions.service NetworkManager.service seatd.service
+# No start-rate limiting: the session script ends in an interactive shell on
+# failure, so it does not loop — and we never want it stuck "start-limit-hit".
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Run via bash explicitly so the script does not depend on its exec bit
+# surviving into the squashfs.
+ExecStart=/usr/bin/bash /usr/local/bin/dashboard3d-session
+Restart=on-failure
+RestartSec=3
+# Bind to tty1 and route all I/O there, so diagnostics are visible on screen
+# and the fallback shell is usable.
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+# Set explicitly so the session never depends on a login/PAM environment.
+Environment=HOME=/root
+Environment=XDG_RUNTIME_DIR=/run/dashboard3d
+WorkingDirectory=/opt/dashboard3d
+
+[Install]
+WantedBy=multi-user.target

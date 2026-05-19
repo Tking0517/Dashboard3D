@@ -7,6 +7,43 @@ contextBridge.exposeInMainWorld('dash', {
   tempsInfo:   () => ipcRenderer.invoke('temps-info'),
   netInfo:     () => ipcRenderer.invoke('net-info'),
   diskInfo:    () => ipcRenderer.invoke('disk-info'),
+  // FANS · Stage 1 (read-only). Pulls from LibreHardwareMonitor's HTTP
+  // server (localhost:8085/data.json). Returns { status, fans, temps,
+  // pwm } when reachable, or { status:'unavailable', reason } otherwise.
+  fansPoll:        () => ipcRenderer.invoke('fans:poll'),
+  fansLoadCurves:  () => ipcRenderer.invoke('fans:load-curves'),
+  fansSaveCurves:  (curves) => ipcRenderer.invoke('fans:save-curves', curves),
+  // Power/thermal profile (Linux appliance) — reads/writes the kernel ACPI
+  // platform profile. fansGetProfile -> { ok, current, choices }.
+  fansGetProfile:  () => ipcRenderer.invoke('fans:get-profile'),
+  fansSetProfile:  (profile) => ipcRenderer.invoke('fans:set-profile', profile),
+  // Full hardware/thermal sysfs diagnostic dump (Linux appliance).
+  hwDiag:          () => ipcRenderer.invoke('system:hw-diag'),
+  // SERVICES TRIM — stop non-essential Windows services and set them to
+  // Manual startup so they don't auto-start at next boot. servicesScan
+  // is unprivileged; servicesTrim/servicesRestore trigger one UAC prompt.
+  servicesScan:    () => ipcRenderer.invoke('services:scan'),
+  servicesTrim:    (names) => ipcRenderer.invoke('services:trim', names),
+  servicesRestore: () => ipcRenderer.invoke('services:restore'),
+  // STREAM · embedded BrowserViews (Discord + future Twitch/YouTube).
+  // Renderer sends the stage rect via streamShow / streamBounds; main
+  // owns the actual BrowserView lifecycle.
+  streamShow:      (opts) => ipcRenderer.invoke('stream:show', opts),
+  streamHide:      () => ipcRenderer.invoke('stream:hide'),
+  streamBounds:    (bounds) => ipcRenderer.invoke('stream:bounds', bounds),
+  streamReload:    (kind) => ipcRenderer.invoke('stream:reload', kind),
+  streamSelfTest:  (kind) => ipcRenderer.invoke('stream:self-test', kind),
+  streamRescan:    (kind) => ipcRenderer.invoke('stream:rescan', kind),
+  streamOpenDevTools: (kind) => ipcRenderer.invoke('stream:open-devtools', kind),
+  // Subscribe to mirrored notifications from STREAM-tab BrowserViews.
+  // Currently Discord forwards window.Notification calls (DMs/mentions
+  // while the embed isn't focused). Callback gets { kind, title, body,
+  // icon, tag, timestamp }. Returns an unsubscribe function.
+  onStreamNotification: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('stream:notification', handler);
+    return () => ipcRenderer.off('stream:notification', handler);
+  },
   getConfig:   () => ipcRenderer.invoke('config-get'),
   setConfig:   (partial) => ipcRenderer.invoke('config-set', partial),
   configPath:  () => ipcRenderer.invoke('config-path'),
@@ -37,15 +74,9 @@ contextBridge.exposeInMainWorld('dash', {
   },
   setLoopbackPcm: (on) => ipcRenderer.invoke('audio-loopback-pcm', !!on),
 
-  // GENERATE pane — ComfyUI workflow front-end. Workflows live in
-  // cfg.comfyWorkflowDir; the renderer talks to ComfyUI's HTTP API
-  // directly so submission/polling don't need IPC.
-  comfyListWorkflows: () => ipcRenderer.invoke('comfy-list-workflows'),
-  comfyLoadWorkflow:  (file) => ipcRenderer.invoke('comfy-load-workflow', file),
+  // Save bytes into gallery/generated/<kind>/. Used by the REC ROOM
+  // frame-grab to write a captured video frame as a PNG.
   comfySaveOutput:    (kind, bytes, ext, nameHint) => ipcRenderer.invoke('comfy-save-output', kind, bytes, ext, nameHint),
-  // CORS-bypassing HTTP proxy via main's Node http module. Used by
-  // the GENERATE pane to talk to ComfyUI (default 127.0.0.1:8000).
-  comfyHttp:          (opts) => ipcRenderer.invoke('comfy-http', opts),
   // Rec-room EDIT panel: ffmpeg-based trim + color/blur/denoise export.
   editExportVideo:    (opts) => ipcRenderer.invoke('edit-export-video', opts),
   // Streams ffmpeg progress (percent, fps, encoder) during edit
@@ -101,6 +132,9 @@ contextBridge.exposeInMainWorld('dash', {
   galleryList:    (subdir = '') => ipcRenderer.invoke('gallery-list',   subdir),
   docsList:       (subdir = '') => ipcRenderer.invoke('docs-list',      subdir),
   downloadsList:  (subdir = '') => ipcRenderer.invoke('downloads-list', subdir),
+  musicPath:      () => ipcRenderer.invoke('music-path'),
+  musicList:      (subdir = '') => ipcRenderer.invoke('music-list', subdir),
+  setEmbedInvert: (on) => ipcRenderer.invoke('embed-invert', on),
   docsWrite:      (rel, content) => ipcRenderer.invoke('docs-write', rel, content),
   shellOpenPath:  (abs) => ipcRenderer.invoke('shell-open-path', abs),
   openImageViewer:    (abs)   => ipcRenderer.invoke('open-image-viewer', abs),
@@ -114,6 +148,18 @@ contextBridge.exposeInMainWorld('dash', {
   // returns { ok: true } on confirm + spawn success, { ok: false, cancelled: true }
   // when the user cancels, or { ok: false, error } on spawn failure.
   systemSleep:     () => ipcRenderer.invoke('system-sleep'),
+
+  // Appliance power menu — poweroff/reboot the host. Same contract as
+  // systemSleep: confirmed via a native dialog in main. action is
+  // 'poweroff' or 'reboot'.
+  systemPower:     (action) => ipcRenderer.invoke('system-power', action),
+  // Appliance app launcher — pick an executable via the native dialog,
+  // and spawn a configured launcher entry.
+  launcherPick:    () => ipcRenderer.invoke('launcher-pick'),
+  launcherRun:     (appDef) => ipcRenderer.invoke('launcher-run', appDef),
+  // Game Mode (Linux appliance) — quit to Steam Big Picture; the session
+  // script loops back to the dashboard when Steam exits.
+  enterGameMode:   () => ipcRenderer.invoke('game-mode'),
 
   // Set Windows power-scheme processor min/max state (used to throttle CPU
   // during zen mode and restore performance on resume).
@@ -176,9 +222,11 @@ contextBridge.exposeInMainWorld('dash', {
   },
 
   // Screen record — continuous video capture of the mirror stream to
-  // <gallery>/recordings/*.mkv. Renderer owns MediaRecorder + chunks
+  // <gallery>/recordings/*.mp4. Renderer owns MediaRecorder + chunks
   // them to main via screenrecChunk; main appends to a write stream.
-  screenrecStart: () => ipcRenderer.invoke('screenrec-start'),
+  // screenrecStart forwards { mime } so main can tell hardware-H.264
+  // (write straight to .mp4) from software VP8/9 (transcode on stop).
+  screenrecStart: (opts) => ipcRenderer.invoke('screenrec-start', opts),
   screenrecChunk: (id, bytes) => ipcRenderer.invoke('screenrec-chunk', id, bytes),
   screenrecStop:  (id) => ipcRenderer.invoke('screenrec-stop', id),
 

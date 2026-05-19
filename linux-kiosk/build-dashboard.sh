@@ -62,6 +62,22 @@ npm install --no-audit --no-fund --omit=dev || true
 # Re-install dev deps too — we need electron-packager + vite at build time.
 npm install --no-audit --no-fund
 
+# yt-client is a `file:../yt-client` sibling dependency. This build dir is a
+# standalone copy with no sibling folder next to it, so npm cannot resolve
+# the file: spec and node_modules/yt-client ends up missing — electron-
+# packager then dies on `stat node_modules/yt-client`. Copy the sibling's
+# contents straight into node_modules here (the same fix container-build.sh
+# applies when assembling the ISO).
+YTC_SRC="$SRC/../yt-client"
+if [[ ! -d "$YTC_SRC" ]]; then
+  echo "[phase4a] ERROR: yt-client sibling not found at $YTC_SRC" >&2
+  exit 1
+fi
+echo "[phase4a] installing yt-client sibling into node_modules..."
+rm -rf "$BUILD_DIR/node_modules/yt-client"
+mkdir -p "$BUILD_DIR/node_modules/yt-client"
+cp -aT "$YTC_SRC" "$BUILD_DIR/node_modules/yt-client"
+
 # 3. Build renderer + package Linux binary. The `package:linux` script
 #    in package.json runs `vite build` then electron-packager with
 #    --platform=linux --arch=x64.

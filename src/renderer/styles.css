@@ -197,7 +197,7 @@ body.font-courier    { --font-display:'Courier New',Courier,monospace; --font-te
    Each [data-theme="..."] block overrides --accent, --amber, --red,
    --ok, --text, --muted, --dim. The alert theme auto-engages on
    offline / error / 90%+ CPU/GPU. Sections: Cyberpunk · Pastel ·
-   Muted (earth/E-Ink) · Alert override.
+   Muted (earth/Matte) · Alert override.
    ════════════════════════════════════════════════════════════════ */
 
 /* ── Theme palettes ─────────────────────────────────────────── */
@@ -435,17 +435,6 @@ body.font-courier    { --font-display:'Courier New',Courier,monospace; --font-te
   --dim:    #28201a;
 }
 
-/* MUTED · EINK — classic monochrome E Ink: gray on near-black */
-[data-theme="earth-eink"] {
-  --accent: #b0b0b0;
-  --amber:  #989898;
-  --red:    #888080;
-  --ok:     #a0a8a0;
-  --text:   #c8c8c8;
-  --muted:  #686868;
-  --dim:    #161616;
-}
-
 /* MUTED · SEPIA — aged paper, brown ink */
 [data-theme="earth-sepia"] {
   --accent: #a87850;
@@ -637,6 +626,228 @@ body[data-theme^="retro"]::after {
     );
   background-size: 4px 4px;
   mix-blend-mode: multiply;
+}
+
+/* ── MATTE themes — flat matte e-paper ────────────────────────────
+   A structural theme family, not just a palette. The shared
+   `[data-theme^="matte"]` block below is the opposite of the
+   retro block: instead of adding chrome it strips it — every glow,
+   bloom, gradient and opacity pulse the other themes carry. Panels
+   go solid/opaque (--panel-bg) so the dashboard reads like a static
+   e-reader page rather than a backlit HUD.
+   These are DARK themes: a near-black tinted frame with a dark-grey
+   panel and light ink — a dark-mode e-paper page. Washed green / red /
+   gold accents carry status the way a colored e-paper display would.
+   The 8 variants differ by paper tint. */
+
+/* MATTE · CARBON — washed green / gold / clay (classic) accents */
+[data-theme="matte-carbon"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #bca256;
+  --red:    #c0685c;
+  --ok:     #6c9560;
+}
+
+/* MATTE · TIDE — washed teal / steel-blue / indigo accents */
+[data-theme="matte-tide"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #6991b5;
+  --red:    #7168b1;
+  --ok:     #60a9a0;
+}
+
+/* MATTE · CLAY — washed sage-sand / ochre / terracotta accents */
+[data-theme="matte-clay"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #b58a69;
+  --red:    #b17668;
+  --ok:     #a98e60;
+}
+
+/* MATTE · ORCHID — washed sage / mauve / dusty rose accents */
+[data-theme="matte-orchid"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #ab69b5;
+  --red:    #b16882;
+  --ok:     #6aa960;
+}
+
+/* MATTE · EMBER — washed olive / amber / rust accents */
+[data-theme="matte-ember"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #b59669;
+  --red:    #b17668;
+  --ok:     #a2a960;
+}
+
+/* MATTE · DENIM — washed slate-blue / periwinkle / violet accents */
+[data-theme="matte-denim"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #696bb5;
+  --red:    #9668b1;
+  --ok:     #6082a9;
+}
+
+/* MATTE · FERN — washed fern-green / moss-gold / coral accents */
+[data-theme="matte-fern"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #a3b569;
+  --red:    #b18068;
+  --ok:     #60a96f;
+}
+
+/* MATTE · HAZE — washed sea-green / lilac / plum-rose accents */
+[data-theme="matte-haze"] {
+  --accent: #dadada;
+  --text:   #d0d0d0;
+  --muted:  #8f8f8f;
+  --dim:    #565656;
+  --bg:       #090909;
+  --panel-bg: #1a1a1a;
+  --amber:  #8a69b5;
+  --red:    #b16896;
+  --ok:     #60a991;
+}
+
+/* Shared Matte structural look — applies to every matte-* variant. */
+[data-theme^="matte"],
+[data-theme^="matte"] * {
+  /* No phosphor halation — e-paper ink is matte and flat. */
+  text-shadow: none !important;
+}
+[data-theme^="matte"] .panel,
+[data-theme^="matte"] .panel:hover,
+[data-theme^="matte"] #audio-out-grid,
+[data-theme^="matte"] #audio-in-grid,
+[data-theme^="matte"] .audio-grid,
+[data-theme^="matte"] .topbar-controls {
+  /* No accent bloom on chrome. */
+  box-shadow: none !important;
+}
+[data-theme^="matte"] .panel,
+[data-theme^="matte"] .meter,
+[data-theme^="matte"] .time-row,
+[data-theme^="matte"] .temp-row,
+[data-theme^="matte"] .storage-row,
+[data-theme^="matte"] .net-row,
+[data-theme^="matte"] .gpu-mem-row,
+[data-theme^="matte"] .note-tab,
+[data-theme^="matte"] .chat-msg,
+[data-theme^="matte"] .weather-left,
+[data-theme^="matte"] .weather-right,
+[data-theme^="matte"] .bg-grid::after {
+  /* An e-paper display holds a still image — nothing breathes or pulses. */
+  animation: none !important;
+}
+/* Hover: a crisp 1px ink outline replaces the soft accent glow. */
+[data-theme^="matte"] .panel:hover {
+  filter: none;
+  box-shadow: 0 0 0 1px var(--accent) !important;
+}
+/* Topbar chrome — the hardcoded rgba(0,0,0,.55) backgrounds would read
+   as a black strip on the light e-paper dashboard, so swap them for
+   the light panel tone. */
+[data-theme^="matte"] .topbar-controls,
+[data-theme^="matte"] .topbar-btn,
+[data-theme^="matte"] .theme-cat-btn,
+[data-theme^="matte"] .theme-name {
+  background: var(--panel-bg) !important;
+}
+
+/* Matte: the horizontal load meters (CPU/MEM/DISK load and the per-GPU
+   VRAM bars) render as solid bars — a faint flat track with a single
+   continuous ink fill, no segmented-LED "broken" dashes. */
+[data-theme^="matte"] .seg-bar {
+  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+}
+[data-theme^="matte"] .seg-bar-fill,
+[data-theme^="matte"] .seg-cpu,
+[data-theme^="matte"] .seg-mem,
+[data-theme^="matte"] .seg-disk {
+  /* Washed green at normal load — like a colored e-paper display, the
+     meters carry a subtle hue rather than flat ink. */
+  background: var(--ok) !important;
+}
+[data-theme^="matte"] .seg-bar-fill.warn {
+  background: var(--amber) !important;
+}
+[data-theme^="matte"] .seg-bar-fill.high {
+  background: var(--red) !important;
+}
+
+/* Matte grids → line charts. The DOM .core-bar / .gpu-bar widgets stay
+   in layout (visibility, not display) so the container holds its size
+   for the absolutely-positioned chart canvas renderGridLine() draws
+   over it. Covers CPU cores, memory history, GPU util and the scratch
+   drives, plus their zen-overlay twins. */
+[data-theme^="matte"] #core-grid,
+[data-theme^="matte"] #mem-hist-grid,
+[data-theme^="matte"] #gpu-grid,
+[data-theme^="matte"] #scratch-grid,
+[data-theme^="matte"] #zen-core-grid,
+[data-theme^="matte"] #zen-mem-grid,
+[data-theme^="matte"] #zen-gpu-grid {
+  position: relative;
+}
+[data-theme^="matte"] #core-grid .core-bar,
+[data-theme^="matte"] #mem-hist-grid .core-bar,
+[data-theme^="matte"] #gpu-grid .gpu-bar,
+[data-theme^="matte"] #scratch-grid .core-bar,
+[data-theme^="matte"] #zen-core-grid .core-bar,
+[data-theme^="matte"] #zen-mem-grid .core-bar,
+[data-theme^="matte"] #zen-gpu-grid .core-bar {
+  visibility: hidden;
+}
+.grid-line-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+/* Matte: the grid→line charts paint their trace + fill right to the
+   canvas edge, so the graph crowds whatever meter sits below it (the
+   CPU LOAD bar + % readout, GPU util, etc.). Add clear separation
+   below each chart container — cyber themes show real bar widgets
+   here and don't need it, so this is e-ink-only. */
+[data-theme^="matte"] #core-grid,
+[data-theme^="matte"] #mem-hist-grid,
+[data-theme^="matte"] #gpu-grid,
+[data-theme^="matte"] #scratch-grid {
+  margin-bottom: 16px;
 }
 
 /* Alert theme — auto-engaged when offline, on errors, or when CPU/GPU load
@@ -2968,6 +3179,74 @@ body.is-combo-fold-light .audio-grid {
 .profile-pic.is-live .profile-pic-placeholder {
   display: none;
 }
+/* Profile-pic overlay chips — shared base style. */
+.profile-pic-cycle,
+.profile-pic-camera-toggle {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  z-index: 3;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  border: 1px solid var(--rule-dim);
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+.profile-pic-cycle svg,
+.profile-pic-camera-toggle svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* Camera ON/OFF toggle — top-right. Visible on hover when off
+   (subtle invite to turn on), permanently visible + red when live
+   (clear stop control). */
+.profile-pic-camera-toggle {
+  right: 4px;
+  top: 4px;
+  color: var(--accent);
+}
+.profile-pic:hover .profile-pic-camera-toggle,
+.profile-pic.is-live .profile-pic-camera-toggle {
+  display: inline-flex;
+}
+.profile-pic.is-live .profile-pic-camera-toggle {
+  color: var(--red);
+  border-color: var(--red);
+}
+.profile-pic-camera-toggle:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent);
+  color: var(--text);
+  transform: scale(1.05);
+}
+.profile-pic.is-live .profile-pic-camera-toggle:hover {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: var(--red);
+  color: var(--text);
+}
+
+/* Cycle-cameras chip — bottom-right. Live-only (no point cycling
+   between cameras the user hasn't turned on yet). */
+.profile-pic-cycle {
+  right: 4px;
+  bottom: 4px;
+  color: var(--accent);
+}
+.profile-pic.is-live .profile-pic-cycle {
+  display: inline-flex;
+}
+.profile-pic-cycle:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent);
+  color: var(--text);
+  transform: scale(1.05);
+}
 .profile-pic {
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease;
@@ -3166,6 +3445,54 @@ body.is-combo-fold-light .audio-grid {
   align-items: center;
 }
 
+/* ── CHRONO · 5-day calendar strip ───────────────────────────────
+   Five equal cells (today + next four). Today's cell is accent-
+   outlined; weekend cells get an amber weekday label. Sizes use cqi
+   so the strip scales with the panel like the rest of the chrome. */
+.clock-calendar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  font-family: var(--font-tech);
+}
+.cal-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: clamp(5px, 1.6cqi, 9px) 2px;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.cal-day-wd {
+  font-size: clamp(7px, 1.8cqi, 10px);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cal-day-num {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(14px, 4.2cqi, 22px);
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.cal-day-mo {
+  font-size: clamp(6px, 1.6cqi, 9px);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.cal-day.is-weekend .cal-day-wd { color: var(--amber); }
+.cal-day.is-today {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.cal-day.is-today .cal-day-wd  { color: var(--accent); }
+.cal-day.is-today .cal-day-num { color: var(--accent); }
+.cal-day.is-today .cal-day-mo  { color: color-mix(in srgb, var(--accent) 70%, var(--bg)); }
+
 /* ── PRODUCTIVITY · Notes (tabbed scratchpad) ─────────────────── */
 .panel-notes {}
 .notes-body  { gap: 8px; }
@@ -3276,6 +3603,13 @@ body.is-combo-fold-light .audio-grid {
   min-width: clamp(110px, 36cqi, 200px);
   border-right: 1px solid var(--rule-dim);
   padding-right: 18px;
+}
+/* Hero row — condition glyph beside the big temperature readout. */
+.weather-hero {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
 }
 .weather-cond {
   font-family: var(--font-tech);
@@ -3858,6 +4192,93 @@ body.is-combo-fold-light .audio-grid {
 .chat-msg.user .chat-msg-role { color: var(--accent); }
 .chat-msg.assistant .chat-msg-role { color: var(--amber); }
 
+/* Discord-mirrored notification entries — distinct visual from LLM
+   chat. Source label sits on top with the time, title below as the
+   message head, optional body underneath. Border tinted with accent
+   so it reads as "from elsewhere" rather than "you typed this". */
+.chat-msg-discord {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.chat-msg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.chat-msg-source {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.chat-msg-stamp {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.chat-msg-title {
+  font-size: 11px;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.chat-msg-body {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text) 80%, var(--bg));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* When the chat pane source is set to DISCORD, hide the LLM-only
+   chrome (provider config block, send button text). The input row
+   itself is toggled via JS (display:none) so chat-msg list takes
+   full height. ALL view keeps the input row so the user can keep
+   chatting with the LLM while seeing Discord mirror inline. */
+.combo-pane-chat[data-chat-source="discord"]  .chat-input-row,
+.combo-pane-chat[data-chat-source="facebook"] .chat-input-row,
+.combo-pane-chat[data-chat-source="discord"]  .chat-azure-config,
+.combo-pane-chat[data-chat-source="facebook"] .chat-azure-config {
+  display: none !important;
+}
+/* FETCH + TEST + DEV (stream debug) buttons — visible only when
+   chat-source is a stream kind or ALL. Hidden for LLM sources.
+   .chat-clear gives them width:28px which is too narrow for the
+   labels — override with auto width + readable padding + accent
+   treatment so they read as debug controls, not the destructive
+   × clear-chat button. */
+.chat-discord-debug { display: none; }
+.combo-pane-chat[data-chat-source="discord"]  .chat-discord-debug,
+.combo-pane-chat[data-chat-source="facebook"] .chat-discord-debug,
+.combo-pane-chat[data-chat-source="all"]      .chat-discord-debug {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  padding: 0 10px;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  border-color: var(--rule-dim);
+  text-transform: uppercase;
+}
+.combo-pane-chat[data-chat-source="discord"]  .chat-discord-debug:hover,
+.combo-pane-chat[data-chat-source="facebook"] .chat-discord-debug:hover,
+.combo-pane-chat[data-chat-source="all"]      .chat-discord-debug:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+/* Facebook-styled message bubble — same shape as Discord's, just a
+   different accent tint so the eye can tell them apart at a glance
+   when viewing ALL. */
+.chat-msg-facebook {
+  border-left-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 5%, transparent);
+}
+.chat-msg-facebook .chat-msg-source { color: var(--amber); }
+
 .chat-input-row {
   display: flex;
   gap: 6px;
@@ -4084,6 +4505,8 @@ body.is-combo-fold-light .audio-grid {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .bgm-row {
   display: flex;
@@ -4229,560 +4652,123 @@ body.is-combo-fold-light .audio-grid {
   width: 100%;
   height: 100px;
   border: 1px solid var(--rule-dim);
-  background: rgba(0, 0, 0, 0.6);
+  /* Transparent so the meter reads as part of the panel, matching the
+     system audio visualizers — no black box. */
+  background: transparent;
   margin-top: auto;
 }
 
-/* ── §combo-pane-generate ── COMFYUI GENERATE pane ─────────────────
-   Modular ComfyUI front-end. Tab strip per workflow, per-tab form for
-   the extracted prompt/seed/image-input fields, RUN button, status
-   line, and output preview. Density matches the rest of the dashboard
-   (tasks-/explore-pane scale). */
-.combo-pane-generate {
-  gap: 8px;
-  padding: 8px 10px;
-  overflow: hidden;
-  font-family: var(--font-tech);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text);
-  display: flex;
-  flex-direction: column;
-}
-.gen-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--rule-dim);
-  padding-bottom: 4px;
-  flex-shrink: 0;
-}
-.gen-now {
-  font-family: var(--font-display);
-  font-size: clamp(11px, 2.4cqi, 14px);
-  color: var(--accent);
-  letter-spacing: 0.14em;
-  flex: 1 1 auto;
-}
-.gen-status {
-  font-size: clamp(9px, 2cqi, 11px);
-  letter-spacing: 0.2em;
-  color: var(--muted);
-}
-.gen-status.is-online { color: var(--ok); }
-.gen-status.is-error  { color: var(--red); }
-.gen-action {
-  padding: 3px 8px;
-  background: transparent;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  color: var(--accent);
-  font-family: inherit;
-  font-size: clamp(10px, 2.2cqi, 12px);
-  cursor: pointer;
-}
-.gen-action:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.gen-action:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-  background: transparent;
-}
-.gen-action-cancel {
-  border-color: color-mix(in srgb, var(--red, #d33) 55%, transparent);
-  color: var(--red, #d66);
-}
-.gen-action-cancel:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--red, #d33) 16%, transparent);
-}
-.gen-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.gen-tab {
-  padding: 3px 8px;
+/* ── Music — local library / playlist player ─────────────────────── */
+.bgm-viewbar { gap: 6px; }
+.bgm-viewbar-spacer { flex: 1 1 auto; }
+.bgm-view-tab,
+.bgm-text-btn {
+  padding: 3px 10px;
   background: transparent;
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  color: var(--text);
+  color: var(--muted);
   font-family: inherit;
   font-size: clamp(9px, 2cqi, 11px);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: 0.16em;
   cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
 }
-.gen-tab .gen-tab-kind {
-  display: inline-block;
-  margin-right: 6px;
-  padding: 0 4px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
-  border-radius: 1px;
-  font-size: 0.85em;
-}
-.gen-tab[data-kind="video"] .gen-tab-kind { background: color-mix(in srgb, var(--amber) 22%, transparent); color: var(--amber); }
-.gen-tab[data-kind="audio"] .gen-tab-kind { background: color-mix(in srgb, var(--red)   22%, transparent); color: var(--red); }
-.gen-tab:hover { border-color: var(--accent); color: var(--accent); }
-.gen-tab.is-active {
+.bgm-view-tab:hover,
+.bgm-text-btn:hover { color: var(--accent); border-color: var(--accent); }
+.bgm-view-tab.is-active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: var(--accent);
   color: var(--accent);
 }
-.gen-body {
+.bgm-list {
   flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  min-height: 120px;
+  max-height: 46vh;
   overflow-y: auto;
-  min-height: 0;
-  padding: 4px 2px 2px;
-}
-/* Page-style section header — a thin labeled rule above each block. */
-.gen-section-head {
-  font-family: var(--font-tech, var(--font-display));
-  font-size: clamp(9px, 1.9cqi, 11px);
-  letter-spacing: 0.24em;
-  color: var(--accent);
-  text-transform: uppercase;
-  padding: 2px 0 1px;
-  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-}
-/* Hero prompt blocks — full-width tall textareas. */
-.gen-prompt-block {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.gen-prompt-textarea {
-  min-height: 90px;
-  resize: vertical;
-}
-.gen-prompt-negative .gen-prompt-textarea {
-  min-height: 60px;
-  border-color: color-mix(in srgb, var(--red, var(--accent)) 35%, var(--rule-dim));
-}
-/* Media (image/video) input block. */
-.gen-media-block {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.gen-media-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.gen-media-btn {
-  display: inline-block;
-  padding: 5px 10px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  font-family: var(--font-tech, var(--font-display));
-  font-size: clamp(9px, 2cqi, 11px);
-  letter-spacing: 0.2em;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.gen-media-btn:hover { background: color-mix(in srgb, var(--accent) 32%, transparent); }
-.gen-media-name {
-  font-family: var(--font-mono);
-  font-size: clamp(9px, 1.9cqi, 11px);
-  color: var(--muted);
-  text-transform: none;
-  letter-spacing: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-}
-.gen-media-preview {
-  max-width: 100%;
-  max-height: 160px;
-  width: auto;
-  height: auto;
   border: 1px solid var(--rule-dim);
-  background: #000;
-  align-self: flex-start;
-}
-.gen-media-preview[hidden] { display: none; }
-/* Compact 2-column settings grid — label : control. Multi-line strings
-   (rare in params) span the full row via .is-wide. */
-.gen-params-grid {
-  display: grid;
-  grid-template-columns: minmax(110px, 28%) 1fr;
-  column-gap: 10px;
-  row-gap: 4px;
-  align-items: center;
-}
-.gen-grid-row {
-  display: contents;
-}
-.gen-grid-row.is-wide {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  grid-column: 1 / -1;
 }
-.gen-grid-label {
-  font-size: clamp(9px, 1.9cqi, 11px);
-  letter-spacing: 0.18em;
-  color: var(--muted);
-  text-transform: uppercase;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* Dimensions grid — slider + number per row, 2 rows side-by-side on
-   wider panes so width/height pair up. */
-.gen-dims-block {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.gen-dims-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 12px;
-  row-gap: 6px;
-}
-.gen-dim-row {
-  display: grid;
-  grid-template-columns: minmax(60px, 22%) 1fr 64px;
-  align-items: center;
-  gap: 6px;
-}
-.gen-dim-label {
-  font-size: clamp(9px, 1.9cqi, 11px);
-  letter-spacing: 0.18em;
-  color: var(--muted);
-  text-transform: uppercase;
-}
-.gen-dim-num {
-  text-align: right;
-}
-.gen-dim-slider {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 4px;
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  outline: none;
-  cursor: pointer;
-}
-.gen-dim-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  cursor: pointer;
-}
-/* If a row has only the number (no slider — happens when min/max are
-   unknown), the middle column collapses. */
-.gen-dim-row > .gen-dim-num:nth-child(2) {
-  grid-column: 2 / 4;
-}
-/* Collapsible ADVANCED section. */
-.gen-advanced {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  border-top: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-  padding-top: 4px;
-  margin-top: 2px;
-}
-.gen-advanced > summary {
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.gen-advanced > summary::-webkit-details-marker { display: none; }
-.gen-advanced-chev {
-  display: inline-block;
-  font-size: 10px;
-  transition: transform 0.12s ease;
-}
-.gen-advanced[open] .gen-advanced-chev {
-  transform: rotate(90deg);
-}
-.gen-advanced > .gen-params-grid {
-  margin-top: 4px;
-}
-.gen-empty {
-  font-size: clamp(9px, 2cqi, 11px);
-  letter-spacing: 0.18em;
-  color: var(--muted);
-  padding: 16px 4px;
-  text-align: center;
-}
-.gen-row {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.gen-row-h {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.gen-label {
-  font-size: clamp(9px, 2cqi, 11px);
+.bgm-list-head {
+  padding: 5px 8px;
+  font-size: clamp(8px, 1.8cqi, 10px);
   letter-spacing: 0.2em;
   color: var(--muted);
-  flex: 0 0 auto;
-}
-.gen-input,
-.gen-textarea {
-  width: 100%;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid var(--rule-dim);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: clamp(10px, 2cqi, 12px);
-  padding: 4px 6px;
-  border-radius: 0;
-}
-.gen-input:focus,
-.gen-textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.gen-textarea {
-  min-height: 60px;
-  resize: vertical;
-  font-family: var(--font-mono);
-  letter-spacing: 0;
-  text-transform: none;
-}
-.gen-input-row {
-  display: flex;
-  gap: 4px;
-}
-.gen-input-row .gen-input { flex: 1 1 auto; }
-.gen-run-btn {
-  padding: 10px 14px;
-  margin-top: 4px;
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  font-family: var(--font-display);
-  font-size: clamp(11px, 2.4cqi, 14px);
-  letter-spacing: 0.24em;
-  cursor: pointer;
-}
-.gen-run-btn:hover {
-  background: color-mix(in srgb, var(--accent) 38%, transparent);
-}
-.gen-run-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.gen-run-btn.is-running {
-  background: color-mix(in srgb, var(--amber) 22%, transparent);
-  border-color: var(--amber);
-  color: var(--amber);
-}
-/* Output area sits below the form (after RUN). Main preview keeps its
-   aspect ratio via object-fit: contain on a fixed-height letterbox.
-   The thumbnail strip accumulates every output from this session —
-   click a thumb to swap it into the main slot. */
-.gen-output {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-top: 1px solid var(--rule-dim);
-  padding: 8px 0 4px;
-  margin-top: 4px;
-  flex-shrink: 0;
-}
-.gen-output[hidden] { display: none; }
-.gen-output-main {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background: #000;
-  border: 1px solid var(--rule-dim);
-  min-height: 180px;
-  max-height: 320px;
-  overflow: hidden;
-}
-.gen-output-img:not([hidden]),
-.gen-output-video:not([hidden]) {
-  display: block;
-  max-width: 100%;
-  max-height: 320px;
-  width: auto;
-  height: auto;
-  object-fit: contain;
-  background: #000;
-}
-.gen-output-audio:not([hidden]) {
-  display: block;
-  width: 100%;
-}
-/* ── Themed audio widget (GENERATE pane) ───────────────────────────
-   Native HTML5 audio chrome is white/round and clashes with the
-   dashboard. The native <audio> stays as the playback engine but
-   `controls` is removed; this widget owns the visible UI. */
-.gen-audio-player {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  background: #000;
-  border: 1px solid var(--rule-dim);
-  position: relative;
-  overflow: hidden;
-}
-.gen-audio-player[hidden] { display: none; }
-.gen-audio-viz {
-  display: block;
-  width: 100%;
-  height: 160px;
-  background: radial-gradient(ellipse at center,
-    color-mix(in srgb, var(--accent) 8%, #000) 0%,
-    #000 80%);
-}
-.gen-audio-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  background: rgba(0, 0, 0, 0.5);
-  border-top: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-}
-.gen-audio-play {
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  padding: 0;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.gen-audio-play:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-.gen-audio-play svg { width: 14px; height: 14px; }
-.gen-audio-play svg[hidden] { display: none; }
-.gen-audio-bar {
-  flex: 1 1 auto;
-  position: relative;
-  height: 6px;
-  background: color-mix(in srgb, var(--accent) 14%, #000);
-  border: 1px solid var(--rule-dim);
-  cursor: pointer;
-}
-.gen-audio-progress {
-  position: absolute;
+  border-bottom: 1px solid var(--rule-dim);
+  position: sticky;
   top: 0;
-  bottom: 0;
-  left: 0;
-  width: 0%;
-  background: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: var(--panel-bg);
 }
-.gen-audio-knob {
-  position: absolute;
-  top: 50%;
-  left: 0%;
-  transform: translate(-50%, -50%);
-  width: 10px;
-  height: 12px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  box-shadow: 0 0 0 1px rgba(0,0,0,0.7);
-  pointer-events: none;
+.bgm-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 45%, transparent);
+  transition: background 100ms ease, color 100ms ease;
 }
-.gen-audio-time {
-  font-family: var(--font-mono);
+.bgm-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.bgm-item-eq {
+  flex: 0 0 14px;
+  text-align: center;
   font-size: 10px;
   color: var(--accent);
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-  min-width: 80px;
-  text-align: right;
 }
-/* When hidden, browsers' UA `[hidden] { display: none }` rule wins
-   only if no later rule overrides it — `:not([hidden])` above is the
-   guard, but be explicit for clarity. */
-.gen-output-img[hidden],
-.gen-output-video[hidden],
-.gen-output-audio[hidden] { display: none !important; }
-.gen-output-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.gen-output-label {
-  font-size: clamp(9px, 2cqi, 11px);
-  letter-spacing: 0.2em;
-  color: var(--muted);
-}
-.gen-output-name {
-  font-family: var(--font-mono);
-  font-size: clamp(9px, 2cqi, 11px);
-  color: var(--accent);
-  text-transform: none;
-  letter-spacing: 0;
+.bgm-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1 1 auto;
+  font-size: clamp(10px, 2.2cqi, 12px);
+  color: var(--text);
 }
-.gen-output-thumbs {
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  min-height: 56px;
-  max-height: 64px;
-  padding-bottom: 2px;
-}
-.gen-output-thumbs:empty {
-  display: none;
-}
-.gen-output-thumb {
+.bgm-item.is-playing { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.bgm-item.is-playing .bgm-item-name { color: var(--accent); }
+.bgm-item-meta {
   flex: 0 0 auto;
-  width: 56px;
-  height: 56px;
-  border: 1px solid var(--rule-dim);
-  background: #000;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.bgm-item-x {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
   cursor: pointer;
-  position: relative;
-  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  transition: color 100ms ease, border-color 100ms ease;
 }
-.gen-output-thumb:hover { border-color: var(--accent); }
-.gen-output-thumb.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-.gen-output-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.gen-output-thumb .gen-output-thumb-icon {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  letter-spacing: 0.1em;
+.bgm-item-x:hover {
   color: var(--accent);
-  font-family: var(--font-tech, var(--font-display));
-  background: linear-gradient(135deg, rgba(0,0,0,0.6), rgba(0,0,0,0.85));
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 }
-/* (Legacy node-section rules removed — layout is now page-style with a
-   hero prompt/media block above a compact 2-col SETTINGS grid.) */
-.gen-checkbox {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
+.bgm-item-add.is-in { color: var(--accent); }
+.bgm-item-action .bgm-item-name { color: var(--muted); letter-spacing: 0.14em; }
+.bgm-item-action:hover .bgm-item-name { color: var(--accent); }
+.bgm-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: clamp(9px, 2cqi, 11px);
+  line-height: 1.7;
+  color: var(--muted);
 }
+.bgm-inline-input {
+  flex: 1 1 auto;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-family: inherit;
+  font-size: clamp(10px, 2.2cqi, 12px);
+  padding: 3px 6px;
+  outline: none;
+}
+
 .tasks-toolbar {
   display: flex;
   align-items: center;
@@ -5404,85 +5390,42 @@ body.is-combo-fold-light .audio-grid {
 .fr-loc-status[hidden] { display: none; }
 .fr-loc-status.is-error { color: #ff5050; }
 
-/* Theme picker dropdown (topbar). The .theme-name chip itself is the
-   trigger now; clicking it opens the menu. Active item picks up the
-   accent color; sections render as small dashed separators with a
-   faint label, matching the panel design. */
+/* Theme picker (topbar) — two category buttons (CYBER · INK), a colour
+   cycle button, and a static label showing the active theme name. */
 .theme-picker {
-  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  /* The topbar container is pointer-events:none (it's just layout) and
+     pointer-events is inherited — opt the picker subtree back in. */
+  pointer-events: auto;
 }
-.theme-name-trigger {
+.theme-cat-btn {
   appearance: none;
   cursor: pointer;
-  /* Match the muted look of every other topbar chip (.theme-name has
-     color: var(--muted)). Previously inherited a brighter body color
-     which made the active theme name pop out next to its siblings. */
+  pointer-events: auto;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
   color: var(--muted);
   background: rgba(0, 0, 0, 0.55);
   border: 1px solid var(--rule-dim);
-  font: inherit;
-  padding: 0 8px;
+  height: 30px;
+  padding: 0 9px;
   border-radius: 2px;
   transition: border-color 100ms ease, background 100ms ease, color 100ms ease;
 }
-.theme-name-trigger:hover,
-.theme-name-trigger[aria-expanded="true"] {
+.theme-cat-btn:hover {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.theme-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  min-width: 160px;
-  z-index: 200;
-  background: var(--bg, #0b0d0f);
-  border: 1px solid var(--accent);
-  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 25%, transparent);
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.theme-menu[hidden] { display: none; }
-.theme-menu-item {
-  appearance: none;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  font-family: var(--font-tech);
-  font-size: 10px;
-  letter-spacing: 0.18em;
-  text-align: left;
-  padding: 6px 10px;
-  cursor: pointer;
-  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
-}
-.theme-menu-item:hover {
+/* Active category — the one the current theme belongs to. */
+.theme-cat-btn.is-active {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-.theme-menu-item.is-active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-.theme-menu-section {
-  font-size: 9px;
-  letter-spacing: 0.22em;
-  color: var(--text-dim);
-  opacity: 0.45;
-  padding: 8px 10px 2px;
-  border-top: 1px dashed var(--rule-dim);
-  margin-top: 4px;
-}
-.theme-menu-section:first-child {
-  border-top: none;
-  margin-top: 0;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 /* Topbar Hz control — global refresh-rate stepper. The arrows step the
@@ -5535,9 +5478,11 @@ body.is-combo-fold-light .audio-grid {
   z-index: 10;
   display: flex;
   flex-direction: column;
-  /* Element has [hidden] in HTML; that resolves to display:none and
-     wins automatically against this flex when the viewer is closed. */
 }
+/* Specificity (0,2,0) beats .explore-viewer (0,1,0) so [hidden] actually
+   hides the overlay. Without this, display:flex stays in force and the
+   × close button has no visual effect. */
+.explore-viewer[hidden] { display: none; }
 .explore-viewer-head {
   flex: 0 0 auto;
   display: flex;
@@ -5633,12 +5578,15 @@ body.is-combo-fold-light .audio-grid {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
-.combo-pane-explore[data-explore-tab="gallery"]   .explore-section[data-explore="docs"]      { display: none; }
-.combo-pane-explore[data-explore-tab="gallery"]   .explore-section[data-explore="downloads"] { display: none; }
-.combo-pane-explore[data-explore-tab="docs"]      .explore-section[data-explore="gallery"]   { display: none; }
-.combo-pane-explore[data-explore-tab="docs"]      .explore-section[data-explore="downloads"] { display: none; }
-.combo-pane-explore[data-explore-tab="downloads"] .explore-section[data-explore="gallery"]   { display: none; }
-.combo-pane-explore[data-explore-tab="downloads"] .explore-section[data-explore="docs"]      { display: none; }
+/* Only the section matching the active tab shows. Hide-all + show-active
+   keeps this to two rules no matter how many sections exist. */
+.combo-pane-explore .explore-section { display: none; }
+.combo-pane-explore[data-explore-tab="gallery"]   .explore-section[data-explore="gallery"],
+.combo-pane-explore[data-explore-tab="docs"]      .explore-section[data-explore="docs"],
+.combo-pane-explore[data-explore-tab="downloads"] .explore-section[data-explore="downloads"],
+.combo-pane-explore[data-explore-tab="music"]     .explore-section[data-explore="music"] {
+  display: flex;
+}
 .explore-section {
   display: flex;
   flex-direction: column;
@@ -6526,6 +6474,125 @@ body.is-eco-mode .audio-grid {
   pointer-events: none;
 }
 .visualizer-player-wrap.is-playing .visualizer-empty { display: none; }
+
+/* ── §visualizer-pc ── Themed video playback control bar ─────────────
+   Replaces the native <video> controls. Pinned to the bottom of the
+   player wrap over a fade-to-dark gradient; only shown for file
+   playback (JS toggles [hidden]). */
+.visualizer-pc {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 8px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.4) 65%, transparent);
+  font-family: var(--font-tech);
+}
+.visualizer-pc[hidden] { display: none; }
+.visualizer-pc-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+}
+.visualizer-pc-btn:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.visualizer-pc-btn svg { width: 13px; height: 13px; }
+.visualizer-pc-btn svg[hidden] { display: none; }
+.visualizer-pc-time {
+  flex: 0 0 auto;
+  font-family: var(--font-mono, var(--font-tech));
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  min-width: 40px;
+  text-align: center;
+}
+.visualizer-pc-seek {
+  flex: 1 1 auto;
+  position: relative;
+  height: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, #000);
+  border: 1px solid var(--rule-dim);
+  cursor: pointer;
+}
+.visualizer-pc-buffered,
+.visualizer-pc-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0%;
+  pointer-events: none;
+}
+.visualizer-pc-buffered { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.visualizer-pc-fill     { background: color-mix(in srgb, var(--accent) 72%, transparent); }
+.visualizer-pc-knob {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 12px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+.visualizer-pc-seek:hover .visualizer-pc-knob,
+.visualizer-pc-seek.is-scrubbing .visualizer-pc-knob {
+  box-shadow: 0 0 6px var(--accent);
+}
+.visualizer-pc-vol {
+  flex: 0 0 70px;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, #000);
+  border: 1px solid var(--rule-dim);
+  cursor: pointer;
+}
+.visualizer-pc-vol::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 12px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  cursor: pointer;
+}
+/* The bar is for seekable file playback only — never over the live
+   mirror (can't seek a stream) or a still snap. */
+.visualizer-player-wrap.is-mirroring .visualizer-pc,
+.visualizer-player-wrap.is-still .visualizer-pc { display: none; }
+
+/* Fullscreen the player. The wrap normally carries .is-source-aspect
+   size caps (max-height ~60%, aspect-ratio, auto margins) which would
+   keep shrinking it even in :fullscreen — drop them all so the video
+   (and its themed control bar) truly fill the screen. */
+.visualizer-player-wrap:fullscreen {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  aspect-ratio: auto !important;
+  margin: 0 !important;
+  background: #000;
+}
+
 /* Rec-room toolbar button groups. Each .vis-btn-group is a small
    flex cluster of related buttons, and .vis-btn-divider is the slim
    vertical separator between clusters so the toolbar reads as
@@ -8569,12 +8636,12 @@ body {
    beam has just struck the phosphor and the tube is still finding
    its color temperature. */
 body.is-boot-glowing {
-  /* Heavy boot blur — reads as the tube still struggling to focus
-     before the picture stabilizes. The body filter transition above
-     (3 s ease-out) carries the blur from this peak back down to zero
-     when the class drops at ~3 s in. */
+  /* Boot blur — reads as the tube still struggling to focus before the
+     picture stabilizes. The body filter transition above (3 s ease-out)
+     carries the blur from this peak back down to zero when the class
+     drops at ~3 s in. */
   filter:
-    blur(8px)
+    blur(4px)
     drop-shadow(0 0 0 transparent)
     drop-shadow(0 0 0 transparent)
     drop-shadow(0 0 0 transparent);
@@ -8957,4 +9024,822 @@ body.is-booting #audio-in-grid:not(.info-on)  .audio-bars-row {
   transform: scaleY(1);
   transition: transform 1500ms cubic-bezier(0.25, 0.8, 0.25, 1) var(--info-delay, 0ms);
 }
+
+/* ── THERMAL · Fans subsection (lives inside the THERMAL panel) ──── */
+/* Fans subsection mirrors the visual rhythm of .temp-row above —
+   same label sizing, same readout layout, same 8 px seg-bar height
+   — so the THERMAL panel reads as one unified column of sensors. */
+.thermal-fans {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--rule-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.thermal-fans-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.thermal-fans-head .micro-label {
+  font-size: clamp(7px, 2.2cqi, 12px);
+  letter-spacing: 0.14em;
+}
+.thermal-fans-tag {
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 2cqi, 11px);
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.thermal-fans-tag.is-connected { color: var(--accent); }
+.thermal-fans-tag.is-offline   { color: var(--muted); }
+/* Power/thermal profile selector (appliance) */
+.thermal-profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.thermal-profile[hidden] { display: none; }
+.thermal-profile .micro-label {
+  font-size: clamp(7px, 2.2cqi, 12px);
+  letter-spacing: 0.14em;
+  flex: 0 0 auto;
+}
+.thermal-profile-btns {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+.thermal-profile-btn {
+  flex: 1 1 0;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 1.9cqi, 10px);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 4px;
+  cursor: pointer;
+}
+.thermal-profile-btn:hover { border-color: var(--accent); color: var(--text); }
+.thermal-profile-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.thermal-profile-status {
+  margin-top: 4px;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--accent);
+  word-break: break-word;
+}
+.thermal-profile-status:empty {
+  display: none;
+}
+.thermal-hwdiag {
+  margin-top: 6px;
+}
+.thermal-hwdiag-btn {
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.thermal-hwdiag-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.thermal-hwdiag-out {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-tech);
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--muted);
+  white-space: pre;
+  border: 1px solid var(--rule-dim);
+  padding: 6px;
+}
+.thermal-hwdiag-out[hidden] {
+  display: none;
+}
+.thermal-fans-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.thermal-fans-empty {
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 2cqi, 11px);
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 4px 0;
+}
+/* Each fan group is rendered as one "linked" sensor row matching the
+   visual footprint of a .temp-row above: label on the left, big % on
+   the right (curve target), 8 px seg-bar showing that target, then a
+   compact list of member fans beneath. No per-fan bars — they're
+   linked: one curve drives them all. */
+.fans-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--rule-dim);
+}
+.fans-group:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.fans-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.fans-group-label {
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 2.2cqi, 12px);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fans-group-readout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.fans-group-readout .caret {
+  color: var(--amber);
+  font-size: clamp(8px, 2.2cqi, 12px);
+}
+.fans-group-target {
+  color: var(--amber);
+  font-family: var(--font-tech);
+  font-size: clamp(18px, 5cqi, 28px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+.fans-group-unit {
+  color: var(--amber);
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2.2cqi, 12px);
+  letter-spacing: 0.1em;
+  padding-right: 6px;
+}
+.fans-group-rpm {
+  color: var(--accent);
+  font-family: var(--font-tech);
+  font-size: clamp(9px, 2.4cqi, 12px);
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  padding-left: 10px;
+  border-left: 1px dashed var(--rule-dim);
+  white-space: nowrap;
+}
+.fans-group .seg-bar { height: 8px; }
+.fans-group-source {
+  color: var(--muted);
+  font-family: var(--font-tech);
+  font-size: clamp(7px, 1.8cqi, 10px);
+  letter-spacing: 0.12em;
+  margin-top: 2px;
+}
+/* Member sub-list: tight rows of fan name + current RPM. No bars —
+   we already showed the linked group target above. */
+.fans-members {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 1px dashed var(--rule-dim);
+}
+.fans-member {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-tech);
+  font-size: clamp(8px, 2cqi, 11px);
+  letter-spacing: 0.06em;
+}
+.fans-member-name {
+  color: color-mix(in srgb, var(--text) 75%, var(--bg));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fans-member-rpm {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Fan seg-bar uses the amber accent — visually distinct from temp
+   bars (which use --accent / pink) so the eye can tell speed vs heat
+   apart at a glance even though both bars live in the same panel. */
+.seg-bar-fill.seg-fan {
+  background:
+    repeating-linear-gradient(90deg,
+      var(--amber) 0, var(--amber) 6px,
+      transparent 6px, transparent 8px);
+}
+.thermal-curve-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.thermal-curve-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Fan curve editor overlay ──────────────────────────────────────── */
+.fans-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.66);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-tech);
+}
+.fans-editor-overlay[hidden] { display: none; }
+.fans-editor-card {
+  width: min(560px, 92vw);
+  max-height: 92vh;
+  background: var(--panel-bg);
+  border: 1px solid var(--rule-dim);
+  display: flex;
+  flex-direction: column;
+}
+.fans-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rule-dim);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.fans-editor-title { color: var(--text); flex: 0 0 auto; }
+.fans-editor-code  { color: var(--accent); flex: 1 1 auto; }
+.fans-editor-close {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  width: 26px;
+  height: 24px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.fans-editor-close:hover { border-color: var(--accent); color: var(--accent); }
+.fans-editor-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+.fans-editor-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+.fans-editor-label { color: var(--muted); }
+.fans-editor-select {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 4px 6px;
+}
+.fans-editor-readout {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule-dim);
+}
+.fans-editor-readout-pair { display: flex; flex-direction: column; gap: 2px; }
+.fans-editor-readout-label { font-size: 9px; letter-spacing: 0.12em; color: var(--muted); }
+.fans-editor-readout-val   { font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
+.fans-editor-plot-wrap {
+  position: relative;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 92%, #000);
+  padding: 24px 12px 22px 36px;
+}
+.fans-editor-plot {
+  width: 100%;
+  height: 240px;
+  display: block;
+  touch-action: none;
+  user-select: none;
+}
+.fans-editor-grid line { stroke: var(--rule-dim); stroke-width: 1; }
+.fans-editor-grid text { fill: var(--muted); font-size: 9px; font-family: var(--font-tech); }
+.fans-editor-temp-line { stroke: var(--amber); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.8; }
+.fans-editor-fill { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: none; }
+.fans-editor-stroke { fill: none; stroke: var(--accent); stroke-width: 2; }
+.fans-editor-point {
+  fill: var(--accent);
+  stroke: var(--panel-bg);
+  stroke-width: 2;
+  cursor: grab;
+}
+.fans-editor-point.is-dragging { cursor: grabbing; fill: var(--amber); }
+.fans-editor-axis {
+  position: absolute;
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.fans-editor-axis-x { left: 36px; right: 12px; bottom: 4px; }
+.fans-editor-axis-y {
+  left: 4px;
+  top: 24px;
+  bottom: 22px;
+  width: 28px;
+  flex-direction: column;
+  text-align: right;
+}
+.fans-editor-hint {
+  margin: 0;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-align: center;
+}
+.fans-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--rule-dim);
+}
+.fans-editor-status { flex: 1 1 auto; font-size: 10px; color: var(--muted); }
+.fans-editor-status.is-error { color: #f06868; }
+.fans-editor-btn {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.fans-editor-btn:hover { border-color: var(--accent); color: var(--accent); }
+.fans-editor-btn-primary { border-color: var(--accent); color: var(--accent); }
+.fans-editor-btn-danger:hover { border-color: #f06868; color: #f06868; }
+
+/* ── §trim-overlay ── System trim (service sweep) modal ─────────────── */
+.trim-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.66);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-tech);
+}
+.trim-overlay[hidden] { display: none; }
+.trim-card {
+  width: min(640px, 94vw);
+  max-height: 90vh;
+  background: var(--panel-bg);
+  border: 1px solid var(--rule-dim);
+  display: flex;
+  flex-direction: column;
+}
+.trim-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rule-dim);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.trim-title { color: var(--text); flex: 0 0 auto; }
+.trim-code  { color: var(--accent); flex: 1 1 auto; }
+.trim-close {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  width: 26px;
+  height: 24px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.trim-close:hover { border-color: var(--accent); color: var(--accent); }
+.trim-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.trim-intro {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.trim-intro b { color: var(--amber); font-weight: 600; }
+.trim-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.trim-tool-btn {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+.trim-tool-btn:hover { border-color: var(--accent); color: var(--accent); }
+.trim-count {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.trim-list {
+  overflow-y: auto;
+  max-height: 46vh;
+  border: 1px solid var(--rule-dim);
+}
+.trim-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--rule-dim);
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+.trim-row:last-child { border-bottom: none; }
+.trim-row:hover { background: rgba(255, 255, 255, 0.03); }
+.trim-check { accent-color: var(--accent); flex: 0 0 auto; cursor: pointer; }
+.trim-row-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trim-row-id {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.trim-row-tag {
+  flex: 0 0 auto;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  padding: 2px 5px;
+  border: 1px solid var(--rule-dim);
+}
+.trim-tag-tp  { color: var(--amber); border-color: rgba(255, 208, 91, 0.4); }
+.trim-tag-win { color: var(--muted); }
+.trim-empty {
+  margin: 0;
+  padding: 16px 8px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.trim-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--rule-dim);
+}
+.trim-status {
+  flex: 1 1 auto;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.trim-status[data-kind="err"] { color: #f06868; }
+.trim-status[data-kind="ok"]  { color: var(--accent); }
+.trim-btn {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.trim-btn:hover { border-color: var(--accent); color: var(--accent); }
+.trim-btn-primary { border-color: var(--accent); color: var(--accent); }
+.trim-btn[hidden] { display: none; }
+
+/* ── §launcher ── App launcher + power menu (appliance build) ──────
+   Two themed modals: #launcher-overlay pins/launches programs,
+   #power-overlay does poweroff/restart/sleep. Mirrors the .trim-*
+   modal structure. */
+.lx-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.66);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-tech);
+}
+.lx-overlay[hidden] { display: none; }
+.lx-card {
+  width: min(620px, 94vw);
+  max-height: 90vh;
+  background: var(--panel-bg);
+  border: 1px solid var(--rule-dim);
+  display: flex;
+  flex-direction: column;
+}
+.lx-card-power { width: min(420px, 92vw); }
+.lx-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rule-dim);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.lx-title { color: var(--text); flex: 0 0 auto; }
+.lx-code  { color: var(--accent); flex: 1 1 auto; }
+.lx-close {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  width: 26px;
+  height: 24px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.lx-close:hover { border-color: var(--accent); color: var(--accent); }
+.lx-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.lx-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  overflow-y: auto;
+  max-height: 56vh;
+  padding: 2px;
+}
+.lx-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 8px;
+  border: 1px solid var(--rule-dim);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  text-align: center;
+}
+.lx-tile:hover { border-color: var(--accent); color: var(--accent); }
+.lx-tile-icon {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: var(--accent);
+  border: 1px solid var(--rule-dim);
+}
+.lx-tile-name {
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lx-tile-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.lx-tile-del:hover { color: #f06868; border-color: var(--rule-dim); }
+.lx-empty {
+  margin: 0;
+  padding: 24px 8px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.lx-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--rule-dim);
+}
+.lx-status {
+  flex: 1 1 auto;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.lx-status[data-kind="err"] { color: #f06868; }
+.lx-status[data-kind="ok"]  { color: var(--accent); }
+.lx-btn {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.lx-btn:hover { border-color: var(--accent); color: var(--accent); }
+.lx-btn-primary { border-color: var(--accent); color: var(--accent); }
+.lx-power-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 14px 12px;
+}
+.lx-power-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 6px;
+  border: 1px solid var(--rule-dim);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+.lx-power-btn svg { width: 26px; height: 26px; }
+.lx-power-btn:hover { border-color: var(--accent); color: var(--accent); }
+.lx-power-status {
+  margin: 0;
+  padding: 0 12px 12px;
+  min-height: 14px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.lx-power-status[data-kind="err"] { color: #f06868; }
+.lx-power-status[data-kind="ok"]  { color: var(--accent); }
+
+/* ── §combo-pane-stream ── STREAM pane (embedded media services) ────
+   Hosts the DISCORD sub-tab (more services to come). A BrowserView is
+   spawned by main and positioned over the .stream-stage rect — the
+   stage itself stays as a placeholder so the rect has a layout target
+   even before the BV attaches. */
+.combo-pane-stream {
+  gap: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-tech);
+}
+.stream-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 80%, #000);
+  /* Fixed height — the renderer measures #stream-stage and passes
+     those coordinates to main.setBrowserViewBounds. If the tab strip
+     could shrink to 0 (e.g., during a CSS transition or a relayout
+     in flight) the BV would mount over it. Pinning to 30 px keeps
+     the rect math deterministic. */
+  flex: 0 0 30px;
+  align-items: stretch;
+}
+.stream-tab {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  padding: 0 14px;
+  cursor: pointer;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.stream-tab-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex-shrink: 0;
+}
+.stream-tab:hover { color: var(--text); }
+.stream-tab.is-active {
+  color: var(--accent);
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--accent);
+  margin-bottom: -1px;
+}
+.stream-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  background: var(--bg);
+  overflow: hidden;
+}
+/* Placeholder shown until the BrowserView attaches + finishes loading.
+   The BV paints on top of this once mounted, so the message is only
+   visible during the connect-loading window. */
+.stream-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px;
+}
+.stream-status.is-error { color: #f06868; }
 

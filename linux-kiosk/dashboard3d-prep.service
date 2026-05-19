@@ -1,0 +1,14 @@
+[Unit]
+Description=Dashboard3D appliance hardware prep (GPU / thermal / fans)
+After=systemd-modules-load.service
+Before=getty@tty1.service systemd-user-sessions.service
+ConditionPathExists=/usr/local/bin/dashboard3d-prep
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dashboard3d-prep
+RemainAfterExit=yes
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

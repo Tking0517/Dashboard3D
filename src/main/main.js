@@ -11,6 +11,7 @@ const si = require('systeminformation');
 // audio + sensors will follow under the same pattern.
 const powerService   = require('./services/power');
 const systemService  = require('./services/system');
+const trimService    = require('./services/system/trim');
 const sensorsService = require('./services/sensors');
 const audioService   = require('./services/audio');
 const wmService      = require('./services/wm');
@@ -111,6 +112,43 @@ function createWindow() {
   screen.on('display-metrics-changed', reSnap);
   screen.on('display-added', reSnap);
   screen.on('display-removed', reSnap);
+
+  // True-fullscreen for in-page media. When any element calls
+  // requestFullscreen() (REC ROOM video player, EXPLORE image/video
+  // viewer), the element fills the window — but the window is
+  // work-area-sized, resizable:false, and force-demoted to the bottom of
+  // the z-order, so it never covers the taskbar or the whole monitor.
+  // Driving the window's real fullscreen state off the HTML-fullscreen
+  // events needs three things on Windows:
+  //   1. resizable must be ON for setFullScreen() to take — flip it for
+  //      the duration, restore after.
+  //   2. the always-on-bottom demotion (sendToBottom) must be suspended,
+  //      or it shoves the fullscreen window behind the desktop.
+  //   3. moveTop() to bring it forward on entry.
+  // Only restore window state if WE forced it (don't clobber a
+  // fullscreen the user set via the topbar toggle).
+  let _htmlFsForcedWindow = false;
+  let _htmlFsPrevResizable = false;
+  win.webContents.on('enter-html-full-screen', () => {
+    _mediaFullscreenActive = true;
+    if (!win.isFullScreen()) {
+      _htmlFsForcedWindow = true;
+      _htmlFsPrevResizable = win.isResizable();
+      win.setResizable(true);
+      win.setFullScreen(true);
+    }
+    try { win.moveTop(); } catch {}
+  });
+  win.webContents.on('leave-html-full-screen', () => {
+    _mediaFullscreenActive = false;
+    if (_htmlFsForcedWindow) {
+      _htmlFsForcedWindow = false;
+      win.setFullScreen(false);
+      win.setResizable(_htmlFsPrevResizable);
+      win.setBounds(getWorkArea());
+    }
+    sendToBottom(win); // re-assert desktop z-order
+  });
 
   // Always-on-bottom: demote on every focus AND blur AND on a periodic
   // interval. Some Windows interactions (drag-drop, restore-from-minimize,
@@ -294,7 +332,11 @@ function applyYoutubeZenMode(on) {
 // HWND to the bottom via a persistent PowerShell pipe + SetWindowPos;
 // Linux (cage kiosk) is a no-op.
 
+// Set true while in-page media (video/image) is fullscreen — suspends
+// the always-on-bottom demotion so the fullscreen window stays on top.
+let _mediaFullscreenActive = false;
 function sendToBottom(win) {
+  if (_mediaFullscreenActive) return;
   wmService.sendToBottom(win);
 }
 
@@ -302,7 +344,353 @@ app.on('before-quit', () => {
   audioService.stopLoopback();
   wmService.shutdown();
   _stopKeyHook();
+  _stopLhmSupervisor();
 });
+
+// ─── LHM SUPERVISOR (bundled sensor backend) ────────────────────────
+// LibreHardwareMonitor lives in vendor/lhm/. We spawn it as a hidden
+// child process on app ready, write a minimal config XML so it boots
+// with the HTTP server on port 8085 + minimized to tray, then chase
+// down its main window with ShowWindow(SW_HIDE) so no taskbar entry
+// remains. The renderer keeps polling localhost:8085/data.json — same
+// path it used when the user managed LHM themselves.
+//
+// Stealth caveat: LHM always creates a tray icon. Hiding it fully
+// requires a Shell_NotifyIcon(NIM_DELETE) injected into LHM's process
+// — out of scope for this stage. The tray icon stays visible; the
+// main window does not. Killing happens in before-quit above.
+// Single canonical path for the LHM bundle: <userFoldersBase>/vendor/lhm/.
+// In dev that's <project>/vendor/lhm/; in packaged builds it's
+// <exeDir>/vendor/lhm/ — same folder the manual drop instructions
+// point at. Auto-download writes here too, so there is one obvious
+// place to look whether LHM was hand-installed or fetched by the
+// dashboard.
+function _lhmDir() {
+  return path.join(userFoldersBase(), 'vendor', 'lhm');
+}
+function _lhmExePath() {
+  return path.join(_lhmDir(), 'LibreHardwareMonitor.exe');
+}
+function _lhmConfigPath() {
+  // LHM's PersistentSettings reads/writes LibreHardwareMonitor.config
+  // (a SEPARATE file from LibreHardwareMonitor.exe.config). The .exe
+  // .config is the standard .NET application config — touching it
+  // requires a matching <configSections> declaration or .NET refuses
+  // to load. The PersistentSettings file uses a simple <appSettings>
+  // <add key="..." value="..."/></appSettings> format that LHM owns
+  // entirely, so we can write it freely without breaking the .NET
+  // runtime binding.
+  return path.join(_lhmDir(), 'LibreHardwareMonitor.config');
+}
+
+// ── Auto-installer: fetch latest LHM release from GitHub ────────────
+// Hits the public releases API (no token needed), picks the first .zip
+// asset, follows the redirect to the CDN, downloads to a temp file,
+// extracts with the built-in tar.exe (Windows 10 1803+) which handles
+// zip natively. Returns true if LHM is present on disk after this
+// runs (whether it was just installed or already there).
+function _httpsGetFollow(url, headers, opts) {
+  // Single-shot HTTPS GET that follows up to 5 redirects. Resolves
+  // with the final response stream so the caller can pipe it. The
+  // opts.binary flag toggles between buffering text and exposing the
+  // raw response.
+  return new Promise((resolve, reject) => {
+    let hops = 0;
+    const go = (u) => {
+      if (++hops > 6) return reject(new Error('too many redirects'));
+      const https = require('https');
+      const parsed = new URL(u);
+      const req = https.get({
+        host: parsed.host,
+        path: parsed.pathname + parsed.search,
+        headers: { 'User-Agent': 'Dashboard3D/0.9 (+lhm-installer)', ...(headers || {}) },
+        timeout: 30_000,
+      }, (res) => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+          res.resume();
+          return go(new URL(res.headers.location, u).toString());
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error(`HTTP ${res.statusCode} for ${u}`));
+        }
+        resolve(res);
+      });
+      req.on('timeout', () => { req.destroy(new Error('timeout')); });
+      req.on('error', reject);
+    };
+    go(url);
+  });
+}
+async function _lhmEnsureInstalled() {
+  if (process.platform !== 'win32') return false;
+  // Already installed (manual or auto) — nothing to do.
+  if (fs.existsSync(_lhmExePath())) return true;
+  console.log('[lhm] installing — fetching latest release from GitHub…');
+  const apiUrl = 'https://api.github.com/repos/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest';
+  let zipUrl = null;
+  try {
+    const res = await _httpsGetFollow(apiUrl, { Accept: 'application/vnd.github+json' });
+    let buf = '';
+    res.setEncoding('utf8');
+    for await (const chunk of res) buf += chunk;
+    const data = JSON.parse(buf);
+    // LHM ships two zips per release: the .NET Framework 4.7.2 build
+    // (`LibreHardwareMonitor.zip`, smaller, works with Windows' built-
+    // in .NET) and the .NET 10 build (`LibreHardwareMonitor.NET.10.zip`
+    // — needs the .NET 10 runtime separately installed). Strongly
+    // prefer the FW build so first-launch doesn't fail on machines
+    // that don't have .NET 10. Fall back to any .zip if the names
+    // change in a future release.
+    const zips = (data.assets || []).filter((a) => /\.zip$/i.test(a.name));
+    const asset =
+      zips.find((a) => /^LibreHardwareMonitor\.zip$/i.test(a.name)) ||
+      zips.find((a) => !/\.net\.?\d+\.zip$/i.test(a.name)) ||
+      zips[0] ||
+      (data.assets || [])[0];
+    if (!asset?.browser_download_url) throw new Error('no zip asset in latest release');
+    zipUrl = asset.browser_download_url;
+    console.log('[lhm] release:', data.tag_name, 'asset:', asset.name, 'size:', asset.size);
+  } catch (err) {
+    console.warn('[lhm] release lookup failed:', err.message);
+    return false;
+  }
+  // Download to a temp file. Stream-pipe so we don't buffer the entire
+  // zip in memory (~10–15 MB is fine either way, but the stream form
+  // is more honest).
+  const tmpZip = path.join(app.getPath('temp'), `dash3d-lhm-${Date.now()}.zip`);
+  try {
+    const res = await _httpsGetFollow(zipUrl);
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(tmpZip);
+      res.pipe(out);
+      out.on('finish', resolve);
+      out.on('error', reject);
+      res.on('error', reject);
+    });
+    console.log('[lhm] downloaded to', tmpZip);
+  } catch (err) {
+    console.warn('[lhm] download failed:', err.message);
+    try { fs.unlinkSync(tmpZip); } catch {}
+    return false;
+  }
+  // Extract via tar.exe (Windows 10 1803+ ships it). Handles .zip
+  // natively. Target dir is created fresh so old partial installs
+  // don't linger.
+  const destDir = _lhmDir();
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+    await new Promise((resolve, reject) => {
+      const proc = spawn('tar.exe', ['-xf', tmpZip, '-C', destDir], { windowsHide: true });
+      let stderr = '';
+      proc.stderr?.on('data', (c) => stderr += c.toString());
+      proc.on('error', reject);
+      proc.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`tar exit ${code}: ${stderr.slice(-200)}`)));
+    });
+    console.log('[lhm] extracted to', destDir);
+  } catch (err) {
+    console.warn('[lhm] extract failed:', err.message);
+    try { fs.unlinkSync(tmpZip); } catch {}
+    return false;
+  }
+  try { fs.unlinkSync(tmpZip); } catch {}
+  // Some LHM zips have a top-level folder (e.g. "LibreHardwareMonitor/")
+  // while others have files at the root. If the exe didn't land at
+  // <destDir>/LibreHardwareMonitor.exe, find it one level deep and
+  // flatten the structure so our spawn path resolves.
+  if (!fs.existsSync(path.join(destDir, 'LibreHardwareMonitor.exe'))) {
+    try {
+      for (const entry of fs.readdirSync(destDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const sub = path.join(destDir, entry.name);
+        if (!fs.existsSync(path.join(sub, 'LibreHardwareMonitor.exe'))) continue;
+        for (const f of fs.readdirSync(sub)) {
+          fs.renameSync(path.join(sub, f), path.join(destDir, f));
+        }
+        try { fs.rmdirSync(sub); } catch {}
+        break;
+      }
+    } catch (err) {
+      console.warn('[lhm] flatten failed:', err.message);
+    }
+  }
+  return fs.existsSync(_lhmExePath());
+}
+function _lhmWriteStealthConfig() {
+  // Write LHM's PersistentSettings file (LibreHardwareMonitor.config,
+  // not LibreHardwareMonitor.exe.config!). LHM reads this on launch
+  // with its own XML parser that expects <appSettings><add key=…
+  // value=…/></appSettings>. We set the keys that make LHM run
+  // hidden + serve the HTTP API:
+  //   runWebServerMenuItem  → turns the listener on
+  //   listenerPort          → port the listener binds (matches our
+  //                            renderer's poll URL)
+  //   minTrayMenuItem       → close button minimizes to tray
+  //   startMinMenuItem      → start minimized (no taskbar entry)
+  //   hideShowIconMenuItem  → no balloon notifications on minimize
+  //
+  // Idempotent — written before every spawn. If LHM saves its own
+  // settings on quit, our values are restored next launch.
+  const xml =
+`<?xml version="1.0"?>
+<configuration>
+  <appSettings>
+    <add key="runWebServerMenuItem" value="true" />
+    <add key="listenerPort" value="8085" />
+    <add key="minTrayMenuItem" value="true" />
+    <add key="startMinMenuItem" value="true" />
+    <add key="hideShowIconMenuItem" value="true" />
+    <add key="logSensorsMenuItem" value="false" />
+    <add key="mainForm.Location.X" value="-32000" />
+    <add key="mainForm.Location.Y" value="-32000" />
+  </appSettings>
+</configuration>
+`;
+  try {
+    fs.mkdirSync(path.dirname(_lhmConfigPath()), { recursive: true });
+    fs.writeFileSync(_lhmConfigPath(), xml, 'utf8');
+  } catch (err) {
+    console.warn('[lhm] write config failed:', err.message);
+  }
+}
+function _lhmProbePort(timeoutMs) {
+  // Returns true if something is already listening on localhost:8085.
+  // We use a TCP connect rather than an HTTP GET so we don't have to
+  // wait for a full HTTP response — connect-or-fail is fast.
+  return new Promise((resolve) => {
+    const net = require('net');
+    const sock = net.createConnection({ host: '127.0.0.1', port: 8085 }, () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.setTimeout(timeoutMs);
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+    sock.on('error',   () => resolve(false));
+  });
+}
+function _lhmHideMainWindow(pid) {
+  // PowerShell helper: find every top-level window owned by `pid` and
+  // call ShowWindow(hWnd, SW_HIDE). Catches the LHM main form (the
+  // tray icon is a separate beast — see stealth caveat above).
+  const ps =
+`$pid_target = ${pid};
+Add-Type -Namespace W -Name U -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern bool EnumWindows(System.IntPtr cb, System.IntPtr l);
+[DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
+'@;
+Get-Process -Id $pid_target -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_.MainWindowHandle -ne 0) { [W.U]::ShowWindow($_.MainWindowHandle, 0) | Out-Null }
+};`;
+  try {
+    spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      windowsHide: true, detached: true, stdio: 'ignore',
+    }).unref();
+  } catch (err) {
+    console.warn('[lhm] hide main window failed:', err.message);
+  }
+}
+let _lhmProc = null;
+let _lhmHealthTimer = null;
+let _lhmInstalling = false;
+let _lhmStarting = false;
+async function _lhmSpawnOnce() {
+  // Single-attempt spawn. Caller guarantees no _lhmProc is alive and
+  // the binary exists; we only do the os work here.
+  _lhmWriteStealthConfig();
+  try {
+    // detached:true is critical on Windows — Electron's main process
+    // runs inside a Job Object that kills children when the parent
+    // exits AND restricts certain syscalls. LHM's WinRing0 driver
+    // access goes through one of those restricted syscalls, so an
+    // in-Job spawn either fails silently or LHM exits without
+    // surfacing the cause. detached:true puts LHM in its own process
+    // group, free of those restrictions. We still own its lifecycle:
+    // before-quit calls _lhmProc.kill().
+    // Note: windowsHide hides the console window only — LHM is a
+    // WinForms app and creates its main form regardless; the
+    // ShowWindow chaser below pushes that off-screen.
+    _lhmProc = spawn(_lhmExePath(), [], {
+      cwd: _lhmDir(),
+      windowsHide: true,
+      detached: true,
+      stdio: 'ignore',
+    });
+    _lhmProc.unref();
+    _lhmProc.on('exit', (code) => {
+      console.log('[lhm] child exited code', code);
+      _lhmProc = null;
+    });
+    _lhmProc.on('error', (err) => {
+      console.warn('[lhm] spawn error:', err.message);
+      _lhmProc = null;
+    });
+    // Repeated chase: LHM takes ~1–3 s to fully initialize its form
+    // depending on how many sensors it discovers. Fire ShowWindow a
+    // few times so we catch the form whenever it appears.
+    const pid = _lhmProc.pid;
+    if (pid) {
+      [600, 1500, 3000, 5000].forEach((delay) => {
+        setTimeout(() => { if (_lhmProc?.pid === pid) _lhmHideMainWindow(pid); }, delay);
+      });
+    }
+    console.log('[lhm] spawned pid=', pid);
+  } catch (err) {
+    console.warn('[lhm] spawn failed:', err.message);
+  }
+}
+async function _lhmEnsureRunning() {
+  // Re-entrancy guard — multiple health ticks may overlap if the
+  // first one is still downloading.
+  if (_lhmStarting) return;
+  if (process.platform !== 'win32') return;
+  // Port already serving = LHM (ours or someone else's) is alive.
+  if (await _lhmProbePort(300)) return;
+  _lhmStarting = true;
+  try {
+    if (!fs.existsSync(_lhmExePath())) {
+      if (_lhmInstalling) return;
+      _lhmInstalling = true;
+      try {
+        const ok = await _lhmEnsureInstalled();
+        if (!ok) {
+          console.warn('[lhm] auto-install did not complete — fans panel will stay offline');
+          return;
+        }
+      } finally { _lhmInstalling = false; }
+    }
+    // If we previously spawned and the process is still alive but the
+    // port hasn't come up, give it more time before re-spawning. Only
+    // re-spawn when there's no live child.
+    if (_lhmProc) {
+      console.log('[lhm] port not up yet but child still alive, waiting…');
+      return;
+    }
+    await _lhmSpawnOnce();
+  } finally {
+    _lhmStarting = false;
+  }
+}
+async function _startLhmSupervisor() {
+  if (process.platform !== 'win32') return;
+  // Immediate first attempt, then a periodic health check that handles
+  // crashes, slow first-boot installs, and the "user closed LHM via
+  // tray icon" recovery path. 15 s cadence keeps the dashboard idle
+  // overhead negligible.
+  await _lhmEnsureRunning();
+  if (_lhmHealthTimer) clearInterval(_lhmHealthTimer);
+  _lhmHealthTimer = setInterval(() => {
+    _lhmEnsureRunning().catch((err) => console.warn('[lhm] health-check:', err.message));
+  }, 15_000);
+}
+function _stopLhmSupervisor() {
+  if (_lhmHealthTimer) { clearInterval(_lhmHealthTimer); _lhmHealthTimer = null; }
+  if (_lhmProc) {
+    try { _lhmProc.kill(); } catch {}
+    _lhmProc = null;
+  }
+}
 
 // ─── USER FOLDERS ──────────────────────────────────────────────────
 // Long-lived user content lives next to the app .exe so it stays with
@@ -318,8 +706,9 @@ function userFoldersBase() {
 function galleryFolderPath()   { return path.join(userFoldersBase(), 'gallery');   }
 function docsFolderPath()      { return path.join(userFoldersBase(), 'docs');      }
 function downloadsFolderPath() { return path.join(userFoldersBase(), 'downloads'); }
+function musicFolderPath()     { return path.join(userFoldersBase(), 'music');     }
 function ensureUserFolders() {
-  for (const p of [galleryFolderPath(), docsFolderPath(), downloadsFolderPath()]) {
+  for (const p of [galleryFolderPath(), docsFolderPath(), downloadsFolderPath(), musicFolderPath()]) {
     try { fs.mkdirSync(p, { recursive: true }); }
     catch (err) { console.warn(`could not create ${p}:`, err.message); }
   }
@@ -414,6 +803,11 @@ app.commandLine.appendSwitch('force-device-scale-factor', '1');
 // rendering that we don't enable it.
 
 app.whenReady().then(() => {
+  // Bring up the bundled LibreHardwareMonitor child process in the
+  // background. Non-blocking — if it fails, the FANS panel just stays
+  // empty and the rest of the dashboard keeps booting normally.
+  _startLhmSupervisor().catch((err) => console.warn('[lhm] supervisor:', err?.message || err));
+
   // Auto-grant all media-related permissions so the renderer can call
   // getUserMedia, getDisplayMedia, and the desktop-capture path without
   // hitting permission prompts. Both the request handler (async) and the
@@ -981,6 +1375,7 @@ app.whenReady().then(() => {
           _bvDarkCssKeys.set(id, key);
         } catch {}
       }
+      _applyEmbedInvert(wc, true);   // mirror the dashboard theme-invert
     });
     wc.on('did-start-loading', () => {
       const t = _bvTabs.get(id); if (!t) return;
@@ -1446,6 +1841,10 @@ app.whenReady().then(() => {
     '.webm': 'video/webm', '.mkv':  'video/webm',
     '.mov':  'video/quicktime',
     '.ogv':  'video/ogg',  '.ogg':  'video/ogg',
+    // Audio — the music library plays these via an <audio> element.
+    '.mp3':  'audio/mpeg', '.m4a':  'audio/mp4',  '.aac':  'audio/aac',
+    '.flac': 'audio/flac', '.wav':  'audio/wav',  '.oga':  'audio/ogg',
+    '.opus': 'audio/ogg',  '.weba': 'audio/webm',
     '.txt':  'text/plain;charset=utf-8',
     '.html': 'text/html;charset=utf-8',
     '.json': 'application/json',
@@ -1463,6 +1862,7 @@ app.whenReady().then(() => {
       root = which === 'gallery'   ? galleryFolderPath()
            : which === 'docs'      ? docsFolderPath()
            : which === 'downloads' ? downloadsFolderPath()
+           : which === 'music'     ? musicFolderPath()
            : null;
       if (!root) {
         console.warn('[dash3d-file] bad host:', u.hostname, 'in', request.url);
@@ -1482,7 +1882,13 @@ app.whenReady().then(() => {
       const data = fs.readFileSync(abs);
       const ext = path.extname(abs).toLowerCase();
       const mime = _DASH_MIME[ext] || 'application/octet-stream';
-      return new Response(data, { headers: { 'Content-Type': mime } });
+      // ACAO so the music player can route audio through a
+      // MediaElementAudioSourceNode without the graph going silent on a
+      // cross-origin taint (dash3d-file:// is a different origin than the
+      // app page).
+      return new Response(data, {
+        headers: { 'Content-Type': mime, 'Access-Control-Allow-Origin': '*' },
+      });
     } catch (err) {
       console.warn('[dash3d-file] read failed:', abs, err.message);
       return new Response(`read failed: ${err.message}`, { status: 500 });
@@ -1557,6 +1963,1877 @@ function registerIpc() {
 
   ipcMain.handle('disk-info', async () => {
     return await getDiskIo();
+  });
+
+  // ── FANS (read-only, Stage 1) ───────────────────────────────────────
+  // Reads sensor data from LibreHardwareMonitor's optional HTTP server
+  // (Options → Remote Web Server → Run, default port 8085, endpoint
+  // /data.json). LHM walks a tree of motherboard / super-IO chip /
+  // GPU sensors; we flatten leaves whose Value carries a unit suffix:
+  //   "1234 RPM" → fan
+  //   "45.0 °C"  → temperature
+  //   "55.0 %"   → PWM/Control
+  // No writes — Stage 1 is monitor + curve designer only. Curves persist
+  // in <portableData>/fan-curves.json so they survive reinstalls in the
+  // portable layout.
+  const LHM_URL = 'http://localhost:8085/data.json';
+  function _fansFetchLhm() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
+      try {
+        const req = http.get(LHM_URL, { timeout: 1500 }, (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            return finish({ ok: false, reason: `HTTP ${res.statusCode}` });
+          }
+          let buf = '';
+          res.setEncoding('utf8');
+          res.on('data', (c) => { buf += c; if (buf.length > 2_000_000) { req.destroy(); finish({ ok: false, reason: 'response too large' }); } });
+          res.on('end', () => {
+            try { finish({ ok: true, tree: JSON.parse(buf) }); }
+            catch (err) { finish({ ok: false, reason: 'JSON parse: ' + err.message }); }
+          });
+        });
+        req.on('timeout', () => { req.destroy(); finish({ ok: false, reason: 'timeout' }); });
+        req.on('error', (err) => finish({ ok: false, reason: err.code || err.message }));
+      } catch (err) {
+        finish({ ok: false, reason: err.message });
+      }
+    });
+  }
+  function _fansParseLhm(tree) {
+    // LHM emits values with locale-formatted numbers + unit suffix. Pull
+    // the first number we find; reject NaN so the renderer never paints
+    // a fake "0 RPM" reading from a malformed entry.
+    const parseNum = (s) => {
+      const m = String(s == null ? '' : s).match(/-?\d+(?:[.,]\d+)?/);
+      if (!m) return null;
+      const n = parseFloat(m[0].replace(',', '.'));
+      return Number.isFinite(n) ? n : null;
+    };
+    const fans = [];
+    const temps = [];
+    const pwm = [];
+    // Walk the tree, carrying the nearest device label (the deepest
+    // ancestor whose Text is NOT one of the LHM group names) so each
+    // sensor has a meaningful parent for the UI to group by.
+    const walk = (node, deviceLabel) => {
+      if (!node || typeof node !== 'object') return;
+      const text = String(node.Text || '');
+      const groupNames = new Set(['Sensor', 'Temperatures', 'Fans', 'Controls', 'Voltages', 'Clocks', 'Load', 'Powers', 'Data', 'Throughput', 'Currents', 'Levels', 'Factors']);
+      const isGroup = groupNames.has(text);
+      const nextDevice = (!isGroup && text) ? text : deviceLabel;
+      const val = node.Value;
+      if (typeof val === 'string' && val.length) {
+        const num = parseNum(val);
+        if (num != null) {
+          const id = String(node.id ?? `${nextDevice}|${text}`);
+          const entry = { id, name: text, device: deviceLabel || nextDevice || '', raw: val, value: num };
+          if (/rpm/i.test(val))      fans.push(entry);
+          else if (/°\s*c/i.test(val) || /\bC\b/.test(val.replace(/°/, ''))) {
+            if (/°/.test(val)) temps.push(entry); // require ° to avoid matching "AC" / "DC" voltage labels
+          }
+          else if (/%/.test(val))    pwm.push(entry);
+        }
+      }
+      const kids = node.Children;
+      if (Array.isArray(kids)) for (const k of kids) walk(k, nextDevice);
+    };
+    walk(tree, '');
+    return { fans, temps, pwm };
+  }
+  // Linux sensor backend. The Windows build reads LibreHardwareMonitor's
+  // HTTP API; the appliance has no LHM, so read /sys/class/hwmon directly
+  // — k10temp/amdgpu/nvme expose temps, asus-wmi exposes fan RPM + pwm.
+  function _fansReadHwmonLinux() {
+    const fans = [], temps = [], pwm = [];
+    const root = '/sys/class/hwmon';
+    let dirs;
+    try { dirs = fs.readdirSync(root); } catch { return { fans, temps, pwm }; }
+    for (const d of dirs) {
+      const base = `${root}/${d}`;
+      const rd = (f) => { try { return fs.readFileSync(`${base}/${f}`, 'utf8').trim(); } catch { return null; } };
+      const device = rd('name') || d;
+      let files = [];
+      try { files = fs.readdirSync(base); } catch {}
+      for (const f of files) {
+        let m = f.match(/^temp(\d+)_input$/);
+        if (m) {
+          const n = parseInt(rd(f), 10);
+          if (Number.isFinite(n)) {
+            const v = n / 1000;
+            temps.push({ id: `${device}|${f}`, name: rd(`temp${m[1]}_label`) || `temp${m[1]}`, device, raw: `${v.toFixed(1)} °C`, value: v });
+          }
+          continue;
+        }
+        m = f.match(/^fan(\d+)_input$/);
+        if (m) {
+          const n = parseInt(rd(f), 10);
+          if (Number.isFinite(n)) {
+            fans.push({ id: `${device}|${f}`, name: rd(`fan${m[1]}_label`) || `fan${m[1]}`, device, raw: `${n} RPM`, value: n });
+          }
+          continue;
+        }
+        m = f.match(/^pwm(\d+)$/);
+        if (m) {
+          const n = parseInt(rd(f), 10);
+          if (Number.isFinite(n)) {
+            const pct = Math.round((n / 255) * 100);
+            pwm.push({ id: `${device}|${f}`, name: `pwm${m[1]}`, device, raw: `${pct} %`, value: pct });
+          }
+        }
+      }
+    }
+    return { fans, temps, pwm };
+  }
+  ipcMain.handle('fans:poll', async () => {
+    if (process.platform === 'linux') {
+      const parsed = _fansReadHwmonLinux();
+      if (!parsed.fans.length && !parsed.temps.length && !parsed.pwm.length) {
+        return { status: 'unavailable', reason: 'no /sys/class/hwmon sensors' };
+      }
+      return { status: 'connected', ...parsed, ts: Date.now() };
+    }
+    const res = await _fansFetchLhm();
+    if (!res.ok) return { status: 'unavailable', reason: res.reason };
+    const parsed = _fansParseLhm(res.tree);
+    return { status: 'connected', ...parsed, ts: Date.now() };
+  });
+
+  function _fansCurvesFile() {
+    return path.join(portableDataDir(), 'fan-curves.json');
+  }
+  ipcMain.handle('fans:load-curves', async () => {
+    try {
+      const buf = await fs.promises.readFile(_fansCurvesFile(), 'utf8');
+      const parsed = JSON.parse(buf);
+      return { ok: true, curves: (parsed && typeof parsed === 'object') ? parsed : {} };
+    } catch {
+      return { ok: true, curves: {} };
+    }
+  });
+
+  // ── Apply a designed curve to the ASUS hardware ─────────────────────
+  // The app's curve is an arbitrary list of {temp:0-100°C, pct:0-100}
+  // points. The ASUS asus_custom_fan_curve hwmon wants 8 fixed
+  // (temp°C, pwm 0-255) points per fan, so we resample onto a fixed
+  // temp ladder, interpolating the user's pct and converting to pwm.
+  const _ASUS_CURVE_TEMPS = [35, 45, 55, 65, 75, 82, 88, 94];
+  function _interpPct(points, t) {
+    if (!points || !points.length) return null;
+    const s = points.slice().sort((a, b) => a.temp - b.temp);
+    if (t <= s[0].temp) return s[0].pct;
+    if (t >= s[s.length - 1].temp) return s[s.length - 1].pct;
+    for (let i = 0; i < s.length - 1; i++) {
+      const a = s[i], b = s[i + 1];
+      if (t >= a.temp && t <= b.temp) {
+        const r = (t - a.temp) / ((b.temp - a.temp) || 1);
+        return a.pct + (b.pct - a.pct) * r;
+      }
+    }
+    return s[s.length - 1].pct;
+  }
+  function _findAsusFanCurveHwmon() {
+    try {
+      for (const d of fs.readdirSync('/sys/class/hwmon')) {
+        const base = `/sys/class/hwmon/${d}`;
+        if (fs.existsSync(`${base}/pwm1_auto_point1_pwm`)) return base;
+      }
+    } catch {}
+    return null;
+  }
+  function _applyCurvesToAsus(curves) {
+    const hw = _findAsusFanCurveHwmon();
+    if (!hw) return { ok: false, error: 'no asus fan-curve hwmon' };
+    const map = { cpu: 1, gpu: 2 }; // cpu curve -> fan1, gpu curve -> fan2
+    const applied = [];
+    for (const group of Object.keys(map)) {
+      const fan = map[group];
+      const curve = curves[group];
+      if (!curve || !Array.isArray(curve.points) || !curve.points.length) continue;
+      if (!fs.existsSync(`${hw}/pwm${fan}_auto_point1_pwm`)) continue;
+      let prevPwm = 0;
+      for (let i = 0; i < 8; i++) {
+        const t = _ASUS_CURVE_TEMPS[i];
+        const pct = _interpPct(curve.points, t);
+        let pwm = Math.round((pct == null ? 0 : pct) / 100 * 255);
+        pwm = Math.max(prevPwm, Math.max(0, Math.min(255, pwm))); // monotonic
+        prevPwm = pwm;
+        try {
+          fs.writeFileSync(`${hw}/pwm${fan}_auto_point${i + 1}_temp`, String(t));
+          fs.writeFileSync(`${hw}/pwm${fan}_auto_point${i + 1}_pwm`, String(pwm));
+        } catch {}
+      }
+      try { fs.writeFileSync(`${hw}/pwm${fan}_enable`, '1'); } catch {}
+      applied.push(`${group}→fan${fan}`);
+    }
+    return { ok: applied.length > 0, applied, hwmon: hw.replace('/sys/class/hwmon/', '') };
+  }
+
+  ipcMain.handle('fans:save-curves', async (_e, curves) => {
+    if (!curves || typeof curves !== 'object') return { ok: false, error: 'invalid curves' };
+    try {
+      const file = _fansCurvesFile();
+      await fs.promises.mkdir(path.dirname(file), { recursive: true });
+      await fs.promises.writeFile(file, JSON.stringify(curves, null, 2), 'utf8');
+      // On the Linux appliance, push the curve to the real hardware.
+      let applied = null;
+      if (process.platform === 'linux') applied = _applyCurvesToAsus(curves);
+      return { ok: true, path: file, applied };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Power/thermal profile (Linux appliance). The kernel exposes the ACPI
+  // platform profile via sysfs. On ASUS ROG laptops the asus-wmi driver
+  // also exposes throttle_thermal_policy — and on several models writing
+  // platform_profile is a no-op while throttle_thermal_policy is the live
+  // knob, so we drive both. Writing needs root; the session runs as root.
+  const _PLAT_PROFILE         = '/sys/firmware/acpi/platform_profile';
+  const _PLAT_PROFILE_CHOICES = '/sys/firmware/acpi/platform_profile_choices';
+  // asus-wmi throttle policy: 0=balanced 1=performance/turbo 2=quiet/silent
+  const _ASUS_TTP_PATHS = [
+    '/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy',
+    '/sys/devices/platform/asus-wmi/throttle_thermal_policy',
+  ];
+  const _ASUS_TTP_FOR = { 'low-power': 2, 'quiet': 2, 'cool': 2, 'balanced': 0, 'performance': 1 };
+  function _firstExisting(paths) {
+    for (const p of paths) { try { fs.accessSync(p); return p; } catch {} }
+    return null;
+  }
+  function _readTrim(p) { try { return fs.readFileSync(p, 'utf8').trim(); } catch { return null; } }
+  function _thermalDiag() {
+    const ttp = _firstExisting(_ASUS_TTP_PATHS);
+    let asusModules = null;
+    try {
+      asusModules = fs.readFileSync('/proc/modules', 'utf8')
+        .split('\n').map((l) => l.split(' ')[0]).filter((m) => /asus/i.test(m));
+    } catch {}
+    return {
+      platform_profile: _readTrim(_PLAT_PROFILE),
+      platform_profile_choices: _readTrim(_PLAT_PROFILE_CHOICES),
+      asus_ttp_path: ttp,
+      asus_ttp: ttp ? _readTrim(ttp) : null,
+      asus_modules: asusModules,
+    };
+  }
+  // Map an asus throttle_thermal_policy value back to a platform_profile
+  // choice name. On ASUS, throttle_thermal_policy is the live knob and
+  // platform_profile does not always reflect a change — so the policy
+  // value is the source of truth for which profile is actually active.
+  function _profileFromTtp(ttpRaw, choices) {
+    const v = parseInt(ttpRaw, 10);
+    if (!Number.isFinite(v)) return null;
+    let re;
+    if (v === 1) re = /perf/i;
+    else if (v === 0) re = /balanc/i;
+    else if (v === 2) re = /low|quiet|cool|silent/i;
+    else return null;
+    return (choices || []).find((c) => re.test(c)) || null;
+  }
+  ipcMain.handle('fans:get-profile', () => {
+    if (process.platform !== 'linux') return { ok: false, error: 'unsupported platform' };
+    try {
+      const choices = fs.readFileSync(_PLAT_PROFILE_CHOICES, 'utf8').trim().split(/\s+/).filter(Boolean);
+      let current = fs.readFileSync(_PLAT_PROFILE, 'utf8').trim();
+      const ttp = _firstExisting(_ASUS_TTP_PATHS);
+      if (ttp) {
+        const fromTtp = _profileFromTtp(_readTrim(ttp), choices);
+        if (fromTtp) current = fromTtp;
+      }
+      return { ok: true, current, choices, diag: _thermalDiag() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('fans:set-profile', (_e, profile) => {
+    if (process.platform !== 'linux') return { ok: false, error: 'unsupported platform' };
+    if (!profile || typeof profile !== 'string') return { ok: false, error: 'profile required' };
+    let choices = [];
+    try {
+      choices = fs.readFileSync(_PLAT_PROFILE_CHOICES, 'utf8').trim().split(/\s+/).filter(Boolean);
+    } catch (err) {
+      return { ok: false, error: `read choices: ${err.message}` };
+    }
+    if (!choices.includes(profile)) return { ok: false, error: `invalid profile: ${profile}` };
+    const steps = [];
+    // 1. asus-wmi throttle_thermal_policy — the real ASUS knob; write first.
+    const ttp = _firstExisting(_ASUS_TTP_PATHS);
+    const ttpVal = _ASUS_TTP_FOR[profile];
+    if (ttp && ttpVal != null) {
+      try {
+        fs.writeFileSync(ttp, String(ttpVal));
+        steps.push(`throttle<-${ttpVal}`);
+      } catch (err) {
+        steps.push(`throttle FAIL:${err.code || err.message}`);
+      }
+    } else if (!ttp) {
+      steps.push('throttle:absent');
+    }
+    // 2. generic ACPI platform_profile — best effort (kernel keeps it in
+    //    sync where it can; on some ASUS models the write is a no-op).
+    try {
+      fs.writeFileSync(_PLAT_PROFILE, profile);
+      steps.push(`pp<-${profile}`);
+    } catch (err) {
+      steps.push(`pp FAIL:${err.code || err.message}`);
+    }
+    // Report the live state — derived from throttle_thermal_policy when present.
+    let current = profile;
+    if (ttp) {
+      const fromTtp = _profileFromTtp(_readTrim(ttp), choices);
+      if (fromTtp) current = fromTtp;
+    } else {
+      current = _readTrim(_PLAT_PROFILE) || profile;
+    }
+    return { ok: true, current, steps, diag: _thermalDiag() };
+  });
+
+  // Full hardware/thermal diagnostic — a human-readable text dump of the
+  // sysfs surface the appliance's fan + profile control depends on.
+  // Surfaced behind a "HW DIAG" button so an unknown laptop's actual
+  // capabilities can be read off one screen instead of guessed at.
+  ipcMain.handle('system:hw-diag', () => {
+    if (process.platform !== 'linux') return { ok: true, report: 'hw-diag: linux appliance only' };
+    const L = [];
+    const read = (p) => { try { return fs.readFileSync(p, 'utf8').trim(); } catch (e) { return `<${e.code || 'err'}>`; } };
+    L.push('== platform_profile ==');
+    L.push('  profile : ' + read(_PLAT_PROFILE));
+    L.push('  choices : ' + read(_PLAT_PROFILE_CHOICES));
+    L.push('== asus throttle_thermal_policy ==');
+    for (const p of _ASUS_TTP_PATHS) {
+      let exists = false;
+      try { fs.accessSync(p); exists = true; } catch {}
+      L.push('  ' + p + ' : ' + (exists ? read(p) : '<absent>'));
+    }
+    L.push('== /sys/devices/platform (asus*) ==');
+    try {
+      const a = fs.readdirSync('/sys/devices/platform').filter((d) => /asus/i.test(d));
+      L.push('  ' + (a.join(', ') || '<none>'));
+    } catch (e) { L.push('  <' + (e.code || 'err') + '>'); }
+    L.push('== modules (asus/amdgpu/nvidia/nct/k10temp/coretemp) ==');
+    try {
+      const mods = fs.readFileSync('/proc/modules', 'utf8').split('\n')
+        .map((l) => l.split(' ')[0])
+        .filter((m) => /asus|amdgpu|nvidia|nct|k10temp|coretemp/i.test(m));
+      L.push('  ' + (mods.join(', ') || '<none>'));
+    } catch (e) { L.push('  <' + (e.code || 'err') + '>'); }
+    L.push('== /sys/class/hwmon ==');
+    try {
+      for (const d of fs.readdirSync('/sys/class/hwmon')) {
+        const base = '/sys/class/hwmon/' + d;
+        L.push('  [' + d + '] name=' + read(base + '/name'));
+        let files = [];
+        try { files = fs.readdirSync(base); } catch {}
+        const rel = files
+          .filter((f) => /^(fan\d+_input|temp\d+_(input|label)|pwm\d+(_enable)?|pwm\d+_auto_point\d+_(temp|pwm))$/.test(f))
+          .sort();
+        for (const f of rel) L.push('      ' + f + ' = ' + read(base + '/' + f));
+      }
+    } catch (e) { L.push('  <' + (e.code || 'err') + '>'); }
+    return { ok: true, report: L.join('\n') };
+  });
+
+  // ── SERVICES TRIM · stop non-essential Windows services ──────────
+  // Topbar "TRIM" stops bloat services on demand and flips their
+  // startup type to Manual so they don't auto-start at next boot.
+  // Reversible — services:restore reverts from a backup file. The
+  // whitelist, elevation, and PowerShell all live in
+  // services/system/trim.js; these handlers are just IPC wiring.
+  ipcMain.handle('services:scan',    ()          => trimService.scanServices(portableDataDir()));
+  ipcMain.handle('services:trim',    (_e, names) => trimService.trimServices(names, portableDataDir()));
+  ipcMain.handle('services:restore', ()          => trimService.restoreServices(portableDataDir()));
+
+  // ── STREAM · embedded media services ─────────────────────────────
+  // DISCORD sub-tab is a BrowserView pinned to discord.com, with the
+  // dashboard's theme injected via webContents.insertCSS once the
+  // page loads. Session uses a dedicated partition (`persist:stream`)
+  // so credentials survive restarts but stay isolated from the main
+  // BROWSER tab's cookie jar. We pretend to be regular Chrome via UA
+  // override — Discord's web app blocks unrecognized clients (the
+  // default Electron UA gets rejected with "Update your browser").
+  //
+  // Other sub-tabs (Twitch, YouTube, etc.) can re-use this scaffold —
+  // each gets its own BrowserView via _streamGetOrCreate(kind).
+  const _streamViews = new Map(); // kind → BrowserView
+  const _streamCssKey = new Map(); // kind → inserted-css key (for replacement)
+  let _streamActive = null;       // kind currently shown
+  let _streamBounds = { x: 0, y: 0, width: 0, height: 0 };
+  // Live dashboard palette — updated by stream:show whenever the
+  // renderer hands one over. Used by the Discord theme builder so the
+  // embed tracks dashboard theme changes between mounts.
+  let _streamPalette = null;
+
+  // ── Embed invert ───────────────────────────────────────────────
+  // The dashboard's theme-invert toggle is a CSS filter on #app — it
+  // can't reach the native BrowserViews. Mirror it into every embed
+  // (Discord / Facebook stream services + browser tabs) by injecting
+  // the same invert filter. Media is re-inverted so photos / avatars
+  // stay right-side-up. Re-applied on each page load since a
+  // navigation clears inserted CSS.
+  let _embedInvert = (() => { try { return !!readConfig().invert; } catch { return false; } })();
+  const _embedInvertKeys = new Map(); // webContents.id → inserted css key
+  // The triple :not(#…) bumps specificity to (3,0,1) so a web app that
+  // ships its own `html.theme-dark { filter: … }` rule can't out-rank
+  // this one. brightness(0.7) matches the dashboard's own invert filter
+  // (styles.css §11) so an inverted embed sits at the same tone as the
+  // rest of the UI. (The `eink` arg is retained for call-site symmetry
+  // but both theme families now use the same invert.)
+  function _embedInvertCss(_eink) {
+    return `
+    html:not(#dash3d-noop):not(#dash3d-noop):not(#dash3d-noop) {
+      filter: invert(1) hue-rotate(180deg) brightness(0.7) !important;
+    }
+    /* Re-invert ONLY true raster media so photos / video stay correct.
+       Deliberately NOT matching [style*="background-image"] or avatar
+       wrappers: Discord puts inline background-image on large layout
+       containers, so re-inverting those double-inverts a big chunk of
+       the page back to normal — that's why Discord looked like it
+       ignored the invert while Facebook (no such containers) worked. */
+    img, video { filter: invert(1) hue-rotate(180deg) !important; }
+  `;
+  }
+  // Per-webContents serialisation. _applyEmbedInvertInner has await points
+  // between reading and mutating _embedInvertKeys, so two concurrent calls
+  // (Discord fires dom-ready + did-finish-load + did-frame-finish-load
+  // almost together) can interleave and strand a SECOND invert sheet —
+  // two invert filters cancel out, so the embed looks un-inverted. The
+  // mutex chains every call per wc so they run strictly one at a time.
+  const _embedInvertLocks = new Map(); // wc.id → tail promise
+  function _applyEmbedInvert(wc, freshLoad, eink) {
+    if (!wc || wc.isDestroyed()) return Promise.resolve();
+    const id = wc.id;
+    const prev = _embedInvertLocks.get(id) || Promise.resolve();
+    const next = prev.then(() => _applyEmbedInvertInner(wc, freshLoad, !!eink)).catch(() => {});
+    _embedInvertLocks.set(id, next);
+    return next;
+  }
+  async function _applyEmbedInvertInner(wc, freshLoad, eink) {
+    if (!wc || wc.isDestroyed()) return;
+    const id = wc.id;
+    // A single page load fires dom-ready + did-finish-load + did-frame-
+    // finish-load, each with freshLoad=true. Only the first truly faces
+    // cleared CSS; the rest still have our live invert sheet. So instead
+    // of blindly forgetting the key, try to remove the old sheet first —
+    // that turns a stale key into a harmless no-op and a live one into a
+    // real removal, preventing a stacked double-invert.
+    if (freshLoad && _embedInvertKeys.has(id)) {
+      try { await wc.removeInsertedCSS(_embedInvertKeys.get(id).key); } catch {}
+      _embedInvertKeys.delete(id);
+    }
+    const cur = _embedInvertKeys.get(id); // { key, eink } | undefined
+    if (_embedInvert) {
+      if (!cur) {
+        try { _embedInvertKeys.set(id, { key: await wc.insertCSS(_embedInvertCss(eink)), eink }); } catch {}
+      } else if (cur.eink !== eink) {
+        // Theme family switched (e-ink ↔ cyber) — the dark-view filter
+        // differs, so swap the invert sheet for the matching tone.
+        try { await wc.removeInsertedCSS(cur.key); } catch {}
+        try { _embedInvertKeys.set(id, { key: await wc.insertCSS(_embedInvertCss(eink)), eink }); } catch {}
+      }
+    } else if (cur) {
+      try { await wc.removeInsertedCSS(cur.key); } catch {}
+      _embedInvertKeys.delete(id);
+    }
+  }
+  ipcMain.handle('embed-invert', async (_e, on) => {
+    _embedInvert = !!on;
+    // Stream embeds get the invert as a dedicated, explicitly-managed
+    // stylesheet — same path as browser tabs. Keeping it OUT of the theme
+    // stylesheet is deliberate: Discord's SPA fires load events
+    // constantly, so the theme reapply churns; an invert layer riding
+    // inside it would get stranded in the cascade and never toggle off.
+    const einkNow = !!(_streamPalette && _streamPalette.eink);
+    for (const view of _streamViews.values()) {
+      const wc = view && view.webContents;
+      if (wc && !wc.isDestroyed()) { try { await _applyEmbedInvert(wc, false, einkNow); } catch {} }
+    }
+    // Browser tabs aren't palette-themed — invert them with a standalone
+    // injected stylesheet.
+    for (const t of _bvTabs.values()) {
+      const wc = t && t.view && t.view.webContents;
+      if (wc && !wc.isDestroyed()) await _applyEmbedInvert(wc);
+    }
+    return { ok: true, invert: _embedInvert };
+  });
+
+  const _STREAM_CHROME_UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+
+  // Aggressive theme injected into the Discord web client. Goals:
+  //   - Strip Discord's branded chrome (server rail, Nitro/Shop/Quests
+  //     sidebar items, Active Now sidebar, branded buttons)
+  //   - Restyle every interactive surface (buttons, pills, inputs,
+  //     scrollbars) to match the dashboard's monospace/dim/accent look
+  //   - Keep user data visible: avatars (<img>) and usernames stay
+  //     untouched; only the surrounding chrome changes
+  // Discord ships hashed class names per release, so we target via
+  // attribute-prefix selectors (`[class*="guilds_"]`). When Discord
+  // rotates class names this theme will need refreshing — that's the
+  // unavoidable cost of restyling someone else's web app.
+  //
+  // The renderer reads its live theme tokens from getComputedStyle on
+  // :root and passes them along — that way the embed tracks whatever
+  // theme variant the user is currently on (cyan / pink / amber / etc).
+  function _buildDiscordThemeCSS(palette) {
+    const p = palette || {};
+    const bg          = p.bg          || '#070a0e';
+    const panelBg     = p.panelBg     || '#0c1014';
+    const ruleDim     = p.ruleDim     || 'rgba(92,207,255,0.22)';
+    const accent      = p.accent      || '#5ccfff';
+    const amber       = p.amber       || '#ffd05b';
+    const ok          = p.ok          || '#5fe39a';
+    const red         = p.red         || '#ff5f6e';
+    const text        = p.text        || '#cfe6f7';
+    const muted       = p.muted       || '#6e8aa3';
+    // Secondary text biased hard toward the primary ink tone. A plain
+    // mid-grey "muted" is illegible on the dimmed e-ink paper (and turns
+    // grey-on-grey under invert). 85% toward `text` keeps only a whisper
+    // of hierarchy — everything stays readable, which is the priority.
+    const mutedText   = `color-mix(in srgb, ${text} 85%, ${muted})`;
+    // Dashboard fonts — substituted live from the renderer's
+    // getComputedStyle. Falls back to Inter for safety if the
+    // renderer doesn't supply them.
+    const fontTech    = p.fontTech    || "'Inter', 'Segoe UI', sans-serif";
+    const fontDisplay = p.fontDisplay || "'Inter', 'Segoe UI', sans-serif";
+    // ── Icon visibility. Discord draws toolbar / channel / message-
+    // action glyphs as currentColor <svg>; its own --interactive-normal
+    // token doesn't reliably reach them, so they were near-invisible.
+    // Pin currentColor to the text tone in EVERY theme so glyphs read.
+    // Avatars excluded (themed as dots elsewhere).
+    const iconBase = `
+    svg:not([class*="avatar" i]) { color: ${text} !important; }
+  `;
+    // INK themes additionally crush hard-coded brand fills + grayscale
+    // raster emoji so nothing reads as full colour on printed paper.
+    // Cyber themes skip this so genuine brand colour survives.
+    const inkIcons = !p.eink ? '' : `
+    /* Recolour glyph fills/strokes to ink — but NEVER touch elements
+       inside <mask>/<defs>/<clipPath>/<pattern>/<symbol>. Discord
+       shapes its guild icons + avatars with an SVG squircle mask whose
+       <rect> is fill="white" (white = visible). Repainting that rect to
+       dark ink blacks out the mask, so the whole icon vanishes — that's
+       what made the server rail invisible in ink mode. */
+    svg:not([class*="avatar" i]) [fill]:not([fill="none"]):not(mask *):not(defs *):not(clipPath *):not(pattern *):not(symbol *),
+    svg:not([class*="avatar" i]) [stop-color] {
+      fill: ${text} !important;
+    }
+    /* Stroke-drawn glyphs (fill="none") — pin the stroke to ink too,
+       same mask/defs exclusions. */
+    svg:not([class*="avatar" i]) [stroke]:not([stroke="none"]):not(mask *):not(defs *):not(clipPath *):not(pattern *):not(symbol *) {
+      stroke: ${text} !important;
+    }
+    img[class*="emoji" i], img[data-type="emoji"],
+    [class*="emoji" i] img {
+      filter: grayscale(1) contrast(1.05) !important;
+    }
+    /* Server-rail icons → greyscale on printed-paper (ink) themes so the
+       rail reads monochrome like the rest of the embed. Identified by
+       the "/icons/" CDN path. (A greyscale image stays greyscale when
+       the page invert flips it, so this is correct in both invert
+       states without needing to know which is active.) */
+    img[src*="/icons/" i] { filter: grayscale(1) !important; }
+    [style*="/icons/" i]  { filter: grayscale(1) !important; }
+    /* The DM / home button keeps a brand-blurple fill — it's an SVG, not
+       a /icons/ image, so the rule above misses it. Greyscale it (and
+       the Add-Server / Explore buttons) so the whole rail is monochrome. */
+    [data-list-item-id*="home" i],
+    a[href="/channels/@me"],
+    [class*="homeIcon" i],
+    [class*="home" i][class*="wrapper" i],
+    [aria-label="Direct Messages" i],
+    [data-list-item-id*="create" i],
+    [data-list-item-id*="discover" i] {
+      filter: grayscale(1) !important;
+    }
+    /* ── INK accents. The embed is monochrome ink, but the small unread
+       count badges keep colour — washed to the e-ink red. Scoped to the
+       specific count-badge classes only: a broad [class*="badge_"] and
+       inline-style colour matches caught large containers and flooded
+       the rail with red blocks. */
+    [class*="numberBadge" i],
+    [class*="mentionsBadge" i],
+    [class*="mentionBadge" i],
+    [class*="pingCount" i] {
+      background-color: ${red} !important;
+      color: ${bg} !important;
+    }
+    [class*="numberBadge" i] *, [class*="mentionsBadge" i] *,
+    [class*="mentionBadge" i] *, [class*="pingCount" i] * {
+      color: ${bg} !important;
+      fill: ${bg} !important;
+    }
+  `;
+    return `${iconBase}${inkIcons}
+    /* ── Color tokens — substitute the live dashboard palette into
+       Discord's CSS custom properties. Discord's React reads these
+       tokens at runtime, so overriding them retints every component
+       that participates in the theme system. */
+    :root, .theme-dark, .theme-darker, .theme-midnight, html, body {
+      --background-primary:        ${bg} !important;
+      --background-secondary:      ${panelBg} !important;
+      --background-secondary-alt:  ${panelBg} !important;
+      --background-tertiary:       ${bg} !important;
+      --background-accent:         ${panelBg} !important;
+      --background-floating:       ${panelBg} !important;
+      --channeltextarea-background:${panelBg} !important;
+      --background-modifier-selected: ${ruleDim} !important;
+      --background-modifier-hover:    rgba(255,255,255,0.04) !important;
+      --background-modifier-active:   rgba(255,255,255,0.06) !important;
+      --background-modifier-accent:   ${ruleDim} !important;
+      --interactive-normal: ${text} !important;
+      --interactive-hover:  ${accent} !important;
+      --interactive-active: ${accent} !important;
+      --interactive-muted:  ${mutedText} !important;
+      --header-primary:     ${text} !important;
+      --header-secondary:   ${mutedText} !important;
+      --text-normal:        ${text} !important;
+      --text-muted:         ${mutedText} !important;
+      --channels-default:   ${mutedText} !important;
+      --text-secondary:     ${mutedText} !important;
+      --text-link:          ${accent} !important;
+      --brand-experiment:       ${accent} !important;
+      --brand-experiment-100:   ${accent} !important;
+      --brand-experiment-400:   ${accent} !important;
+      --brand-experiment-500:   ${accent} !important;
+      --brand-experiment-560:   ${accent} !important;
+      --brand-experiment-600:   ${accent} !important;
+      --button-secondary-background:        ${ruleDim} !important;
+      --button-secondary-background-hover:  ${ruleDim} !important;
+      --button-secondary-background-active: ${ruleDim} !important;
+      --background-mentioned:       ${ruleDim} !important;
+      --background-mentioned-hover: ${ruleDim} !important;
+      --status-positive-background: ${ok} !important;
+      --status-danger-background:   ${red} !important;
+      --scrollbar-auto-thumb: ${ruleDim} !important;
+      --scrollbar-auto-track: transparent !important;
+      /* Presence colours — Discord ships vibrant status hues; retint
+         them to the washed dashboard tones (online → theme green, etc).
+         Discord has rotated the green token name across versions, so
+         set every variant we know of. */
+      --status-online:    ${ok} !important;
+      --status-idle:      ${amber} !important;
+      --status-dnd:       ${red} !important;
+      --status-offline:   ${muted} !important;
+      --status-streaming: ${accent} !important;
+      --status-speaking:  ${ok} !important;
+      --green-300: ${ok} !important;
+      --green-330: ${ok} !important;
+      --green-360: ${ok} !important;
+      --green-400: ${ok} !important;
+      /* Semantic positive / danger tokens — these carry the washed green
+         + red into every component Discord designed for them: positive
+         text (e.g. "Online", success notices), danger text + buttons
+         (errors, "Delete", leave-server), mention highlights. Tokens are
+         component-scoped, so this spreads colour safely with no risk of
+         flooding a layout container. Unknown names go unused. */
+      --text-positive:   ${ok} !important;
+      --text-danger:     ${red} !important;
+      --text-warning:    ${amber} !important;
+      --text-brand:      ${accent} !important;
+      --info-positive-foreground: ${ok} !important;
+      --info-positive-text:       ${ok} !important;
+      --info-danger-foreground:   ${red} !important;
+      --info-danger-text:         ${red} !important;
+      --info-warning-foreground:  ${amber} !important;
+      --button-positive-background:       ${ok} !important;
+      --button-positive-background-hover: ${ok} !important;
+      --button-danger-background:         ${red} !important;
+      --button-danger-background-hover:   ${red} !important;
+      --status-positive-text:  ${ok} !important;
+      --status-danger-text:    ${red} !important;
+      --mention-foreground:    ${red} !important;
+      --mention-background:    color-mix(in srgb, ${red} 22%, transparent) !important;
+      --red-330: ${red} !important;
+      --red-360: ${red} !important;
+      --red-400: ${red} !important;
+      --red-430: ${red} !important;
+      --red-460: ${red} !important;
+      /* Newer Discord "base / surface" redesign background tokens — the
+         current React app paints much of its chrome from these instead
+         of the legacy --background-* set above. Unknown names simply go
+         unused, so listing extras is harmless. */
+      --background-base-lowest:     ${bg} !important;
+      --background-base-lower:      ${bg} !important;
+      --background-base-low:        ${panelBg} !important;
+      --bg-base-primary:            ${bg} !important;
+      --bg-base-secondary:          ${panelBg} !important;
+      --bg-base-tertiary:           ${bg} !important;
+      --background-surface-high:    ${panelBg} !important;
+      --background-surface-higher:  ${panelBg} !important;
+      --background-surface-highest: ${panelBg} !important;
+      --bg-surface-raised:          ${panelBg} !important;
+      --bg-surface-overlay:         ${panelBg} !important;
+      --bg-overlay-app-frame:       ${bg} !important;
+      --bg-overlay-3:               ${panelBg} !important;
+      --bg-mod-faint:               rgba(255,255,255,0.04) !important;
+      --bg-mod-subtle:              rgba(255,255,255,0.06) !important;
+      /* Input / search surfaces — Discord paints these on a pale
+         "raised" tone; pull them down to the dashboard panel colour. */
+      --input-background:           ${panelBg} !important;
+      --input-background-hover:     ${panelBg} !important;
+      --search-popout-option-non-text-color: ${panelBg} !important;
+    }
+
+    /* ── Kill all background gradients/images — Discord uses brand
+       imagery as panel backgrounds in lots of places. Server icons are
+       exempt: Discord paints them as background-image divs whose inline
+       style carries the "/icons/" CDN path — nuking those blanks the
+       whole server rail. */
+    *:not(img):not(video):not(canvas):not([class*="avatar_"]):not([class*="wrapper_"][class*="status"]):not([style*="/icons/" i]) {
+      background-image: none !important;
+    }
+
+    /* ── Inputs, search bars, the quick-switcher and the friends-list
+       filter pills — Discord renders these on a light "raised" surface
+       that the token overrides above don't always reach. Force every
+       one to the dashboard panel tone so no light boxes remain. */
+    input, textarea,
+    [class*="searchBar" i], [class*="searchBox" i], [class*="search_" i],
+    [class*="input_" i], [class*="lookFilled" i], [class*="quickswitcher" i],
+    [class*="autocomplete" i] {
+      background-color: ${panelBg} !important;
+    }
+
+    /* ── Server rail (left-most icons column) — themed to match
+       the dashboard sidebar. Keep the server icons visible so the
+       user can navigate, but ditch Discord's pill/blur effects. */
+    nav[aria-label*="Servers"],
+    [class*="guilds_"] {
+      background: ${panelBg} !important;
+      border-right: 1px dashed ${ruleDim} !important;
+      padding: 6px 0 !important;
+    }
+    /* Server icon list items: square corners, subtle dim border on
+       hover/selected so they read like dashboard tiles, not pills. */
+    [class*="listItem_"][class*="guild"],
+    [class*="wrapper_"][class*="guild"],
+    [class*="pill_"] {
+      border-radius: 0 !important;
+    }
+    /* The blurple "active server" pill on the left edge gets retinted
+       to the dashboard accent. */
+    [class*="pill_"] {
+      background: ${accent} !important;
+    }
+    /* Server-rail icons stay full-size + fully opaque. Defensive: the
+       avatar-dot / dimming rules elsewhere must not catch the guild
+       list, or the rail goes blank (icons near-invisible). */
+    [class*="guilds_"] img,
+    [class*="guilds_"] svg,
+    [class*="guilds_"] foreignObject,
+    [class*="guilds_"] [class*="wrapper_"],
+    [class*="guilds_"] [class*="listItem_"] {
+      opacity: 1 !important;
+      visibility: visible !important;
+    }
+    [class*="guilds_"] img,
+    [class*="guilds_"] foreignObject { display: block !important; }
+    /* Hide just the "Add Server" + "Discover Servers" buttons at the
+       bottom of the rail — they're Discord upsell affordances. */
+    [class*="listItem_"]:has([aria-label*="Add a Server" i]),
+    [class*="listItem_"]:has([aria-label*="Discover" i]),
+    [class*="listItem_"]:has([aria-label*="Explore Discoverable" i]),
+    div[role="treeitem"][aria-label*="Add a Server" i],
+    div[role="treeitem"][aria-label*="Discover" i] {
+      display: none !important;
+    }
+
+    /* ── Hide branded sidebar items: Nitro, Shop, Quests. Discord
+       rotates the channel-row class names, so we target by every
+       stable hook we can find: href substrings, aria-labels, data-
+       attributes Discord uses for routing, and the upsell wrappers.
+       The text-content fallback runs in JS (see inject script) to
+       catch anything CSS misses. */
+    [href*="/store"],
+    [href*="/shop"],
+    [href*="/quests"],
+    [href*="/nitro"],
+    [href*="/discovery"],
+    [aria-label="Nitro" i],
+    [aria-label*="Shop" i],
+    [aria-label*="Quest" i],
+    [aria-label*="Nitro Upsell" i],
+    [data-list-item-id*="nitro" i],
+    [data-list-item-id*="shop" i],
+    [data-list-item-id*="quest" i],
+    [data-list-item-id*="store" i],
+    [class*="nitroUpsell_"],
+    [class*="premiumPromo_"],
+    [class*="nitroSection_"],
+    [class*="upsellInner_"],
+    [class*="storeChannel"],
+    [class*="questsChannel"],
+    [class*="nitroChannel"] { display: none !important; }
+
+    /* ── Profile pictures: replace each avatar with a tiny themed
+       status dot. We hide the actual image content (img tag, SVG
+       mask, foreignObject) but KEEP the wrapper element so a colored
+       circle can ride in its place. The dot's color reflects presence
+       (online / idle / dnd / offline) using :has() over the status
+       indicator Discord renders inside the wrapper. */
+    /* Hide ONLY the user-avatar imagery. Server icons are identified by
+       the "/icons/" CDN path (user avatars are "/avatars/") and exempted
+       wherever they render — Discord reuses the avatar component for the
+       server rail, so a blanket hide silently kills the whole rail. */
+    [class*="avatar_"] img:not([src*="/icons/" i]),
+    [class*="avatar_"] foreignObject:not(:has(img[src*="/icons/" i])):not(:has(image[href*="/icons/" i])),
+    [class*="avatar_"] svg image:not([href*="/icons/" i]),
+    [class*="avatar_"] svg use,
+    img[src*="cdn.discordapp.com/avatars"],
+    img[src*="cdn.discordapp.com/embed/avatars"] { display: none !important; }
+    /* Avatar wrapper → 10 px themed dot. Default muted (looks offline);
+       presence-specific selectors below override the color. A wrapper
+       that contains a server icon keeps its real size — only true user
+       avatars collapse to a dot. */
+    [class*="avatar_"]:not(:has(img[src*="/icons/" i])):not(:has(image[href*="/icons/" i])):not(:has([style*="/icons/" i])),
+    [class*="userAvatar_"] {
+      width: 10px !important;
+      height: 10px !important;
+      min-width: 10px !important;
+      min-height: 10px !important;
+      max-width: 10px !important;
+      max-height: 10px !important;
+      background: ${muted} !important;
+      border-radius: 50% !important;
+      /* Ink outline so the dot is visible whatever its fill tone lands
+         at against the dimmed e-ink paper. */
+      border: 1px solid ${text} !important;
+      box-shadow: none !important;
+      flex-shrink: 0 !important;
+      margin-right: 10px !important;
+      align-self: center !important;
+      overflow: hidden !important;
+    }
+    /* Presence-aware tinting. Discord ships several variants for the
+       status indicator class; cover the common ones. :has() is well-
+       supported in Electron 30+. */
+    [class*="avatar_"]:has([class*="online_"]),
+    [class*="avatar_"]:has([class*="online-"]),
+    [class*="avatar_"]:has([fill*="status-online"]) {
+      background: ${ok} !important;
+    }
+    [class*="avatar_"]:has([class*="idle_"]),
+    [class*="avatar_"]:has([class*="idle-"]),
+    [class*="avatar_"]:has([fill*="status-idle"]) {
+      background: ${amber} !important;
+    }
+    [class*="avatar_"]:has([class*="dnd_"]),
+    [class*="avatar_"]:has([class*="dnd-"]),
+    [class*="avatar_"]:has([fill*="status-dnd"]) {
+      background: ${red} !important;
+    }
+    [class*="avatar_"]:has([class*="streaming_"]) {
+      background: ${accent} !important;
+      border: 2px solid ${amber} !important;
+      width: 12px !important; height: 12px !important;
+    }
+    /* Avatars inside chat-message bubbles / floating tooltips are
+       irrelevant — collapse them fully there so message rows don't
+       carry a stray dot in the gutter. */
+    [class*="messageContent_"] [class*="avatar_"],
+    [class*="message_"] [class*="avatar_"],
+    [class*="tooltip"] [class*="avatar_"] {
+      display: none !important;
+    }
+
+    /* ── Native presence dots. Discord paints the status circle (on
+       avatars + the bottom user panel) as an SVG <rect> with a hard-
+       coded vibrant hex, which the --status-* tokens don't always
+       reach. Retint each known hue to the washed dashboard tone:
+       online → theme green, idle → amber, dnd → theme red. */
+    rect[fill="#23a55a"], rect[fill="#3ba55c"], rect[fill="#43b581"],
+    [fill="#23a55a"], [fill="#3ba55c"], [fill="#43b581"], [fill="#2dc770"],
+    [class*="status" i][class*="online" i] {
+      fill: ${ok} !important;
+      background-color: ${ok} !important;
+      color: ${ok} !important;
+    }
+    rect[fill="#f0b232"], rect[fill="#faa81a"],
+    [fill="#f0b232"], [fill="#faa81a"], [fill="#faa61a"],
+    [class*="status" i][class*="idle" i] {
+      fill: ${amber} !important;
+      background-color: ${amber} !important;
+    }
+    rect[fill="#f23f43"], rect[fill="#ed4245"], rect[fill="#f04747"],
+    [fill="#f23f43"], [fill="#ed4245"], [fill="#f04747"], [fill="#da373c"],
+    [class*="status" i][class*="dnd" i] {
+      fill: ${red} !important;
+      background-color: ${red} !important;
+    }
+
+    /* ── Server rail rescue. Discord reuses its avatar component for
+       guild icons, so the avatar-imagery hide + 10px-dot shrink can
+       silently blank the rail. Rather than depend on the (frequently
+       rotated) rail class name, target server icons by identity — the
+       "/icons/" CDN path — so they're restored wherever they render. */
+    img[src*="/icons/" i],
+    image[href*="/icons/" i],
+    [style*="/icons/" i] {
+      display: revert !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+    }
+    /* Any wrapper holding a server icon keeps its real footprint. */
+    [class*="avatar_"]:has(img[src*="/icons/" i]),
+    [class*="avatar_"]:has(image[href*="/icons/" i]),
+    [class*="avatar_"]:has([style*="/icons/" i]),
+    *:has(> img[src*="/icons/" i]) {
+      width: revert !important;
+      height: revert !important;
+      min-width: revert !important;
+      min-height: revert !important;
+      max-width: revert !important;
+      max-height: revert !important;
+      background: transparent !important;
+      border-radius: revert !important;
+      overflow: visible !important;
+    }
+
+    /* ── Hide "Active Now" right sidebar — Discord-branded content
+       block that doesn't belong in a personal embed. */
+    [class*="nowPlayingColumn_"],
+    [class*="activityFeed_"],
+    [class*="container_"][class*="member"]:has([class*="nowPlaying"]) { display: none !important; }
+
+    /* ── Typography: monospace tech font everywhere except message
+       bodies (those stay readable). */
+    body, button, input, textarea, select,
+    [class*="title_"], [class*="header_"], [class*="topPill_"],
+    [class*="tab_"], [class*="link_"] {
+      font-family: ${fontDisplay} !important;
+    }
+    [class*="title_"], [class*="header_"], [class*="tab_"] {
+      letter-spacing: 0.08em !important;
+      text-transform: uppercase !important;
+      font-weight: 500 !important;
+    }
+
+    /* ── Buttons: dashboard treatment — transparent w/ dim border,
+       accent on hover. Catches Discord's primary, secondary, and
+       link button classes. */
+    button[type="button"]:not([class*="emojiButton_"]):not([class*="addReaction_"]):not([class*="reaction_"]):not([class*="messageContent_"] *),
+    [class*="button_"][role="button"],
+    [class*="lookFilled_"], [class*="lookOutlined_"], [class*="lookLink_"] {
+      background: transparent !important;
+      border: 1px solid ${ruleDim} !important;
+      color: ${text} !important;
+      border-radius: 0 !important;
+      font-family: ${fontTech} !important;
+      letter-spacing: 0.08em !important;
+      text-transform: uppercase !important;
+      box-shadow: none !important;
+    }
+    button[type="button"]:hover:not([class*="emojiButton_"]):not([class*="addReaction_"]),
+    [class*="button_"][role="button"]:hover,
+    [class*="lookFilled_"]:hover, [class*="lookOutlined_"]:hover {
+      border-color: ${accent} !important;
+      color: ${accent} !important;
+      background: ${ruleDim} !important;
+    }
+    /* Primary brand "Add Friend" / submit-style buttons get accent fill */
+    [class*="lookFilled_"][class*="colorBrand_"],
+    [class*="primary_"][role="button"],
+    button[type="submit"] {
+      background: ${ruleDim} !important;
+      border-color: ${accent} !important;
+      color: ${accent} !important;
+    }
+
+    /* ── Pills/tabs (Friends/Online/All toggle) — match dashboard
+       combo-mode-tab look. Higher-specificity selectors stack so the
+       brand-blue Discord puts on the active pill loses every time. */
+    [class*="topPill_"] [class*="item_"],
+    [class*="topPill_"] button,
+    [class*="topPill_"] [role="tab"],
+    [class*="navItem_"] {
+      background: transparent !important;
+      border: 1px solid ${ruleDim} !important;
+      border-radius: 0 !important;
+      color: ${muted} !important;
+      padding: 4px 12px !important;
+      letter-spacing: 0.1em !important;
+      text-transform: uppercase !important;
+    }
+    [class*="topPill_"] [class*="selected_"],
+    [class*="topPill_"] [aria-selected="true"],
+    [class*="topPill_"] [class*="selected_"][class*="item_"],
+    [class*="topPill_"] button[class*="selected_"],
+    [class*="navItem_"][class*="selected_"] {
+      background: ${ruleDim} !important;
+      border-color: ${accent} !important;
+      color: ${accent} !important;
+      box-shadow: none !important;
+    }
+    /* Catch the "Add Friend" green button and any "primary" colored
+       action — drag them to dashboard accent fill. */
+    [class*="lookFilled_"][class*="colorGreen_"],
+    [class*="lookFilled_"][class*="colorBrand_"],
+    [class*="lookFilled_"][class*="colorPrimary_"] {
+      background: ${ruleDim} !important;
+      border-color: ${accent} !important;
+      color: ${accent} !important;
+    }
+    /* Generic safety net: any leftover Discord blurple background
+       (rgb 88,101,242 is Discord's brand color #5865f2) gets crushed
+       to ruleDim. Catches button states / hover surfaces we missed. */
+    [style*="rgb(88, 101, 242)"],
+    [style*="rgb(88,101,242)"],
+    [style*="#5865f2"],
+    [style*="#5865F2"] {
+      background-color: ${ruleDim} !important;
+      color: ${accent} !important;
+    }
+
+    /* ── Inputs (search bar, message box, "Find or start a conversation") */
+    [class*="searchBar_"],
+    [class*="search_"][class*="bar_"],
+    [class*="findContainer_"],
+    [class*="channelTextArea_"],
+    input[type="text"], input[type="search"] {
+      background: ${panelBg} !important;
+      border: 1px solid ${ruleDim} !important;
+      border-radius: 0 !important;
+      color: ${text} !important;
+      font-family: ${fontTech} !important;
+      letter-spacing: 0.04em !important;
+    }
+    [class*="searchBar_"]:focus-within,
+    input:focus {
+      border-color: ${accent} !important;
+      outline: none !important;
+    }
+
+    /* ── Sidebar (DM list) restyle. Matches the dashboard's panel
+       rhythm: panel-bg base, dashed dividers between rows, accent
+       left-border on the active row, generous vertical padding so
+       names breathe. */
+    [class*="sidebar_"],
+    nav[aria-label*="Direct Messages"],
+    [class*="privateChannels_"] {
+      background: ${panelBg} !important;
+      border-right: 1px dashed ${ruleDim} !important;
+    }
+    [class*="link_"][class*="channel_"],
+    [class*="interactiveNormal_"][class*="link_"],
+    [class*="channel_"][role="link"],
+    [class*="channel_"][role="button"] {
+      border-radius: 0 !important;
+      padding: 10px 12px !important;
+      margin: 0 !important;
+      border-bottom: 1px dashed ${ruleDim} !important;
+      min-height: 40px !important;
+      display: flex !important;
+      align-items: center !important;
+    }
+    [class*="link_"][class*="channel_"]:hover,
+    [class*="interactiveNormal_"][class*="link_"]:hover,
+    [class*="channel_"][role="link"]:hover {
+      background: ${ruleDim} !important;
+    }
+    [class*="selected_"][class*="link_"],
+    [class*="selected_"][class*="channel_"],
+    [class*="interactiveSelected_"] {
+      background: ${ruleDim} !important;
+      border-left: 2px solid ${accent} !important;
+      padding-left: 10px !important;
+    }
+    /* DM-list legibility. Read (already-seen) DM rows render at a faint
+       muted tone + reduced opacity that vanishes on the dimmed e-ink
+       paper. Force every name / label in the sidebar to the full ink
+       colour at full opacity so all rows read equally. */
+    [class*="sidebar_"] [class*="name_"],
+    [class*="sidebar_"] [class*="content_"],
+    [class*="privateChannels_"] [class*="name_"],
+    [class*="privateChannels_"] [class*="content_"],
+    [class*="privateChannels_"] [class*="channelName_"],
+    [class*="link_"][class*="channel_"] *,
+    [class*="channel_"][role="link"] *,
+    [class*="channel_"][role="button"] * {
+      color: ${text} !important;
+      opacity: 1 !important;
+    }
+    /* "FIND OR START A CONVERSATION" search box at the top of the
+       DM sidebar — give it a dashboard input look (transparent w/
+       dim dashed border). */
+    [class*="searchBar_"],
+    button[class*="searchBar_"] {
+      background: transparent !important;
+      border: 1px dashed ${ruleDim} !important;
+      border-radius: 0 !important;
+      padding: 8px 12px !important;
+      margin: 8px !important;
+      color: ${muted} !important;
+    }
+    /* "DIRECT MESSAGES" section header — match dashboard panel-title
+       cadence (uppercase, letter-spacing, muted). */
+    [class*="title_"][class*="section_"],
+    h2[class*="title_"] {
+      color: ${muted} !important;
+      font-family: ${fontDisplay} !important;
+      font-size: 10px !important;
+      letter-spacing: 0.18em !important;
+      text-transform: uppercase !important;
+      padding: 8px 12px !important;
+    }
+    /* Bottom user strip (avatar + mute/deafen/settings cluster).
+       Re-style as a dashboard panel footer. */
+    [class*="panels_"][class*="panel_"],
+    section[class*="panels_"] {
+      background: ${panelBg} !important;
+      border-top: 1px dashed ${ruleDim} !important;
+      padding: 8px 10px !important;
+    }
+    /* Mute/deafen/settings buttons in the bottom strip — accent-tint
+       on hover, dim default. */
+    [class*="container_"][class*="account_"] button,
+    [class*="panelButton_"] {
+      color: ${muted} !important;
+    }
+    [class*="container_"][class*="account_"] button:hover,
+    [class*="panelButton_"]:hover { color: ${accent} !important; }
+
+    /* ── Member list & friend rows — keep avatars (img) untouched,
+       restyle the row chrome. */
+    [class*="memberInner_"],
+    [class*="peopleListItem_"],
+    [class*="peopleListItem-"] {
+      border-radius: 0 !important;
+      border-bottom: 1px dashed ${ruleDim} !important;
+      padding: 8px 12px !important;
+    }
+    [class*="memberInner_"]:hover,
+    [class*="peopleListItem_"]:hover {
+      background: ${ruleDim} !important;
+    }
+
+    /* ── Panel borders — every Discord "panel-like" element gets
+       a dim dashed border matching the dashboard's panel rhythm. */
+    [class*="container_"][class*="chat_"],
+    [class*="contentRegion_"],
+    [class*="page_"],
+    [class*="content_"][class*="channelHeader"],
+    [class*="title_"][class*="containerNormal_"] {
+      border-bottom: 1px solid ${ruleDim} !important;
+    }
+    /* The user's bottom-left profile panel (avatar + name + mute/
+       deafen/settings cluster) — restyle as a dashboard footer-style
+       strip. */
+    [class*="panel_"][class*="container_"],
+    section[aria-label*="User"][class*="panel_"] {
+      background: ${panelBg} !important;
+      border-top: 1px dashed ${ruleDim} !important;
+    }
+
+    /* ── Scrollbars — thin dashboard style */
+    ::-webkit-scrollbar { width: 6px !important; height: 6px !important; }
+    ::-webkit-scrollbar-thumb { background: ${ruleDim} !important; border-radius: 0 !important; }
+    ::-webkit-scrollbar-track { background: transparent !important; }
+  `;
+  }
+
+  // Facebook web client / Messenger theme. Facebook uses heavily
+  // obfuscated hashed class names so we lean on attribute-prefix
+  // selectors, role attributes, and an aggressive brand-color crush
+  // (Facebook blue is #1877f2 / rgb 24,119,242 — anything matching
+  // gets retinted to ${accent}). Compared to Discord, Facebook
+  // doesn't expose nice CSS custom properties to override, so we
+  // target backgrounds + colors directly with !important.
+  function _buildFacebookThemeCSS(palette) {
+    const p = palette || {};
+    const bg          = p.bg          || '#070a0e';
+    const panelBg     = p.panelBg     || '#0c1014';
+    const ruleDim     = p.ruleDim     || 'rgba(92,207,255,0.22)';
+    const accent      = p.accent      || '#5ccfff';
+    const amber       = p.amber       || '#ffd05b';
+    const ok          = p.ok          || '#5fe39a';
+    const red         = p.red         || '#ff5f6e';
+    const text        = p.text        || '#cfe6f7';
+    const muted       = p.muted       || '#6e8aa3';
+    const fontTech    = p.fontTech    || "'Inter','Segoe UI',sans-serif";
+    const fontDisplay = p.fontDisplay || "'Inter','Segoe UI',sans-serif";
+    // Icon visibility (every theme): Facebook draws glyphs as currentColor
+    // <svg> — pin currentColor to the text tone so they read.
+    const iconBase = `
+    svg:not([class*="avatar" i]) { color: ${text} !important; }
+  `;
+    // INK themes → monochrome icons (see _buildDiscordThemeCSS). Facebook
+    // draws icons both as inline <svg> and as CSS-sprite <i> elements, so
+    // we crush the SVG fills and grayscale the sprite tiles.
+    const inkIcons = !p.eink ? '' : `
+    /* Exclude <mask>/<defs>/<clipPath>/<pattern> children — repainting a
+       mask's white rect to ink blacks out the masked element. */
+    svg [fill]:not([fill="none"]):not(mask *):not(defs *):not(clipPath *):not(pattern *):not(symbol *),
+    svg [stop-color] { fill: ${text} !important; }
+    i[data-visualcompletion="css-img"],
+    [role="img"]:not(img) {
+      filter: grayscale(1) contrast(1.05) !important;
+    }
+    /* ── INK accents. Monochrome ink overall, but small semantic markers
+       keep washed colour. Scoped to SVG [fill] attributes only — matching
+       colour substrings in inline styles caught CSS-variable declarations
+       and flooded large containers with colour. */
+    svg [fill="#fa383e" i], svg [fill="#e41e3f" i], svg [fill="#f3425f" i] {
+      fill: ${red} !important;
+    }
+    svg [fill="#31a24c" i], svg [fill="#42b72a" i] {
+      fill: ${ok} !important;
+    }
+  `;
+    return `${iconBase}${inkIcons}
+    /* ── Base canvas: kill Facebook's white/light surfaces. */
+    html, body, #facebook, [role="main"], [role="banner"], [role="navigation"], [role="complementary"] {
+      background: ${bg} !important;
+      color: ${text} !important;
+    }
+    /* News-feed cards, modals, popovers — treat as dashboard panels. */
+    [role="article"], [role="dialog"], [role="menu"],
+    div[data-pagelet*="FeedUnit"],
+    div[data-pagelet*="ProfileTimeline"],
+    div[data-pagelet*="MainFeed"] {
+      background: ${panelBg} !important;
+      border: 1px solid ${ruleDim} !important;
+      border-radius: 0 !important;
+      box-shadow: none !important;
+    }
+    /* Typography: monospace/display font everywhere, dim text, accent
+       hover for links. */
+    body, body * {
+      font-family: ${fontTech} !important;
+      color: ${text} !important;
+    }
+    h1, h2, h3, [role="heading"] {
+      font-family: ${fontDisplay} !important;
+      letter-spacing: 0.08em !important;
+      text-transform: uppercase !important;
+      color: ${text} !important;
+    }
+    a, a * { color: ${accent} !important; }
+    a:hover, a:hover * { color: ${text} !important; }
+
+    /* All buttons → dashboard treatment: transparent + dim border +
+       accent on hover. The :not(...) avoids restyling Facebook's
+       circular avatar/reaction buttons (those still need to be
+       round-ish to be recognizable). */
+    [role="button"]:not([aria-label*="Like"]):not([aria-label*="React"]):not([aria-label*="Reaction"]),
+    button[type="button"], button[type="submit"] {
+      background: transparent !important;
+      border: 1px solid ${ruleDim} !important;
+      color: ${text} !important;
+      border-radius: 0 !important;
+      box-shadow: none !important;
+      font-family: ${fontDisplay} !important;
+      letter-spacing: 0.06em !important;
+    }
+    [role="button"]:hover, button:hover {
+      border-color: ${accent} !important;
+      color: ${accent} !important;
+      background: ${ruleDim} !important;
+    }
+
+    /* Inputs (search box, composer "What's on your mind", message
+       text-areas) — dark with dim dashed border. */
+    input[type="text"], input[type="search"], input[type="password"],
+    textarea, [contenteditable="true"] {
+      background: ${panelBg} !important;
+      border: 1px solid ${ruleDim} !important;
+      border-radius: 0 !important;
+      color: ${text} !important;
+      font-family: ${fontTech} !important;
+    }
+    input:focus, textarea:focus, [contenteditable="true"]:focus {
+      border-color: ${accent} !important;
+      outline: none !important;
+    }
+
+    /* Brand color crush — Facebook leaks #1877f2 (their blue) into
+       inline styles + SVG fills + button backgrounds. Catch the
+       common forms and retint to dashboard accent. */
+    [style*="rgb(24, 119, 242)"],
+    [style*="rgb(24,119,242)"],
+    [style*="#1877f2"], [style*="#1877F2"],
+    [style*="#1b74e4"], [style*="#1B74E4"] {
+      background-color: ${ruleDim} !important;
+      color: ${accent} !important;
+    }
+    [fill="#1877f2"], [fill="#1877F2"],
+    [fill="#1b74e4"], [fill="#1B74E4"] {
+      fill: ${accent} !important;
+    }
+    [stroke="#1877f2"], [stroke="#1877F2"] { stroke: ${accent} !important; }
+
+    /* Hide a few in-feed nags / upsells if their data hooks match. */
+    [data-pagelet*="Stories"],
+    [aria-label="Suggested for you"],
+    [aria-label*="Sponsored" i] { display: none !important; }
+
+    /* Scrollbars — thin dashboard style. */
+    ::-webkit-scrollbar { width: 6px !important; height: 6px !important; }
+    ::-webkit-scrollbar-thumb { background: ${ruleDim} !important; border-radius: 0 !important; }
+    ::-webkit-scrollbar-track { background: transparent !important; }
+  `;
+  }
+
+  function _streamApplyBounds(view) {
+    if (!view || !_mainWin || _mainWin.isDestroyed()) return;
+    // _streamBounds is a fractional rect (x/y/width/height each 0..1
+    // of the dashboard viewport). Multiply by the window's content
+    // size to recover DIPs. Matches the BROWSER tab convention so
+    // CSS zoom on renderer panels stays correctly accounted for.
+    const cb = _mainWin.getContentBounds();
+    try {
+      view.setBounds({
+        x: Math.round(cb.width  * (_streamBounds.x      || 0)),
+        y: Math.round(cb.height * (_streamBounds.y      || 0)),
+        width:  Math.max(0, Math.round(cb.width  * (_streamBounds.width  || 0))),
+        height: Math.max(0, Math.round(cb.height * (_streamBounds.height || 0))),
+      });
+    } catch {}
+    try { view.setAutoResize({ width: false, height: false }); } catch {}
+  }
+  // Page-world inject: (1) monkey-patches window.Notification to
+  // forward DM/mention notifications via the contextBridge to main;
+  // (2) walks the DOM for sidebar items whose text matches Nitro/
+  // Shop/Quests and hides them — CSS selectors miss these when
+  // Discord rotates class names, but the visible text doesn't change.
+  // A MutationObserver re-runs the sweep when the SPA route changes
+  // (e.g. user navigates to a server then back to friends).
+  //
+  // Diagnostic logs (prefix '[dash3d-stream]') get relayed to the
+  // main-process terminal via wc.on('console-message'), so the user
+  // can `npm run dev` and trace the pipeline without DevTools.
+  const _STREAM_NOTIFICATION_INJECT_JS = `
+    (() => {
+      const LOG = (...a) => { try { console.log('[dash3d-stream]', ...a); } catch (e) {} };
+      // Re-installation guard — but we still re-arm on every call so
+      // hard reloads pick up the latest patch.
+      const wasInstalled = !!window.__dash3dNotifPatched;
+      window.__dash3dNotifPatched = true;
+      LOG('inject running · bridge?', !!(window.__dash3dStreamBridge && window.__dash3dStreamBridge.notify), 'reinstall?', wasInstalled);
+      // ── Notification forward ───────────────────────────────────
+      if (window.Notification) {
+        const orig = window.__dash3dOrigNotification || window.Notification;
+        window.__dash3dOrigNotification = orig;
+        function Patched(title, opts) {
+          LOG('Notification called · title=', String(title || ''), 'body=', String((opts && opts.body) || ''));
+          try {
+            if (window.__dash3dStreamBridge && typeof window.__dash3dStreamBridge.notify === 'function') {
+              window.__dash3dStreamBridge.notify({
+                kind: 'discord',
+                title: String(title == null ? '' : title),
+                body:  String((opts && opts.body) || ''),
+                icon:  String((opts && opts.icon) || ''),
+                tag:   String((opts && opts.tag) || ''),
+                timestamp: Date.now(),
+              });
+              LOG('bridge.notify SENT');
+            } else {
+              LOG('bridge MISSING — message dropped');
+            }
+          } catch (e) { LOG('bridge.notify error:', e && e.message); }
+          return new orig(title, opts);
+        }
+        // Force-grant: Discord checks Notification.permission BEFORE
+        // bothering to call new Notification(). If it's "default" or
+        // "denied", Discord just doesn't fire. Override the getter to
+        // always return 'granted' so Discord proceeds.
+        try {
+          Object.defineProperty(Patched, 'permission', { get: () => 'granted', configurable: true });
+        } catch (e) {}
+        Patched.requestPermission = (cb) => {
+          const p = Promise.resolve('granted');
+          if (typeof cb === 'function') p.then(cb);
+          return p;
+        };
+        try { Object.setPrototypeOf(Patched, orig); } catch (e) {}
+        try { window.Notification = Patched; } catch (e) { LOG('install failed:', e && e.message); }
+        LOG('patch installed · Notification.permission=', Patched.permission);
+      } else {
+        LOG('window.Notification missing — cannot patch');
+      }
+      // ── Camera state detection ─────────────────────────────────
+      // Wrap navigator.mediaDevices.getUserMedia so we can detect
+      // when Discord activates the webcam (voice/video call cam
+      // toggle). We don't intercept the stream — Discord still gets
+      // the real one — we just inspect the resulting video track and
+      // forward camera-on / camera-off events to the dashboard. The
+      // dashboard's profile-pic slot opens its OWN webcam in
+      // parallel via the existing startWebcam() helper.
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+          && !navigator.mediaDevices.__dash3dGumPatched) {
+        navigator.mediaDevices.__dash3dGumPatched = true;
+        const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async function(constraints) {
+          const stream = await origGUM(constraints);
+          try {
+            const reqVideo = constraints && (constraints.video === true ||
+              (typeof constraints.video === 'object' && constraints.video !== null));
+            const vTracks = stream.getVideoTracks();
+            if (reqVideo && vTracks.length > 0) {
+              if (window.__dash3dStreamBridge && window.__dash3dStreamBridge.notify) {
+                window.__dash3dStreamBridge.notify({ kind: 'camera-state', state: 'on', timestamp: Date.now() });
+              }
+              LOG('camera ON · forwarding state to dashboard');
+              const off = () => {
+                try {
+                  if (window.__dash3dStreamBridge && window.__dash3dStreamBridge.notify) {
+                    window.__dash3dStreamBridge.notify({ kind: 'camera-state', state: 'off', timestamp: Date.now() });
+                  }
+                  LOG('camera OFF · track ended');
+                } catch (e) {}
+              };
+              vTracks[0].addEventListener('ended', off);
+            }
+          } catch (e) { LOG('gum patch error', e && e.message); }
+          return stream;
+        };
+        LOG('getUserMedia patched');
+      }
+      // Diagnostic helper exposed to the page so the user can verify
+      // the pipeline end-to-end by typing in DevTools (or via the
+      // dashboard test button we wire up below):
+      //   window.__dash3dSelfTest('hello from discord');
+      window.__dash3dSelfTest = (msg) => {
+        if (!window.__dash3dStreamBridge) { LOG('selftest: no bridge'); return false; }
+        window.__dash3dStreamBridge.notify({
+          kind: 'discord',
+          title: 'SELF-TEST',
+          body: String(msg || 'test message ' + new Date().toLocaleTimeString()),
+          timestamp: Date.now(),
+        });
+        LOG('selftest sent');
+        return true;
+      };
+      // ── Live message mirror + history sync via DOM observation ──
+      // Discord renders each message as <li id="chat-messages-…">.
+      // The id pattern is stable across releases; class names rotate.
+      //
+      // Two phases:
+      //   1) On first install, sweep every <li id="chat-messages-…">
+      //      already in the DOM. Catches the channel/DM the user has
+      //      open when the inject runs (and any history Discord has
+      //      already rendered into the viewport).
+      //   2) MutationObserver picks up everything added afterward:
+      //      new live messages, messages loaded when the user scrolls
+      //      up, and the burst of nodes Discord adds when the user
+      //      navigates into a previously-unloaded channel.
+      //
+      // No freshness window — we want the history. The renderer
+      // dedupes by messageId so a re-mirror is a no-op visually.
+      if (!window.__dash3dMsgObserver) {
+        const seen = new Set();
+        const SEEN_CAP = 4000;
+        function trimSeen() {
+          if (seen.size <= SEEN_CAP) return;
+          const drop = seen.size - Math.floor(SEEN_CAP / 2);
+          let i = 0;
+          for (const k of seen) { if (i++ >= drop) break; seen.delete(k); }
+        }
+        function scrapeRow(li) {
+          if (!li || !li.id || !li.id.startsWith('chat-messages-') || seen.has(li.id)) return null;
+          seen.add(li.id); trimSeen();
+          const authorEl = li.querySelector('[id^="message-username-"]')
+            || li.querySelector('h3 span')
+            || li.querySelector('[class*="username_"]');
+          const contentEl = li.querySelector('[id^="message-content-"]')
+            || li.querySelector('[class*="messageContent_"]');
+          const timeEl = li.querySelector('time[datetime]');
+          const author = authorEl ? (authorEl.textContent || '').trim() : '';
+          const content = contentEl ? (contentEl.textContent || '').trim() : '';
+          const ts = (timeEl && timeEl.getAttribute('datetime'))
+            ? new Date(timeEl.getAttribute('datetime')).getTime()
+            : Date.now();
+          return { id: li.id, author, content, timestamp: ts };
+        }
+        function emit(msg) {
+          if (!msg || !msg.content) return;
+          try {
+            if (window.__dash3dStreamBridge && window.__dash3dStreamBridge.notify) {
+              window.__dash3dStreamBridge.notify({
+                kind: 'discord',
+                type: 'message',
+                messageId: msg.id,
+                title: msg.author || 'Discord',
+                body: msg.content,
+                timestamp: msg.timestamp,
+              });
+            }
+          } catch (e) { LOG('msg send err', e && e.message); }
+        }
+        // Live phase — observe DOM mutations
+        const mo = new MutationObserver((mutations) => {
+          for (const m of mutations) {
+            for (const node of m.addedNodes) {
+              if (!node || node.nodeType !== 1) continue;
+              if (node.id && node.id.startsWith('chat-messages-')) {
+                emit(scrapeRow(node));
+              }
+              if (node.querySelectorAll) {
+                const subs = node.querySelectorAll('li[id^="chat-messages-"]');
+                for (const sub of subs) emit(scrapeRow(sub));
+              }
+            }
+          }
+        });
+        mo.observe(document.body || document.documentElement, { childList: true, subtree: true });
+        window.__dash3dMsgObserver = mo;
+        // Initial sweep — capture anything Discord has already rendered.
+        // Run a few times with backoff because Discord's React mount is
+        // async and the chat list may not be in the DOM yet on first
+        // tick. Each sweep dedupes via the seen-set so repeats are free.
+        // Returns { rowsInDom, newlyEmitted } so the manual FETCH
+        // button can surface diagnostic info to the user.
+        function initialSweep() {
+          const rows = document.querySelectorAll('li[id^="chat-messages-"]');
+          let n = 0;
+          for (const li of rows) {
+            const msg = scrapeRow(li);
+            if (msg && msg.content) { emit(msg); n++; }
+          }
+          if (n) LOG('sweep emitted ' + n + ' new messages (' + rows.length + ' rows in DOM)');
+          return { rowsInDom: rows.length, newlyEmitted: n };
+        }
+        [200, 700, 1800, 4000].forEach((d) => setTimeout(initialSweep, d));
+        // Also expose a manual rescan for the dashboard's FETCH
+        // button. The returned object surfaces both how many message
+        // rows are CURRENTLY in the DOM (i.e. is a conversation
+        // even open?) and how many of those were NEW (i.e. not
+        // already mirrored). Lets the user diagnose whether they
+        // need to click into a DM first vs. nothing-to-sync.
+        window.__dash3dRescan = initialSweep;
+        LOG('message observer started · sweeping initial DOM');
+      }
+      // ── Text-content fallback hide: Nitro / Shop / Quests ──────
+      // The sidebar item is usually <a> with a single text node
+      // inside a nested div. Match exact text (case-insensitive,
+      // trimmed) to avoid hiding e.g. "Nitro Boost #general".
+      const HIDE = new Set(['nitro', 'shop', 'quests', 'discovery']);
+      function sweepHide() {
+        const selectors = ['a', 'li', 'div[role="link"]', 'div[role="button"]', '[class*="channel_"]'];
+        const seen = document.querySelectorAll(selectors.join(','));
+        for (const el of seen) {
+          if (el.dataset && el.dataset.dash3dHidden) continue;
+          // Examine direct text (not descendants') so we don't match
+          // a Nitro upsell embedded inside a channel name.
+          const t = (el.textContent || '').trim().toLowerCase();
+          if (t.length > 0 && t.length < 25 && HIDE.has(t)) {
+            el.style.setProperty('display', 'none', 'important');
+            if (el.dataset) el.dataset.dash3dHidden = '1';
+          }
+        }
+      }
+      sweepHide();
+      try {
+        const mo = new MutationObserver(() => sweepHide());
+        mo.observe(document.body || document.documentElement, { childList: true, subtree: true });
+      } catch (e) {}
+    })();
+  `;
+
+  // ── Per-kind STREAM configs ─────────────────────────────────────
+  // Each entry describes one embedded service. The plumbing
+  // (BrowserView creation, permission/display-media handlers,
+  // notification monkey-patch, camera-state detection, console-
+  // message relay, theme reinjection) is identical across kinds —
+  // only URL, theme builder, and internal-domain regex differ.
+  const _STREAM_KINDS = {
+    discord: {
+      url: 'https://discord.com/app',
+      label: 'DISCORD',
+      buildThemeCSS: _buildDiscordThemeCSS,
+      // External-link policy: anything not on discord.com opens in
+      // the OS default browser instead of inside the embed.
+      internalDomain: /(^|\.)discord\.com$/,
+    },
+    facebook: {
+      // Default to facebook.com (gives access to Messenger via the
+      // built-in sidebar). User can navigate to messenger.com from
+      // there if they want a dedicated chat surface.
+      url: 'https://www.facebook.com',
+      label: 'FACEBOOK',
+      buildThemeCSS: _buildFacebookThemeCSS,
+      internalDomain: /(^|\.)(facebook|messenger|fb)\.com$/,
+    },
+  };
+
+  function _streamGetOrCreate(kind) {
+    if (_streamViews.has(kind)) return _streamViews.get(kind);
+    const config = _STREAM_KINDS[kind];
+    if (!config) return null;
+    const partition = 'persist:stream-' + kind;
+    const view = new BrowserView({
+      webPreferences: {
+        partition,
+        preload: path.join(__dirname, 'stream-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false, // preload needs Node `require` for ipcRenderer
+        webSecurity: true,
+      },
+    });
+    const wc = view.webContents;
+    try { wc.setUserAgent(_STREAM_CHROME_UA); } catch {}
+
+    // ── Permissions (universal across kinds) ────────────────────
+    // Auto-grant the four permissions modern web chat surfaces ask
+    // for: desktop notifications, camera+mic, screen capture, DRM.
+    const STREAM_PERMS = new Set(['notifications', 'media', 'display-capture', 'mediaKeySystem']);
+    try {
+      wc.session.setPermissionRequestHandler((_wc, permission, cb, details) => {
+        const allow = STREAM_PERMS.has(permission);
+        console.log('[stream:' + kind + '] perm request', permission, '→', allow, details ? Object.keys(details).join(',') : '');
+        cb(allow);
+      });
+      wc.session.setPermissionCheckHandler((_wc, permission) => STREAM_PERMS.has(permission));
+    } catch (err) { console.warn('[stream:' + kind + '] perm handler setup failed:', err.message); }
+
+    // ── Display-media handler (universal) ────────────────────────
+    // Auto-pick primary screen + loopback audio when the embed
+    // calls getDisplayMedia() ("Share your screen"). Falls back to
+    // video-only if loopback audio is rejected on this session.
+    try {
+      if (typeof wc.session.setDisplayMediaRequestHandler === 'function') {
+        wc.session.setDisplayMediaRequestHandler((request, callback) => {
+          console.log('[stream:' + kind + '] getDisplayMedia called · audio=', request?.audio, 'video=', request?.video);
+          desktopCapturer.getSources({ types: ['screen', 'window'] })
+            .then((sources) => {
+              console.log('[stream:' + kind + '] desktopCapturer returned', sources?.length || 0, 'sources');
+              if (!sources || !sources.length) {
+                console.warn('[stream:' + kind + '] no sources — Share Screen will produce empty stream');
+                return callback({});
+              }
+              const pick = sources.find((s) => s.id && s.id.startsWith('screen:')) || sources[0];
+              console.log('[stream:' + kind + '] handing source:', pick.id, '·', pick.name);
+              const stream = request?.audio
+                ? { video: pick, audio: 'loopback' }
+                : { video: pick };
+              try { callback(stream); }
+              catch (err) {
+                console.warn('[stream:' + kind + '] callback with loopback audio failed, retrying video-only:', err.message);
+                try { callback({ video: pick }); } catch (e2) { console.error('[stream:' + kind + '] callback fully failed:', e2.message); }
+              }
+            })
+            .catch((err) => {
+              console.error('[stream:' + kind + '] desktopCapturer failed:', err.message);
+              callback({});
+            });
+        });
+        console.log('[stream:' + kind + '] setDisplayMediaRequestHandler installed');
+      }
+    } catch (err) { console.warn('[stream:' + kind + '] display-media handler setup failed:', err.message); }
+
+    // ── Console-message relay (universal) ────────────────────────
+    // Surfaces [dash3d-stream]-prefixed logs from the embed's page
+    // world in the main-process terminal so npm-run-dev can trace
+    // the inject pipeline without DevTools on the BV.
+    wc.on('console-message', (_e, _level, message) => {
+      if (typeof message === 'string' && message.startsWith('[dash3d-stream]')) {
+        console.log('[' + kind + '-page]', message);
+      }
+    });
+
+    // ── Theme + monkey-patch reinjection (kind-specific theme,
+    //    universal notification + camera-state patch) ─────────────
+    const reapply = async (freshLoad) => {
+      try {
+        const prevKey = _streamCssKey.get(kind);
+        if (prevKey) { try { await wc.removeInsertedCSS(prevKey); } catch {} }
+        const themeCss = config.buildThemeCSS(_streamPalette);
+        const key = await wc.insertCSS(themeCss);
+        _streamCssKey.set(kind, key);
+      } catch (err) { console.warn('[stream:' + kind + '] insertCSS failed:', err.message); }
+      // Invert is a separate, explicitly-managed stylesheet (see
+      // _applyEmbedInvert) so the theme reapply churn above can't strand
+      // a stale invert layer. freshLoad=true means a real page load just
+      // cleared inserted CSS, so the invert must be re-inserted.
+      try { await _applyEmbedInvert(wc, !!freshLoad, _streamPalette && _streamPalette.eink); } catch {}
+      try { await wc.executeJavaScript(_STREAM_NOTIFICATION_INJECT_JS, /* userGesture */ false); }
+      catch (err) { console.warn('[stream:' + kind + '] notif inject failed:', err.message); }
+    };
+    // stream:show re-themes without a page reload — invert persists, so
+    // pass freshLoad=false. Real load events clear inserted CSS → true.
+    view._streamReapply = () => reapply(false);
+    wc.on('dom-ready', () => reapply(true));
+    wc.on('did-finish-load', () => reapply(true));
+    wc.on('did-frame-finish-load', (_e, isMainFrame) => { if (isMainFrame) reapply(true); });
+    wc.loadURL(config.url).catch((err) => {
+      console.warn('[stream:' + kind + '] loadURL failed:', err.message);
+    });
+
+    // External links open in the OS default browser; internal
+    // navigation stays inside the embed.
+    wc.setWindowOpenHandler(({ url }) => {
+      try {
+        const u = new URL(url);
+        if (!config.internalDomain.test(u.hostname)) {
+          shell.openExternal(url);
+          return { action: 'deny' };
+        }
+      } catch {}
+      return { action: 'deny' };
+    });
+    _streamViews.set(kind, view);
+    return view;
+  }
+
+  // Bounds from the renderer arrive as FRACTIONS (0..1) of the
+  // dashboard viewport — see _streamApplyBounds for the DIP conversion.
+  // The palette is the live dashboard theme tokens, plumbed through so
+  // the Discord embed retints when the user switches dashboard themes.
+  ipcMain.handle('stream:show', (_e, opts) => {
+    const kind = String(opts?.kind || 'discord');
+    const bounds = opts?.bounds;
+    if (bounds && Number.isFinite(bounds.width) && Number.isFinite(bounds.height)) {
+      _streamBounds = {
+        x: Number(bounds.x) || 0,
+        y: Number(bounds.y) || 0,
+        width:  Math.max(0, Number(bounds.width)),
+        height: Math.max(0, Number(bounds.height)),
+      };
+    }
+    if (opts?.palette && typeof opts.palette === 'object') {
+      _streamPalette = opts.palette;
+    }
+    if (!_mainWin || _mainWin.isDestroyed()) return { ok: false, error: 'window destroyed' };
+    const view = _streamGetOrCreate(kind);
+    // Detach whatever is currently shown if it's a different kind.
+    if (_streamActive && _streamActive !== kind) {
+      const cur = _streamViews.get(_streamActive);
+      try { if (cur) _mainWin.removeBrowserView(cur); } catch {}
+    }
+    try { _mainWin.addBrowserView(view); } catch {}
+    _streamApplyBounds(view);
+    // Re-apply the themed CSS with the (possibly new) palette. If the
+    // page hasn't finished loading yet the did-finish-load handler in
+    // _streamGetOrCreate will run reapply on its own.
+    if (typeof view._streamReapply === 'function') {
+      try { view._streamReapply(); } catch {}
+    }
+    _streamActive = kind;
+    return { ok: true, kind };
+  });
+  ipcMain.handle('stream:hide', () => {
+    if (!_streamActive) return { ok: true };
+    if (!_mainWin || _mainWin.isDestroyed()) return { ok: true };
+    const view = _streamViews.get(_streamActive);
+    try { if (view) _mainWin.removeBrowserView(view); } catch {}
+    _streamActive = null;
+    return { ok: true };
+  });
+  ipcMain.handle('stream:bounds', (_e, bounds) => {
+    if (!bounds) return { ok: false };
+    _streamBounds = {
+      x: Number(bounds.x) || 0,
+      y: Number(bounds.y) || 0,
+      width:  Math.max(0, Number(bounds.width)  || 0),
+      height: Math.max(0, Number(bounds.height) || 0),
+    };
+    if (_streamActive) {
+      const view = _streamViews.get(_streamActive);
+      if (view) _streamApplyBounds(view);
+    }
+    return { ok: true };
+  });
+  ipcMain.handle('stream:reload', (_e, kind) => {
+    const k = String(kind || _streamActive || 'discord');
+    const view = _streamViews.get(k);
+    if (view) try { view.webContents.reload(); } catch {}
+    return { ok: true };
+  });
+  // Manual fetch: tells the inject script to re-sweep the embed's
+  // current DOM for chat-messages rows and emit any not-yet-seen
+  // ones. Returns { rowsInDom, newlyEmitted } so the renderer can
+  // give the user diagnostic feedback (e.g. "no rows in DOM" means
+  // they need to click into a DM/channel first).
+  ipcMain.handle('stream:rescan', async (_e, kind) => {
+    const k = String(kind || 'discord');
+    const view = _streamViews.get(k);
+    if (!view) return { ok: false, error: 'view not mounted · open STREAM tab first' };
+    try {
+      const result = await view.webContents.executeJavaScript(
+        `(typeof window.__dash3dRescan === 'function') ? window.__dash3dRescan() : null`,
+        false
+      );
+      if (!result) return { ok: false, error: 'inject script not running · reload STREAM tab' };
+      return { ok: true, rowsInDom: Number(result.rowsInDom) || 0, newlyEmitted: Number(result.newlyEmitted) || 0 };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Pipeline self-test: triggers the inject-script's __dash3dSelfTest
+  // helper inside the Discord BrowserView. This fires a fake notify()
+  // through the bridge → main relay → renderer, so the user can
+  // verify each hop is wired without needing someone to actually DM
+  // them on Discord.
+  ipcMain.handle('stream:self-test', async (_e, kind) => {
+    const k = String(kind || 'discord');
+    const view = _streamViews.get(k);
+    if (!view) return { ok: false, error: 'view not mounted (open STREAM tab first)' };
+    try {
+      const installed = await view.webContents.executeJavaScript(
+        `(typeof window.__dash3dSelfTest === 'function') ? window.__dash3dSelfTest('pipeline check ' + new Date().toLocaleTimeString()) : 'no-inject'`,
+        false
+      );
+      return { ok: installed === true, result: installed };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Open DevTools on the Discord BV — useful for diagnosing
+  // notification flow when the inject script can't be inspected
+  // through the page's own console.
+  ipcMain.handle('stream:open-devtools', (_e, kind) => {
+    const k = String(kind || _streamActive || 'discord');
+    const view = _streamViews.get(k);
+    if (!view) return { ok: false, error: 'view not mounted' };
+    try { view.webContents.openDevTools({ mode: 'detach' }); return { ok: true }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  });
+  // Relay notifications from the BV's preload bridge to the dashboard
+  // renderer. Use ipcMain.on (not .handle) since this is fire-and-
+  // forget — the BV doesn't await a reply.
+  ipcMain.on('stream:notification', (_e, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      console.log('[stream:notification] main · dropped (invalid payload)');
+      return;
+    }
+    if (!_mainWin || _mainWin.isDestroyed()) {
+      console.log('[stream:notification] main · dropped (no window)');
+      return;
+    }
+    // camera-state events have their own minimal shape; pass through
+    // verbatim so the renderer can route to startWebcam/stopWebcam.
+    if (payload.kind === 'camera-state') {
+      console.log('[stream:notification] main · camera-state =', payload.state);
+      try {
+        _mainWin.webContents.send('stream:notification', {
+          kind: 'camera-state',
+          state: String(payload.state || 'off'),
+          timestamp: Number(payload.timestamp) || Date.now(),
+        });
+      } catch (err) {
+        console.warn('[stream:notification] main · send failed:', err.message);
+      }
+      return;
+    }
+    console.log('[stream:notification] main · relaying', JSON.stringify({ title: payload.title, body: payload.body }).slice(0, 200));
+    try {
+      _mainWin.webContents.send('stream:notification', {
+        kind:      String(payload.kind || 'discord'),
+        type:      String(payload.type || 'notification'),
+        messageId: String(payload.messageId || ''),
+        title:     String(payload.title || ''),
+        body:      String(payload.body  || ''),
+        icon:      String(payload.icon  || ''),
+        tag:       String(payload.tag   || ''),
+        timestamp: Number(payload.timestamp) || Date.now(),
+      });
+    } catch (err) {
+      console.warn('[stream:notification] main · send failed:', err.message);
+    }
   });
 
   ipcMain.handle('config-get', () => readConfig());
@@ -1690,6 +3967,134 @@ function registerIpc() {
     });
   });
 
+  // Power off / restart the host — the appliance power menu. Like
+  // system-sleep, gated by a native confirm dialog so a stray click can't
+  // drop the session. On the Linux appliance these are systemctl calls;
+  // elsewhere the platform's own shutdown tool.
+  ipcMain.handle('system-power', async (_e, action) => {
+    if (action !== 'poweroff' && action !== 'reboot') {
+      return { ok: false, error: `unknown power action: ${action}` };
+    }
+    const win = _mainWin || BrowserWindow.fromWebContents(_e.sender);
+    const isOff = action === 'poweroff';
+    try {
+      const { dialog } = require('electron');
+      const r = await dialog.showMessageBox(win || undefined, {
+        type: 'warning',
+        buttons: [isOff ? 'Power Off' : 'Restart', 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        title: isOff ? 'Power Off' : 'Restart',
+        message: isOff ? 'Power off this PC?' : 'Restart this PC?',
+        detail: 'All running apps will be closed.',
+      });
+      if (r.response !== 0) return { ok: false, cancelled: true };
+    } catch {}
+    let cmd, args;
+    if (process.platform === 'win32') {
+      cmd = 'shutdown';
+      args = isOff ? ['/s', '/t', '0'] : ['/r', '/t', '0'];
+    } else if (process.platform === 'linux') {
+      cmd = 'systemctl';
+      args = [isOff ? 'poweroff' : 'reboot'];
+    } else if (process.platform === 'darwin') {
+      cmd = 'osascript';
+      args = ['-e', `tell application "System Events" to ${isOff ? 'shut down' : 'restart'}`];
+    } else {
+      return { ok: false, error: `unsupported platform: ${process.platform}` };
+    }
+    try {
+      const proc = spawn(cmd, args, { windowsHide: true, detached: true, stdio: 'ignore' });
+      proc.unref();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Game Mode (Linux appliance) — write a flag the session script
+  // watches, then quit. When the dashboard's gamescope exits, the
+  // session loop sees the flag and launches Steam Big Picture; when
+  // Steam exits it loops back to the dashboard.
+  ipcMain.handle('game-mode', () => {
+    if (process.platform !== 'linux') {
+      return { ok: false, error: 'Game Mode is available on the Linux appliance only' };
+    }
+    // Hand off WITHOUT relying on Electron exiting itself — app.quit(),
+    // app.exit() and process.exit() all hung under gamescope, and an
+    // external `pkill` BY NAME never reliably matched. So: drop the flag
+    // the session loop watches for, then SIGKILL this process by its own
+    // pid. SIGKILL is uncatchable and needs no name match; gamescope was
+    // launched as `gamescope -- dashboard3d`, so when this child dies
+    // gamescope exits and the session loop runs Steam Big Picture.
+    try {
+      require('fs').writeFileSync('/tmp/dashboard3d-gamemode', '1');
+    } catch (err) {
+      return { ok: false, error: 'could not arm Game Mode: ' + err.message };
+    }
+    // Delay briefly so this {ok:true} reply reaches the renderer first.
+    setTimeout(() => {
+      try {
+        // Also sweep any child Electron processes (renderer/GPU) so none
+        // linger on the GPU once gamescope is gone — best effort.
+        require('child_process')
+          .spawn('/bin/sh', ['-c', 'pkill -KILL -x dashboard3d'],
+            { detached: true, stdio: 'ignore' }).unref();
+      } catch (_) { /* best effort */ }
+      try { process.kill(process.pid, 'SIGKILL'); } catch (_) { /* ignore */ }
+    }, 200);
+    return { ok: true };
+  });
+
+  // App launcher (appliance) — pick an executable via the native file
+  // dialog. Used so the dashboard-as-shell can pin and start other
+  // programs when there is no Start menu / taskbar.
+  ipcMain.handle('launcher-pick', async (_e) => {
+    const win = _mainWin || BrowserWindow.fromWebContents(_e.sender);
+    try {
+      const { dialog } = require('electron');
+      const filters = process.platform === 'win32'
+        ? [{ name: 'Programs', extensions: ['exe', 'bat', 'cmd', 'lnk'] },
+           { name: 'All Files', extensions: ['*'] }]
+        : [{ name: 'All Files', extensions: ['*'] }];
+      const r = await dialog.showOpenDialog(win || undefined, {
+        title: 'Pick a program',
+        properties: ['openFile'],
+        filters,
+      });
+      if (r.canceled || !r.filePaths?.length) return { ok: false, cancelled: true };
+      const file = r.filePaths[0];
+      const name = require('path').basename(file).replace(/\.(exe|bat|cmd|lnk)$/i, '');
+      return { ok: true, path: file, name };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Spawn a launcher entry. Detached + unref so the child outlives a
+  // dashboard restart; Windows .lnk shortcuts go through the shell since
+  // they are not directly executable.
+  ipcMain.handle('launcher-run', async (_e, appDef) => {
+    const exec = appDef && typeof appDef.exec === 'string' ? appDef.exec.trim() : '';
+    if (!exec) return { ok: false, error: 'no executable' };
+    const args = Array.isArray(appDef.args) ? appDef.args.map(String) : [];
+    try {
+      if (process.platform === 'win32' && /\.lnk$/i.test(exec)) {
+        const err = await shell.openPath(exec);
+        return err ? { ok: false, error: err } : { ok: true };
+      }
+      let failed = null;
+      const proc = spawn(exec, args, { windowsHide: false, detached: true, stdio: 'ignore' });
+      proc.on('error', (e) => { failed = e; });
+      proc.unref();
+      // Give spawn a tick to surface ENOENT before reporting success.
+      await new Promise((res) => setTimeout(res, 120));
+      return failed ? { ok: false, error: failed.message } : { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   // App version — pulled from package.json by Electron at app start, so the
   // topbar chip stays in sync with the manifest without a renderer rebuild.
   ipcMain.handle('app-version', () => app.getVersion());
@@ -1719,7 +4124,62 @@ function registerIpc() {
   // some Group Policy environments lock down profile add, in which
   // case we surface the netsh stderr verbatim so the user can copy
   // the network name into Windows Settings instead.
+  // ── WiFi on Linux (the appliance) ───────────────────────────────
+  // The appliance ships NetworkManager; `nmcli` drives scan/connect/
+  // status. Args are passed to execFile as an array (no shell) so the
+  // SSID/password cannot be command-injected.
+  function _runCmd(cmd, args, opts = {}) {
+    return new Promise((resolve) => {
+      execFile(cmd, args, { timeout: 20000, ...opts }, (err, stdout, stderr) => {
+        resolve({ ok: !err, stdout: stdout || '', stderr: stderr || '', err });
+      });
+    });
+  }
+  // nmcli -t (terse) separates fields with ':' and backslash-escapes any
+  // literal ':' or '\' inside a field. Split on unescaped ':' then unescape.
+  function _nmcliSplit(line) {
+    return line.split(/(?<!\\):/).map((f) => f.replace(/\\(.)/g, '$1'));
+  }
+  async function _wifiStatusLinux() {
+    const r = await _runCmd('nmcli', ['-t', '-f', 'ACTIVE,SSID,SIGNAL', 'device', 'wifi']);
+    if (!r.ok) return { connected: false, ssid: null, error: (r.stderr || '').trim() || 'nmcli failed' };
+    for (const line of r.stdout.split('\n')) {
+      if (!line) continue;
+      const [active, ssid, signal] = _nmcliSplit(line);
+      if (active === 'yes') {
+        return { connected: true, ssid: ssid || '', signal: signal ? `${signal}%` : '', state: 'connected' };
+      }
+    }
+    return { connected: false, ssid: null, state: 'disconnected' };
+  }
+  async function _wifiScanLinux() {
+    try { await _runCmd('nmcli', ['device', 'wifi', 'rescan']); } catch {}
+    const r = await _runCmd('nmcli', ['-t', '-f', 'SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list']);
+    if (!r.ok) return { networks: [], error: (r.stderr || '').trim() || 'nmcli failed' };
+    const map = new Map();
+    for (const line of r.stdout.split('\n')) {
+      if (!line) continue;
+      const [ssid, signal, security] = _nmcliSplit(line);
+      if (!ssid) continue;
+      const sig = parseInt(signal, 10) || 0;
+      const prev = map.get(ssid);
+      if (!prev || sig > prev.signal) {
+        map.set(ssid, { ssid, signal: sig, auth: security || '', encryption: security || '' });
+      }
+    }
+    return { networks: [...map.values()].sort((a, b) => b.signal - a.signal) };
+  }
+  async function _wifiConnectLinux(ssid, password) {
+    if (!ssid) return { ok: false, error: 'ssid required' };
+    const args = ['device', 'wifi', 'connect', ssid];
+    if (password) args.push('password', password);
+    const r = await _runCmd('nmcli', args, { timeout: 45000 });
+    if (r.ok) return { ok: true };
+    return { ok: false, error: (r.stderr || r.stdout || 'connection failed').trim() };
+  }
+
   ipcMain.handle('wifi-status', async () => {
+    if (process.platform === 'linux') return await _wifiStatusLinux();
     if (process.platform !== 'win32') return { connected: false, ssid: null };
     try {
       const r = await runPowerShell('netsh wlan show interfaces');
@@ -1742,6 +4202,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('wifi-scan', async () => {
+    if (process.platform === 'linux') return await _wifiScanLinux();
     if (process.platform !== 'win32') return { networks: [], error: 'unsupported platform' };
     try {
       // Trigger a fresh scan first so cached results aren't stale.
@@ -1784,6 +4245,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('wifi-connect', async (_e, { ssid, password }) => {
+    if (process.platform === 'linux') return await _wifiConnectLinux(ssid, password);
     if (process.platform !== 'win32') return { ok: false, error: 'unsupported platform' };
     if (!ssid || typeof ssid !== 'string') return { ok: false, error: 'ssid required' };
     try {
@@ -1878,6 +4340,7 @@ function registerIpc() {
   ipcMain.handle('gallery-path',   () => galleryFolderPath());
   ipcMain.handle('docs-path',      () => docsFolderPath());
   ipcMain.handle('downloads-path', () => downloadsFolderPath());
+  ipcMain.handle('music-path',     () => musicFolderPath());
 
   // Folder browsing — recursive listing scoped to the gallery / docs roots
   // so the EXPLORE pane can render a flat-but-grouped file list with sizes
@@ -1917,6 +4380,7 @@ function registerIpc() {
   ipcMain.handle('gallery-list',   listFolder(galleryFolderPath));
   ipcMain.handle('docs-list',      listFolder(docsFolderPath));
   ipcMain.handle('downloads-list', listFolder(downloadsFolderPath));
+  ipcMain.handle('music-list',     listFolder(musicFolderPath));
 
   // Write a doc file (notes / paper auto-export). `rel` is a relative path
   // under the docs root; any traversal outside is rejected. Parents are
@@ -2663,10 +5127,10 @@ $out | ConvertTo-Json -Compress
     try { fs.writeFileSync(listPath, lines.join('\n'), 'utf8'); }
     catch (err) { return { ok: false, error: 'failed to write concat list: ' + err.message }; }
 
-    // Output path: gallery/recordings/<USER> NNNN.<ext>. Prefix uses the
+    // Output path: gallery/videos/<USER> NNNN.<ext>. Prefix uses the
     // configured userName (cfg.userName) when set, else literal "USER".
     // Counter auto-increments across runs by scanning existing files.
-    const dir = path.join(galleryFolderPath(), 'recordings');
+    const dir = path.join(galleryFolderPath(), 'videos');
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     const ext = '.' + format;
     const { full: outPath, name: outName } = await _nextUserSeqName(dir, ext);
@@ -2773,11 +5237,11 @@ $out | ConvertTo-Json -Compress
   // ── PROCESS SNAPS: save a stitched snap-to-video blob ────────────
   // The renderer encodes everything (canvas + MediaRecorder) and ships
   // the final blob as a single Uint8Array here. We write to
-  // <gallery>/recordings/ alongside live screen records so the rec
-  // room's recordings folder is the one place to find both.
+  // <gallery>/videos/ so processed output is separate from live screen
+  // records (which still go to <gallery>/recordings/).
   ipcMain.handle('process-snaps-save', async (_e, bytes, ext) => {
     try {
-      const dir = path.join(galleryFolderPath(), 'recordings');
+      const dir = path.join(galleryFolderPath(), 'videos');
       fs.mkdirSync(dir, { recursive: true });
       // Whitelist extensions so a bad renderer can't write arbitrary
       // file types via this handler.
@@ -3091,73 +5555,6 @@ $out | ConvertTo-Json -Compress
     });
   });
 
-  // ── §generate ── COMFYUI workflow front-end ───────────────────────
-  // Three responsibilities here:
-  //   1. comfy-list-workflows: scan the configured directory for
-  //      *.json ComfyUI workflow files, return entries with display
-  //      name + kind (image/video/audio) derived from filename prefix.
-  //   2. comfy-load-workflow: read one workflow JSON safely (must live
-  //      inside the configured directory; symlink/path-traversal
-  //      attempts are rejected).
-  //   3. comfy-save-output: write a base64-encoded result back into the
-  //      gallery under generated/<kind>/<USER NNNN>.<ext>.
-  //
-  // The renderer talks to ComfyUI's HTTP API via the comfy-http IPC
-  // below — proxied through main because Electron's renderer origin
-  // can't reach loopback directly under app:// CORS rules.
-  function _comfyWorkflowDir() {
-    // Use the real user profile dir (os.homedir) — `os.userInfo().username`
-    // returns the NT account name, which can differ from the profile-
-    // folder name (Windows truncates long Microsoft-account emails).
-    // Configurable via cfg.comfyWorkflowDir.
-    return path.join(os.homedir(), 'OneDrive', 'Desktop', 'comfyistuff');
-  }
-  async function _comfyResolveDir() {
-    let dir = '';
-    try {
-      const cfg = await readConfig();
-      if (cfg?.comfyWorkflowDir) dir = String(cfg.comfyWorkflowDir);
-    } catch {}
-    if (!dir) dir = _comfyWorkflowDir();
-    return path.resolve(dir);
-  }
-  ipcMain.handle('comfy-list-workflows', async () => {
-    const dir = await _comfyResolveDir();
-    try {
-      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      const out = [];
-      for (const e of entries) {
-        if (!e.isFile()) continue;
-        if (!/\.json$/i.test(e.name)) continue;
-        // Filename convention: <kind>_<rest>.json (image_/video_/audio_).
-        const m = e.name.match(/^(image|video|audio)[_-](.+)\.json$/i);
-        const kind = m ? m[1].toLowerCase() : 'unknown';
-        const slug = m ? m[2] : e.name.replace(/\.json$/i, '');
-        const display = slug.replace(/[_-]+/g, ' ').toUpperCase().trim();
-        out.push({ file: e.name, kind, display });
-      }
-      // Sort: image first, then video, then audio, then unknown; then alpha.
-      const ORDER = { image: 0, video: 1, audio: 2, unknown: 3 };
-      out.sort((a, b) => (ORDER[a.kind] - ORDER[b.kind]) || a.display.localeCompare(b.display));
-      return { ok: true, dir, entries: out };
-    } catch (err) {
-      return { ok: false, dir, entries: [], error: err.message };
-    }
-  });
-  ipcMain.handle('comfy-load-workflow', async (_e, file) => {
-    const dir = await _comfyResolveDir();
-    const target = path.resolve(dir, String(file || ''));
-    // Sandbox to the configured dir — block ".." traversal.
-    if (!target.startsWith(dir + path.sep) && target !== dir) {
-      return { ok: false, error: 'path outside workflow directory' };
-    }
-    try {
-      const raw = await fs.promises.readFile(target, 'utf8');
-      return { ok: true, json: JSON.parse(raw) };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
   // Save a generated output to gallery/generated/<kind>/. bytes is a
   // Uint8Array (Buffer-like) handed back from the renderer; ext is the
   // file extension WITH leading dot ('.png', '.mp4', '.wav', etc.).
@@ -3199,73 +5596,6 @@ $out | ConvertTo-Json -Compress
     } catch (err) {
       return { ok: false, error: err.message };
     }
-  });
-  // Proxy ComfyUI HTTP calls through main. Uses Node's built-in
-  // http/https modules rather than Electron's `net.request` — the
-  // latter goes through Chromium's network stack which has known
-  // CONNECTION_REFUSED quirks with loopback on some Windows
-  // configurations (even when the port is verifiably listening). Node's
-  // http hits the OS socket directly and doesn't have the same issue.
-  // Body may be a string, a Uint8Array, or a plain object (auto-
-  // serialized as JSON).
-  ipcMain.handle('comfy-http', async (_e, opts) => {
-    const method = (opts?.method || 'GET').toUpperCase();
-    const urlStr = String(opts?.url || '');
-    const body   = opts?.body;
-    if (!urlStr || !/^https?:\/\//i.test(urlStr)) return { ok: false, error: 'invalid url' };
-    let parsed;
-    try { parsed = new URL(urlStr); } catch (e) { return { ok: false, error: 'bad url: ' + e.message }; }
-    const lib = parsed.protocol === 'https:' ? require('https') : require('http');
-    const headers = {};
-    let payload = null;
-    if (body != null) {
-      if (typeof body === 'string') {
-        payload = Buffer.from(body, 'utf8');
-      } else if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
-        payload = Buffer.from(body);
-      } else {
-        payload = Buffer.from(JSON.stringify(body), 'utf8');
-        headers['Content-Type'] = 'application/json';
-      }
-      headers['Content-Length'] = String(payload.length);
-    }
-    // Caller-supplied headers win — needed for multipart uploads that set
-    // their own Content-Type with a boundary.
-    if (opts?.headers && typeof opts.headers === 'object') {
-      for (const k of Object.keys(opts.headers)) {
-        headers[k] = String(opts.headers[k]);
-      }
-    }
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
-      const req = lib.request({
-        method,
-        hostname: parsed.hostname,
-        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-        path: parsed.pathname + parsed.search,
-        headers,
-        // Long inactivity timeout (35 min) for video generations; for
-        // the initial socket connect we rely on the OS default.
-        timeout: 35 * 60 * 1000,
-      }, (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          const buf = Buffer.concat(chunks);
-          finish({
-            ok: res.statusCode >= 200 && res.statusCode < 400,
-            status: res.statusCode,
-            bytes: buf,
-          });
-        });
-        res.on('error', (err) => finish({ ok: false, error: err.message }));
-      });
-      req.on('error',   (err) => finish({ ok: false, error: err.code ? `${err.code} ${err.message}` : err.message }));
-      req.on('timeout', () => { try { req.destroy(new Error('timeout')); } catch {} });
-      if (payload) req.write(payload);
-      req.end();
-    });
   });
 
   // ── SCREEN RECORD: stream MediaRecorder chunks to a temp file,

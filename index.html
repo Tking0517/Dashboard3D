@@ -225,61 +225,15 @@
         </div>
 
         <div class="theme-picker" id="theme-picker" data-no-drag="true">
-          <button id="theme-name" class="theme-name theme-name-trigger" type="button" title="Pick a theme" aria-haspopup="true" aria-expanded="false">DEFAULT</button>
-          <button id="theme-auto-btn" class="topbar-btn" type="button" title="Auto-cycle themes every 20s" aria-label="Auto-cycle themes">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9"/>
-              <path d="M12 7 V12 L15.5 14"/>
-            </svg>
-          </button>
-          <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next theme (cycle once)" aria-label="Cycle theme">
+          <button id="theme-cat-cyber" class="theme-cat-btn" type="button" title="Cyber themes">CYBER</button>
+          <button id="theme-cat-matte" class="theme-cat-btn" type="button" title="Matte themes">MATTE</button>
+          <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next colour" aria-label="Next theme colour">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 12 A9 9 0 1 1 12 3"/>
               <polyline points="21,3 21,9 15,9"/>
             </svg>
           </button>
-          <div id="theme-menu" class="theme-menu" hidden>
-            <button type="button" class="theme-menu-item is-active" data-theme-pick="">DEFAULT</button>
-            <div class="theme-menu-section">CYBERPUNK</div>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-neon">NEON</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-moody">MOODY</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-violet">VIOLET</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-dark">DARK</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-runner">RUNNER</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-2077">2077</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-akira">AKIRA</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="cyber-synthwave">SYNTHWAVE</button>
-            <div class="theme-menu-section">PASTEL</div>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-bloom">BLOOM</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-sky">SKY</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-spring">SPRING</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-sunset">SUNSET</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-mist">MIST</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-lilac">LILAC</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-sorbet">SORBET</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="pastel-candy">CANDY</button>
-            <div class="theme-menu-section">MUTED</div>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-clay">CLAY</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-moss">MOSS</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-sand">SAND</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-stone">STONE</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-paper">PAPER</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-eink">EINK</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-sepia">SEPIA</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="earth-charcoal">CHARCOAL</button>
-            <div class="theme-menu-section">RETRO</div>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro">AMBER</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-green">GREEN</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-blue">BLUE</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-white">WHITE</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-red">RED</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-magenta">MAGENTA</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-cyan">CYAN</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-mint">MINT</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-violet">VIOLET</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-gold">GOLD</button>
-            <button type="button" class="theme-menu-item" data-theme-pick="retro-ice">ICE</button>
-          </div>
+          <span id="theme-name" class="theme-name" title="Current theme">DEFAULT</span>
         </div>
 
         <span id="font-name" class="theme-name">DEFAULT</span>
@@ -359,6 +313,22 @@
           </svg>
         </button>
 
+        <button id="power-btn" class="topbar-btn" type="button" title="Power — power off, restart, or sleep this PC" aria-label="Power menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3 V11"/>
+            <path d="M7.5 6.5 A7 7 0 1 0 16.5 6.5"/>
+          </svg>
+        </button>
+
+        <button id="gamemode-btn" class="topbar-btn" type="button" title="Game Mode — launch Steam Big Picture" aria-label="Game Mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 11 H11 M9 9 V13"/>
+            <circle cx="15.5" cy="10.5" r="0.6" fill="currentColor"/>
+            <circle cx="17.5" cy="13" r="0.6" fill="currentColor"/>
+            <path d="M6.5 7 H15 A4.5 4.5 0 0 1 19.5 11.5 L20 15 A2.4 2.4 0 0 1 15.6 16.4 L14 14 H10 L8.4 16.4 A2.4 2.4 0 0 1 4 15 L4.6 11 A4.5 4.5 0 0 1 6.5 7 Z"/>
+          </svg>
+        </button>
+
         <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
           <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
@@ -373,35 +343,6 @@
         </button>
 
         <span id="topbar-div-3" class="topbar-divider" title="Drag to reposition divider"></span>
-
-        <!-- ── Tools group ──────────────────────────────────────────── -->
-        <button id="camera-btn" class="topbar-btn" type="button" title="Webcam" aria-label="Toggle webcam">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7h4l2-2h6l2 2h4v12H3z"/>
-            <circle cx="12" cy="13" r="3.5"/>
-          </svg>
-        </button>
-
-        <button id="terminal-btn" class="topbar-btn" type="button" title="Terminal / diagnostics" aria-label="Toggle terminal">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="4" width="18" height="16" rx="1"/>
-            <path d="M7 9l3 3-3 3"/>
-            <path d="M12 16h6"/>
-          </svg>
-        </button>
-
-        <button id="youtube-btn" class="topbar-btn" type="button" title="YouTube popout" aria-label="Open YouTube popout">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2.5" y="6" width="19" height="12" rx="3"/>
-            <path d="M10 9.5 L15 12 L10 14.5 Z" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-
-        <button id="zen-btn" class="topbar-btn" type="button" title="Enter zen mode" aria-label="Enter zen mode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
-        </button>
 
         <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -446,6 +387,30 @@
                 <div class="profile-pic" id="profile-pic" title="Click to pick a profile picture">
                   <video id="profile-pic-video" class="profile-pic-video" autoplay muted playsinline hidden></video>
                   <img id="profile-pic-img" class="profile-pic-img" alt="" hidden />
+                  <!-- Camera ON/OFF toggle chip — top-right corner.
+                       Visible on profile-pic:hover OR whenever the
+                       camera is live. stopPropagation so clicking it
+                       toggles the webcam without opening the gallery
+                       picker. Icon tints accent (off → click to turn
+                       on) or red (live → click to turn off). -->
+                  <button id="profile-pic-camera-toggle" class="profile-pic-camera-toggle" type="button" title="Turn camera on / off" aria-label="Toggle camera">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <rect x="3" y="6" width="13" height="12" rx="1"/>
+                      <path d="M16 10l5-3v10l-5-3z"/>
+                    </svg>
+                  </button>
+                  <!-- Cycle-cameras button: bottom-right. Visible only
+                       when the live webcam feed is active (.is-live on
+                       parent). Calls cycleCamera() so multi-camera
+                       setups can swap between devices. -->
+                  <button id="profile-pic-cycle" class="profile-pic-cycle" type="button" title="Cycle to next camera" aria-label="Cycle camera">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M3 7h3l1.5-2h9L18 7h3v12H3z"/>
+                      <circle cx="12" cy="13" r="3.5"/>
+                      <path d="M9 13a3 3 0 0 1 5-2.2"/>
+                      <path d="M13 10.5l1.5-.3.3 1.5"/>
+                    </svg>
+                  </button>
                   <svg class="profile-pic-placeholder" viewBox="0 0 12 12" fill="currentColor" shape-rendering="crispEdges" aria-hidden="true">
                     <!-- Face outline (rough circle) -->
                     <rect x="3" y="0" width="6" height="1"/>
@@ -506,6 +471,11 @@
                   <span class="micro-val amber" id="clock-doy">—</span>
                 </div>
               </div>
+
+              <!-- 5-day calendar strip — today + the next four days.
+                   Cells are injected by renderCalendar() in app.js and
+                   rebuilt only when the date rolls over. -->
+              <div class="clock-calendar" id="clock-calendar" aria-label="Five day calendar"></div>
             </div>
             <footer class="panel-footer">
               <span class="footer-label">CHRONO STATUS</span>
@@ -529,11 +499,15 @@
             </header>
             <div class="panel-body weather-body">
               <div class="weather-left">
-                <div class="weather-icon-big" id="weather-icon-big" aria-hidden="true">—</div>
-                <div class="bigvalue">
-                  <span class="caret">&#9656;</span>
-                  <span class="bigvalue-num" id="weather-temp">—</span>
-                  <span class="bigvalue-unit">&deg;F</span>
+                <!-- Icon + temperature share a row (.weather-hero); the
+                     condition / air / moon rows stack below as before. -->
+                <div class="weather-hero">
+                  <div class="weather-icon-big" id="weather-icon-big" aria-hidden="true">—</div>
+                  <div class="bigvalue">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="weather-temp">—</span>
+                    <span class="bigvalue-unit">&deg;F</span>
+                  </div>
                 </div>
                 <div class="weather-cond" id="weather-cond">—</div>
                 <div class="micro-cell weather-air-cell">
@@ -712,7 +686,7 @@
               <button type="button" class="combo-mode-tab" data-mode="browser">BROWSER</button>
               <button type="button" class="combo-mode-tab" data-mode="tasks">TASKS</button>
               <button type="button" class="combo-mode-tab" data-mode="music">MUSIC</button>
-              <button type="button" class="combo-mode-tab" data-mode="generate">GENERATE</button>
+              <button type="button" class="combo-mode-tab" data-mode="stream">STREAM</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -727,9 +701,26 @@
               </div>
 
               <!-- CHAT pane -->
-              <div class="combo-pane combo-pane-chat">
+              <div class="combo-pane combo-pane-chat" data-chat-source="ollama">
                 <div class="chat-toolbar">
-                  <select id="chat-provider" class="chat-select chat-select-narrow">
+                  <!-- SOURCE picker: which chat stream the pane displays.
+                       OLLAMA/AZURE are LLM providers (existing); DISCORD
+                       mirrors DM/mention notifications from the STREAM
+                       tab's Discord BrowserView; ALL is a merged view
+                       (for when more sources land). The provider/model
+                       dropdowns hide for non-LLM sources via the
+                       [data-chat-source=…] selector. -->
+                  <select id="chat-source" class="chat-select chat-select-narrow" title="Chat source">
+                    <option value="ollama">OLLAMA</option>
+                    <option value="azure">AZURE</option>
+                    <option value="discord">DISCORD</option>
+                    <option value="facebook">FACEBOOK</option>
+                    <option value="all">ALL</option>
+                  </select>
+                  <!-- Hidden legacy provider select — kept so existing
+                       chat.js logic that reads its value still works.
+                       Mirrored from #chat-source by chat init code. -->
+                  <select id="chat-provider" class="chat-select chat-select-narrow" hidden>
                     <option value="ollama">OLLAMA</option>
                     <option value="azure">AZURE</option>
                   </select>
@@ -737,6 +728,16 @@
                     <option value="">— LOADING —</option>
                   </select>
                   <button id="chat-auto" class="chat-clear chat-auto" type="button" title="Auto-config Azure via az CLI">AUTO</button>
+                  <!-- Discord-only debug + sync controls. Visible when
+                       chat-source is 'discord' or 'all'.
+                         FETCH — manual re-sweep of the embed's current DOM
+                                 (whatever channel/DM is open in Discord).
+                         TEST  — fires __dash3dSelfTest through the bridge
+                                 → main relay → renderer to verify pipeline.
+                         DEV   — opens DevTools on the Discord BrowserView. -->
+                  <button id="chat-discord-fetch" class="chat-clear chat-discord-debug" type="button" title="Re-sweep the Discord embed's DOM for messages now">FETCH</button>
+                  <button id="chat-discord-test" class="chat-clear chat-discord-debug" type="button" title="Fire a pipeline self-test through the Discord embed">TEST</button>
+                  <button id="chat-discord-devtools" class="chat-clear chat-discord-debug" type="button" title="Open DevTools on the Discord BrowserView">DEV</button>
                   <button id="chat-clear" class="chat-clear" type="button" title="Clear chat">×</button>
                 </div>
                 <div class="chat-azure-config" id="chat-azure-config" hidden>
@@ -811,6 +812,7 @@
                   <button type="button" class="explore-tab is-active" data-explore-tab-btn="gallery">GALLERY</button>
                   <button type="button" class="explore-tab" data-explore-tab-btn="docs">DOCS</button>
                   <button type="button" class="explore-tab" data-explore-tab-btn="downloads">DOWNLOADS</button>
+                  <button type="button" class="explore-tab" data-explore-tab-btn="music">AUDIO</button>
                 </div>
                 <div class="explore-section" data-explore="gallery">
                   <header class="explore-section-head">
@@ -848,6 +850,18 @@
                   </header>
                   <ul class="explore-list" id="explore-downloads-list"></ul>
                 </div>
+                <div class="explore-section" data-explore="music">
+                  <header class="explore-section-head">
+                    <span class="explore-section-title">AUDIO</span>
+                    <button type="button" class="explore-action" data-explore-up="music"      title="Up">↑</button>
+                    <span class="explore-section-path" id="explore-music-path">—</span>
+                    <button type="button" class="explore-action" data-explore-mkdir="music"   title="New folder">+</button>
+                    <button type="button" class="explore-action" data-explore-delete="music"  title="Delete selected (→ Recycle Bin)">🗑</button>
+                    <button type="button" class="explore-action" data-explore-open="music"    title="Open in Explorer">⌂</button>
+                    <button type="button" class="explore-action" data-explore-refresh="music" title="Refresh">↻</button>
+                  </header>
+                  <ul class="explore-list" id="explore-music-list"></ul>
+                </div>
                 <!-- Inline media viewer for the EXPLORE pane.
                      Covers the file list when active; closes via × or
                      Esc. Video element keeps native controls so seek /
@@ -869,7 +883,7 @@
               <!-- REC ROOM pane (screen mirror + snap + screen-record studio) -->
               <div class="combo-pane combo-pane-visualizer">
                 <div class="visualizer-player-wrap">
-                  <video id="visualizer-video" class="visualizer-video" controls preload="metadata"></video>
+                  <video id="visualizer-video" class="visualizer-video" preload="metadata"></video>
                   <!-- Inline still-image viewer for snap (.jpg) clicks.
                        Stays hidden until the wrap gets the .is-still class,
                        so it never steals from video/mirror playback. -->
@@ -893,6 +907,31 @@
                       <span class="visualizer-crop-handle is-h-sw" data-handle="sw"></span>
                       <span class="visualizer-crop-handle is-h-w"  data-handle="w"></span>
                     </div>
+                  </div>
+                  <!-- Themed playback controls — replaces the native <video>
+                       control bar so seek / time / play match the dashboard.
+                       Shown only for seekable file playback (JS hides it
+                       during the live mirror + still-image view). -->
+                  <div class="visualizer-pc" id="visualizer-pc" hidden>
+                    <button type="button" class="visualizer-pc-btn" id="vis-pc-play" title="Play / pause">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
+                      <svg viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+                    </button>
+                    <span class="visualizer-pc-time" id="vis-pc-cur">0:00</span>
+                    <div class="visualizer-pc-seek" id="vis-pc-seek" role="slider" aria-label="Seek" tabindex="0">
+                      <div class="visualizer-pc-buffered" id="vis-pc-buffered"></div>
+                      <div class="visualizer-pc-fill" id="vis-pc-fill"></div>
+                      <div class="visualizer-pc-knob" id="vis-pc-knob"></div>
+                    </div>
+                    <span class="visualizer-pc-time" id="vis-pc-dur">0:00</span>
+                    <button type="button" class="visualizer-pc-btn" id="vis-pc-mute" title="Mute">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9 H8 L13 5 V19 L8 15 H4 Z" fill="currentColor" stroke="none"/><path d="M16 9 Q18 12 16 15"/><path d="M19 7 Q22 12 19 17"/></svg>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M4 9 H8 L13 5 V19 L8 15 H4 Z" fill="currentColor" stroke="none"/><path d="M16 9 L22 15"/><path d="M22 9 L16 15"/></svg>
+                    </button>
+                    <input type="range" class="visualizer-pc-vol" id="vis-pc-vol" min="0" max="100" value="100" title="Volume">
+                    <button type="button" class="visualizer-pc-btn" id="vis-pc-fs" title="Fullscreen">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15"/></svg>
+                    </button>
                   </div>
                 </div>
                 <!-- EDIT mode pane. Hidden until user clicks EDIT on a video.
@@ -1197,7 +1236,7 @@
                       <div class="visualizer-process-radios" data-group="format">
                         <button type="button" data-val="mp4" class="is-active">MP4</button>
                         <button type="button" data-val="mkv">MKV</button>
-                        <button type="button" data-val="webm">WEBM</button>
+                        <button type="button" data-val="hevc">HEVC</button>
                       </div>
                     </div>
                     <div class="visualizer-process-row">
@@ -1554,33 +1593,20 @@
                   <span class="bgm-now" id="bgm-now">— STOPPED —</span>
                 </div>
                 <div class="bgm-controls">
-                  <div class="bgm-row">
-                    <span class="bgm-label">GENRE</span>
-                    <div class="bgm-genres" id="bgm-genres">
-                      <button type="button" class="bgm-genre bgm-genre-favs" data-bgm-genre="favs">♥ FAVS</button>
-                      <button type="button" class="bgm-genre is-active" data-bgm-genre="plundercore">PLUNDER CORE</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="vaporwave">VAPORWAVE</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="synthwave">SYNTHWAVE</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="lofi">LO-FI</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="darkambient">DARK AMBIENT</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="eightbit">8 BIT</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="smoothjazz">SMOOTH JAZZ</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="daft">DAFT</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="soundtrack">SOUNDTRACK</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="cyberpunk">CYBERPUNK</button>
-                      <button type="button" class="bgm-genre" data-bgm-genre="taverncore">TAVERNCORE</button>
-                    </div>
+                  <div class="bgm-row bgm-viewbar">
+                    <button type="button" id="bgm-view-library" class="bgm-view-tab is-active" data-bgm-view="library">LIBRARY</button>
+                    <button type="button" id="bgm-view-playlists" class="bgm-view-tab" data-bgm-view="playlists">PLAYLISTS</button>
+                    <span class="bgm-viewbar-spacer"></span>
+                    <button type="button" id="bgm-refresh-btn" class="bgm-icon-btn" title="Rescan music folder" aria-label="Rescan music folder">⟳</button>
+                    <button type="button" id="bgm-browse-btn" class="bgm-text-btn" title="Open the music folder in Explorer">BROWSE</button>
                   </div>
-                  <div class="bgm-row">
-                    <span class="bgm-label">TRACK</span>
-                    <div class="bgm-tracks" id="bgm-tracks"></div>
-                  </div>
+                  <div class="bgm-list" id="bgm-list"></div>
                   <div class="bgm-row">
                     <span class="bgm-label">VOL</span>
                     <button type="button" id="bgm-vol-down" class="bgm-icon-btn" title="Volume down (-5%)" aria-label="Volume down">−</button>
-                    <input type="range" id="bgm-volume" class="bgm-volume" min="0" max="100" step="1" value="35">
+                    <input type="range" id="bgm-volume" class="bgm-volume" min="0" max="100" step="1" value="50">
                     <button type="button" id="bgm-vol-up" class="bgm-icon-btn" title="Volume up (+5%)" aria-label="Volume up">+</button>
-                    <span id="bgm-volume-val" class="bgm-volume-val">35%</span>
+                    <span id="bgm-volume-val" class="bgm-volume-val">50%</span>
                   </div>
                   <div class="bgm-row bgm-transport-row">
                     <button type="button" id="bgm-prev-btn" class="bgm-transport-btn" title="Previous track" aria-label="Previous track">
@@ -1596,64 +1622,39 @@
                     <button type="button" id="bgm-next-btn" class="bgm-transport-btn" title="Next track" aria-label="Next track">
                       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5 L15 12 L3 19 Z"/><rect x="17" y="5" width="2" height="14"/></svg>
                     </button>
-                    <button type="button" id="bgm-fav-btn" class="bgm-transport-btn bgm-transport-fav" title="Toggle favorite" aria-label="Toggle favorite">
-                      <svg class="bgm-fav-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21 C 6 16 3 12 3 8 A 4.5 4.5 0 0 1 12 6 A 4.5 4.5 0 0 1 21 8 C 21 12 18 16 12 21 Z"/></svg>
-                      <svg class="bgm-fav-filled" viewBox="0 0 24 24" fill="currentColor" hidden><path d="M12 21 C 6 16 3 12 3 8 A 4.5 4.5 0 0 1 12 6 A 4.5 4.5 0 0 1 21 8 C 21 12 18 16 12 21 Z"/></svg>
-                    </button>
                   </div>
                 </div>
-                <!-- Output-level meter — segmented EQ bars matching the
-                     system audio visualizer style (audio-colour gradient,
-                     red peak markers, glass-floor reflection). Source is
-                     the BGM master-bus AnalyserNode, not the system
-                     loopback, so it shows just what we're synthesizing. -->
+                <!-- Output-level meter — driven by the music player's
+                     master AnalyserNode. Segmented EQ bars on most themes,
+                     a flat axis-framed line chart under e-ink. -->
                 <canvas id="bgm-meter" class="bgm-meter" width="320" height="120"></canvas>
               </div>
 
-              <!-- GENERATE pane — ComfyUI front-end. One tab per workflow
-                   JSON in the configured workflow directory. Each tab
-                   surfaces the workflow's extracted prompt + seed +
-                   image-input fields and submits via /prompt. -->
-              <div class="combo-pane combo-pane-generate">
-                <div class="gen-head">
-                  <span class="gen-now" id="gen-now">— READY —</span>
-                  <span class="gen-status" id="gen-status">CHECKING COMFYUI…</span>
-                  <button type="button" id="gen-cancel-btn" class="gen-action gen-action-cancel" title="Interrupt the current generation" disabled>✕ CANCEL</button>
-                  <button type="button" id="gen-flush-btn"  class="gen-action" title="Unload models and free VRAM/RAM">⟲ FLUSH</button>
-                  <button type="button" id="gen-refresh-btn" class="gen-action" title="Rescan workflow folder">↻</button>
+
+              <!-- STREAM pane — embedded media services (Discord first;
+                   the inner stream-tabs strip will gain Twitch/YouTube/
+                   etc. sub-tabs later). Each sub-tab maps to a single
+                   BrowserView spawned by main.js on demand. -->
+              <div class="combo-pane combo-pane-stream">
+                <div class="stream-tabs" id="stream-tabs">
+                  <button type="button" class="stream-tab is-active" data-stream-tab="discord">
+                    <!-- Discord game-pad silhouette in currentColor so
+                         it tints with the dashboard accent. -->
+                    <svg class="stream-tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="currentColor" d="M19.2 4.6a16 16 0 0 0-4.1-1.3l-.2.4a14.7 14.7 0 0 0-4.6 0l-.2-.4a16 16 0 0 0-4.1 1.3C2.4 8.2 1.7 11.7 2 15.2a16.2 16.2 0 0 0 4.9 2.5l.4-.6a10.5 10.5 0 0 1-1.7-.8l.4-.3a11.4 11.4 0 0 0 9.9 0l.4.3a10.5 10.5 0 0 1-1.7.8l.4.6a16.2 16.2 0 0 0 4.9-2.5c.4-3.9-.5-7.4-2.7-10.6ZM8.7 13.4c-1 0-1.8-.9-1.8-2 0-1.2.8-2.1 1.8-2.1s1.8 1 1.8 2.1c0 1.1-.8 2-1.8 2Zm6.6 0c-1 0-1.8-.9-1.8-2 0-1.2.8-2.1 1.8-2.1s1.8 1 1.8 2.1c0 1.1-.8 2-1.8 2Z"/>
+                    </svg>
+                    <span>DISCORD</span>
+                  </button>
+                  <button type="button" class="stream-tab" data-stream-tab="facebook">
+                    <!-- Stylized 'f' silhouette in currentColor. -->
+                    <svg class="stream-tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="currentColor" d="M13.5 21v-8h2.6l.4-3h-3V8.1c0-.9.3-1.5 1.5-1.5H17V3.9c-.3 0-1.4-.1-2.5-.1-2.5 0-4.2 1.5-4.2 4.2V10H7.5v3h2.8v8h3.2Z"/>
+                    </svg>
+                    <span>FACEBOOK</span>
+                  </button>
                 </div>
-                <div class="gen-tabs" id="gen-tabs"></div>
-                <div class="gen-body" id="gen-body">
-                  <div class="gen-empty" id="gen-empty">NO WORKFLOWS FOUND — DROP COMFYUI JSON FILES INTO THE CONFIGURED FOLDER AND HIT ↻</div>
-                </div>
-                <div class="gen-output" id="gen-output" hidden>
-                  <div class="gen-output-meta">
-                    <span class="gen-output-label">LAST OUTPUT</span>
-                    <span id="gen-output-name" class="gen-output-name"></span>
-                  </div>
-                  <div class="gen-output-main">
-                    <img    id="gen-output-img"   class="gen-output-img"   alt="" hidden>
-                    <video  id="gen-output-video" class="gen-output-video" controls preload="metadata" hidden></video>
-                    <!-- Native audio element is the playback engine but
-                         stays invisible; the themed widget below owns the
-                         UI (play, scrub, time, fluid waveform). -->
-                    <audio  id="gen-output-audio" class="gen-output-audio" preload="metadata" hidden></audio>
-                    <div class="gen-audio-player" id="gen-audio-player" hidden>
-                      <canvas class="gen-audio-viz" id="gen-audio-viz" width="800" height="120"></canvas>
-                      <div class="gen-audio-controls">
-                        <button type="button" class="gen-audio-play" id="gen-audio-play" title="Play / pause">
-                          <svg class="gen-audio-icon-play"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
-                          <svg class="gen-audio-icon-pause" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
-                        </button>
-                        <div class="gen-audio-bar" id="gen-audio-bar">
-                          <div class="gen-audio-progress" id="gen-audio-progress"></div>
-                          <div class="gen-audio-knob" id="gen-audio-knob"></div>
-                        </div>
-                        <span class="gen-audio-time" id="gen-audio-time">0:00 / 0:00</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="gen-output-thumbs" id="gen-output-thumbs"></div>
+                <div class="stream-stage" id="stream-stage" data-stream-tab="discord">
+                  <div class="stream-status" id="stream-status">CONNECTING TO DISCORD…</div>
                 </div>
               </div>
 
@@ -1743,10 +1744,38 @@
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu1-bar"></div></div>
                 </div>
+
+                <!-- Fans subsection — populated from the same LHM
+                     backend the dashboard spawns hidden. List shows
+                     detected fans with live RPM + PWM%. Empty until
+                     the sensor backend reports. -->
+                <div class="thermal-fans" id="thermal-fans">
+                  <div class="thermal-fans-head">
+                    <span class="micro-label">FANS</span>
+                    <span class="thermal-fans-tag" id="fans-status-tag">—</span>
+                  </div>
+                  <!-- Power/thermal profile selector — only shown on the
+                       Linux appliance, where the kernel exposes the ACPI
+                       platform profile. Populated by initThermalProfile(). -->
+                  <div class="thermal-profile" id="thermal-profile" hidden>
+                    <span class="micro-label">PROFILE</span>
+                    <div class="thermal-profile-btns" id="thermal-profile-btns"></div>
+                  </div>
+                  <!-- Hardware/thermal sysfs diagnostic — dumps what the
+                       Linux appliance actually exposes for fan control. -->
+                  <div class="thermal-hwdiag" id="thermal-hwdiag" hidden>
+                    <button type="button" class="thermal-hwdiag-btn" id="hwdiag-btn">HW DIAG</button>
+                    <pre class="thermal-hwdiag-out" id="hwdiag-out" hidden></pre>
+                  </div>
+                  <ul class="thermal-fans-list" id="fans-list">
+                    <li class="thermal-fans-empty" id="fans-empty">SENSOR BACKEND STARTING…</li>
+                  </ul>
+                </div>
               </div>
               <footer class="panel-footer">
                 <span class="footer-label">THERMAL STATUS</span>
                 <span class="footer-readout" id="thermal-status">SCANNING…</span>
+                <button id="fans-edit-btn" class="thermal-curve-btn" type="button" title="Open the fan curve editor">CURVE</button>
               </footer>
             </section>
           </div>
@@ -1865,6 +1894,145 @@
           </section>
 
         </div>
+      </div>
+    </div>
+
+    <!-- Fan-curve editor overlay. Opens from #fans-edit-btn. Picks a
+         fan, picks a temp source, drags points on an SVG plot
+         (0–100°C × 0–100%), saves to fan-curves.json. Stage 1 is
+         read-only — curves are designed here but not yet applied. -->
+    <div id="fans-editor-overlay" class="fans-editor-overlay" hidden>
+      <div class="fans-editor-card">
+        <header class="fans-editor-head">
+          <span class="fans-editor-title">FAN CURVE EDITOR</span>
+          <span class="fans-editor-code">STAGE 1 · DESIGNER</span>
+          <button id="fans-editor-close-btn" class="fans-editor-close" type="button" title="Close">×</button>
+        </header>
+        <div class="fans-editor-body">
+          <div class="fans-editor-row">
+            <label class="fans-editor-label" for="fans-editor-fan">GROUP</label>
+            <select id="fans-editor-fan" class="fans-editor-select"></select>
+          </div>
+          <div class="fans-editor-row">
+            <label class="fans-editor-label" for="fans-editor-temp">TEMP SOURCE</label>
+            <select id="fans-editor-temp" class="fans-editor-select"></select>
+          </div>
+          <div class="fans-editor-readout">
+            <span class="fans-editor-readout-pair"><span class="fans-editor-readout-label">CURRENT TEMP</span><span class="fans-editor-readout-val" id="fans-editor-cur-temp">—</span></span>
+            <span class="fans-editor-readout-pair"><span class="fans-editor-readout-label">CURRENT RPM</span><span class="fans-editor-readout-val" id="fans-editor-cur-rpm">—</span></span>
+            <span class="fans-editor-readout-pair"><span class="fans-editor-readout-label">CURVE TARGET</span><span class="fans-editor-readout-val" id="fans-editor-target-pct">—</span></span>
+          </div>
+          <div class="fans-editor-plot-wrap">
+            <svg id="fans-editor-plot" class="fans-editor-plot" viewBox="0 0 400 240" preserveAspectRatio="none">
+              <!-- Static gridlines drawn once; points + path are
+                   re-rendered each curve change. -->
+              <g class="fans-editor-grid" id="fans-editor-grid"></g>
+              <!-- Live temp indicator (vertical line at current temp). -->
+              <line id="fans-editor-temp-line" class="fans-editor-temp-line" x1="0" y1="0" x2="0" y2="240" hidden></line>
+              <!-- Curve fill + stroke. -->
+              <path id="fans-editor-fill" class="fans-editor-fill" d=""></path>
+              <path id="fans-editor-stroke" class="fans-editor-stroke" d=""></path>
+              <!-- Control points (drag handles). Generated by renderer. -->
+              <g id="fans-editor-points"></g>
+            </svg>
+            <div class="fans-editor-axis fans-editor-axis-x"><span>0°C</span><span>50°C</span><span>100°C</span></div>
+            <div class="fans-editor-axis fans-editor-axis-y"><span>100%</span><span>50%</span><span>0%</span></div>
+          </div>
+          <p class="fans-editor-hint">DRAG POINTS · DOUBLE-CLICK PLOT TO ADD · RIGHT-CLICK POINT TO REMOVE</p>
+        </div>
+        <footer class="fans-editor-foot">
+          <button id="fans-editor-reset-btn" type="button" class="fans-editor-btn">RESET DEFAULT</button>
+          <button id="fans-editor-delete-btn" type="button" class="fans-editor-btn fans-editor-btn-danger">DELETE</button>
+          <span class="fans-editor-status" id="fans-editor-status"></span>
+          <button id="fans-editor-save-btn" type="button" class="fans-editor-btn fans-editor-btn-primary">SAVE CURVE</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- System trim. Opens from the topbar #trim-btn. Lists running,
+         non-essential Windows services; the selected ones are stopped
+         and set to Manual startup (one UAC prompt). RESTORE reverts. -->
+    <div id="trim-overlay" class="trim-overlay" hidden>
+      <div class="trim-card">
+        <header class="trim-head">
+          <span class="trim-title">SYSTEM TRIM</span>
+          <span class="trim-code" id="trim-code">SERVICE SWEEP</span>
+          <button id="trim-close-btn" class="trim-close" type="button" title="Close">×</button>
+        </header>
+        <div class="trim-body">
+          <p class="trim-intro">Stops the selected services now and sets them to <b>Manual</b> startup so they don't auto-start at next boot. Critical services — login, networking, audio/video, security, and this app — are never listed. Reversible: hit RESTORE LAST to put everything back.</p>
+          <div class="trim-toolbar">
+            <button type="button" class="trim-tool-btn" id="trim-rescan-btn">RESCAN</button>
+            <button type="button" class="trim-tool-btn" id="trim-sel-thirdparty">SELECT 3RD-PARTY</button>
+            <button type="button" class="trim-tool-btn" id="trim-sel-none">SELECT NONE</button>
+            <span class="trim-count" id="trim-count"></span>
+          </div>
+          <div class="trim-list" id="trim-list"></div>
+          <p class="trim-empty" id="trim-empty" hidden>NO NON-ESSENTIAL SERVICES RUNNING · NOTHING TO TRIM</p>
+        </div>
+        <footer class="trim-foot">
+          <button id="trim-restore-btn" type="button" class="trim-btn">RESTORE LAST</button>
+          <span class="trim-status" id="trim-status"></span>
+          <button id="trim-apply-btn" type="button" class="trim-btn trim-btn-primary">STOP SELECTED</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- App launcher. Opens from the topbar #launcher-btn. Grid of pinned
+         programs; click to launch, ADD APP to pin one via a file dialog.
+         The pinned list persists in config (cfg.launcherApps). Built for
+         the appliance build where the dashboard is the shell. -->
+    <div id="launcher-overlay" class="lx-overlay" hidden>
+      <div class="lx-card">
+        <header class="lx-head">
+          <span class="lx-title">APP LAUNCHER</span>
+          <span class="lx-code">LAUNCH</span>
+          <button id="launcher-close-btn" class="lx-close" type="button" title="Close">×</button>
+        </header>
+        <div class="lx-body">
+          <div class="lx-grid" id="launcher-grid"></div>
+          <p class="lx-empty" id="launcher-empty" hidden>NO APPS PINNED · USE ADD APP TO PIN A PROGRAM</p>
+        </div>
+        <footer class="lx-foot">
+          <span class="lx-status" id="launcher-status"></span>
+          <button id="launcher-add-btn" type="button" class="lx-btn lx-btn-primary">ADD APP</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Power menu. Opens from the topbar #power-btn. Power off / restart
+         go through main's system-power handler (native confirm); sleep
+         reuses the existing system-sleep handler. -->
+    <div id="power-overlay" class="lx-overlay" hidden>
+      <div class="lx-card lx-card-power">
+        <header class="lx-head">
+          <span class="lx-title">POWER</span>
+          <span class="lx-code">SYSTEM</span>
+          <button id="power-close-btn" class="lx-close" type="button" title="Close">×</button>
+        </header>
+        <div class="lx-power-grid">
+          <button class="lx-power-btn" id="power-off-btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3 V12"/>
+              <path d="M6.5 7 A8 8 0 1 0 17.5 7"/>
+            </svg>
+            <span>POWER OFF</span>
+          </button>
+          <button class="lx-power-btn" id="power-restart-btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 11 A8 8 0 1 0 19 16"/>
+              <path d="M20 5 V11 H14"/>
+            </svg>
+            <span>RESTART</span>
+          </button>
+          <button class="lx-power-btn" id="power-sleep-btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 13 A9 9 0 1 1 11 3 A7 7 0 0 0 21 13 Z"/>
+            </svg>
+            <span>SLEEP</span>
+          </button>
+        </div>
+        <p class="lx-power-status" id="power-status"></p>
       </div>
     </div>
 

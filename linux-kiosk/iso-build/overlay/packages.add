@@ -1,0 +1,55 @@
+# Extra packages baked into the Dashboard3D appliance ISO.
+# container-build.sh strips comments/blank lines and appends the rest to
+# the releng profile's packages.x86_64.
+
+# --- compositor / graphics (open stack — drives AMD, Intel, and NVIDIA
+#     via nouveau/NVK; the safest default for booting an unknown laptop) ---
+gamescope
+mesa
+lib32-mesa
+vulkan-icd-loader
+lib32-vulkan-icd-loader
+vulkan-radeon
+lib32-vulkan-radeon
+vulkan-intel
+lib32-vulkan-intel
+vulkan-nouveau
+lib32-vulkan-nouveau
+
+# --- NVIDIA driver (for the dGPU in Game Mode) ---
+# nvidia-open = NVIDIA's open kernel modules (Arch's current default;
+# fully supports Turing/Ampere+ incl. the RTX 3080). Blacklisted from
+# auto-load (see modprobe.d/dashboard3d.conf) so the dashboard boot stays
+# on the AMD APU exactly as before; Game Mode modprobes it on demand.
+nvidia-open
+nvidia-utils
+lib32-nvidia-utils
+
+# --- Electron runtime libraries (the packaged app links these) ---
+gtk3
+nss
+alsa-lib
+libnotify
+libxss
+libxtst
+at-spi2-core
+
+# --- audio ---
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+
+# --- network ---
+networkmanager
+
+# --- gaming ---
+steam
+gamemode
+lib32-gamemode
+mangohud
+lib32-mangohud
+
+# --- fonts ---
+noto-fonts
+ttf-dejavu

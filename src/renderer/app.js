@@ -1,4 +1,6 @@
 import './styles.css';
+import { initTrim } from './features/trim.js';
+import { initLauncher } from './features/launcher.js';
 
 // ── Global rAF throttle ──────────────────────────────────────────────
 // Cap renderer animation callbacks at 60 Hz regardless of monitor refresh
@@ -958,6 +960,39 @@ function paintZenTime(text) {
   }
 }
 
+// 5-day calendar strip — today + the next four days. Rebuilt only when
+// the calendar date rolls over (cheap day-key compare), not every tick.
+const clockCalEl = document.querySelector('#clock-calendar');
+const calWdFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+const calMoFmt = new Intl.DateTimeFormat(undefined, { month: 'short' });
+let _calDayKey = '';
+function renderCalendar(now) {
+  if (!clockCalEl) return;
+  const key = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  if (key === _calDayKey) return;
+  _calDayKey = key;
+  clockCalEl.replaceChildren();
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+    const cell = document.createElement('div');
+    cell.className = 'cal-day';
+    if (i === 0) cell.classList.add('is-today');
+    const wd = d.getDay();
+    if (wd === 0 || wd === 6) cell.classList.add('is-weekend');
+    const wdEl = document.createElement('span');
+    wdEl.className = 'cal-day-wd';
+    wdEl.textContent = calWdFmt.format(d).toUpperCase();
+    const numEl = document.createElement('span');
+    numEl.className = 'cal-day-num';
+    numEl.textContent = String(d.getDate());
+    const moEl = document.createElement('span');
+    moEl.className = 'cal-day-mo';
+    moEl.textContent = calMoFmt.format(d).toUpperCase();
+    cell.append(wdEl, numEl, moEl);
+    clockCalEl.appendChild(cell);
+  }
+}
+
 function tickClock() {
   const now = new Date();
   const { hms: lhms, ampm: lap } = splitTime(localTimeFmt, now);
@@ -968,6 +1003,7 @@ function tickClock() {
   clockDoyEl.textContent    = doy;
   clockDoyHdrEl.textContent = doy;
   clockIdentEl.textContent  = doy;
+  renderCalendar(now);
   // Mirror to the zen overlay (visible only while idle). Mirror element
   // tracks the visible AM/PM text so the invisible spacer width matches
   // exactly, keeping the time pinned to viewport center. Each character of
@@ -1601,6 +1637,117 @@ function buildZenGpuGrid(count) {
   }
 }
 
+// ── Matte grid charts ───────────────────────────────────────────
+// Under a matte-* theme the DOM .core-bar / .gpu-bar grids (CPU cores,
+// memory history, GPU util, scratch drives) are hidden by CSS and this
+// draws a flat line chart over the same container instead — the same
+// treatment the network / drive sparklines and the audio visualizers
+// get. Values are read straight off each fill's --bar-pct, so one
+// function serves every grid. Under any non-matte theme it removes its
+// canvas and is otherwise a no-op.
+const _gridChartCanvas = new WeakMap(); // container → overlay canvas
+function _einkHexRgb(s) {
+  let h = (s || '').trim();
+  if (h.startsWith('#')) h = h.slice(1);
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return null;
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+// Value-coloured vertical gradient for e-ink line charts. Bottom (low
+// values) reads washed green, mid washed yellow, top (high values)
+// washed red — a colored-e-paper heat scale. Reads the live theme
+// tokens so it tracks the active e-ink variant. `alpha` < 1 gives the
+// faint translucent version used for the area fill under the trace.
+function einkChartGradient(ctx, topY, botY, alpha) {
+  const cs  = getComputedStyle(document.documentElement);
+  const rgb = (name, fb) => _einkHexRgb(cs.getPropertyValue(name).trim()) || fb;
+  const ok    = rgb('--ok',    [86, 113, 75]);
+  const amber = rgb('--amber', [188, 164, 78]);
+  const red   = rgb('--red',   [143, 78, 68]);
+  const a   = alpha == null ? 1 : alpha;
+  const css = (c) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+  const grad = ctx.createLinearGradient(0, topY, 0, botY);
+  // Biased so red occupies the upper band and green only the lower
+  // quarter — otherwise an idle system (all low values) never shows any
+  // red at all. Roughly: >65% reads red, 30–65% yellow, <30% green.
+  grad.addColorStop(0,    css(red));    // top of plot = high value
+  grad.addColorStop(0.35, css(red));
+  grad.addColorStop(0.62, css(amber));
+  grad.addColorStop(1,    css(ok));     // bottom of plot = low value
+  return grad;
+}
+function renderGridLine(container) {
+  if (!container) return;
+  const eink = (document.documentElement.getAttribute('data-theme') || '').startsWith('matte');
+  let canvas = _gridChartCanvas.get(container);
+  if (canvas && !canvas.isConnected) canvas = null; // wiped by an innerHTML rebuild
+  if (!eink) {
+    if (canvas) { canvas.remove(); _gridChartCanvas.delete(container); }
+    return;
+  }
+  let values = [...container.querySelectorAll('.core-bar-fill, .gpu-bar-fill')]
+    .map((f) => parseFloat(f.style.getPropertyValue('--bar-pct')) || 0);
+  if (values.length === 0) return;
+  if (values.length === 1) values = [values[0], values[0]]; // single bar → flat line
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.className = 'grid-line-canvas';
+    container.appendChild(canvas);
+    _gridChartCanvas.set(container, canvas);
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(0, container.clientWidth);
+  const h = Math.max(0, container.clientHeight);
+  if (w <= 0 || h <= 0) return;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width  = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const rgb = _einkHexRgb(getComputedStyle(container).getPropertyValue('--accent')) || [180, 184, 188];
+  const [r, g, b] = rgb;
+  const frame = drawEinkChartFrame(ctx, w, h, rgb, [
+    { frac: 0,   text: '0'   },
+    { frac: 0.5, text: '50'  },
+    { frac: 1,   text: '100' },
+  ]);
+  const n = values.length;
+  const baseY = frame.py + frame.ph;
+  const xOf = (i) => frame.px + (n > 1 ? (i / (n - 1)) * frame.pw : 0);
+  const yOf = (v) => frame.py + frame.ph * (1 - Math.min(100, Math.max(0, v)) / 100);
+  // Faint solid fill under the trace — green→yellow→red by height.
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), baseY);
+  for (let i = 0; i < n; i++) ctx.lineTo(xOf(i), yOf(values[i]));
+  ctx.lineTo(xOf(n - 1), baseY);
+  ctx.closePath();
+  ctx.fillStyle = einkChartGradient(ctx, frame.py, baseY, 0.16);
+  ctx.fill();
+  // The trace — the value gradient colours each point by its level.
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = xOf(i); const y = yOf(values[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = einkChartGradient(ctx, frame.py, baseY, 1);
+  ctx.lineWidth = 1.25;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+}
+// Slow shared sweep — the grids update every ~2s and their values live
+// in the DOM, so a 500ms repaint keeps every chart current and picks up
+// theme switches (into and out of e-ink) without hooking each grid's
+// own paint path.
+setInterval(() => {
+  for (const el of [coreGridEl, memHistGridEl, gpuGridEl, scratchGridEl,
+                    zenCoreGridEl, zenMemGridEl, zenGpuGridEl]) {
+    renderGridLine(el);
+  }
+}, 500);
+
 function paintGpuPanel(gpus) {
   const list = Array.isArray(gpus) ? gpus : [];
   if (gpuFillEls.length !== list.length) buildGpuGrid(list);
@@ -1638,37 +1785,57 @@ async function refreshTemps() {
   try {
     const t = await window.dash.tempsInfo();
     paintGpuPanel(t.gpus);
-    // Detect ACPI thermal-zone "stuck reading" — many Intel desktop
-    // BIOSes implement MSAcpi_ThermalZoneTemperature as a literal
-    // constant (the chip's TjMax minus an arbitrary delta, or just a
-    // hardcoded value) instead of an actual sensor query. Symptom: the
-    // number never moves regardless of CPU activity. We keep a short
-    // history of recent ACPI readings; if the last 4 are all identical
-    // (~40 s of zero variation at the current 10 s poll cadence), we
-    // assume the sensor is broken and switch to a CPU-load-derived
-    // estimate, same approach as the wattage fallback above.
-    let displayTemp = t.cpu;
+    // LHM (when running) gives us accurate sensor data via its kernel
+    // driver. Prefer it over systeminformation / WMI / RAPL, all of
+    // which have known failure modes on Windows (negative temps from
+    // load-based fallbacks, stuck ACPI zones, RAPL silenced after
+    // Turbo Boost is disabled, etc.). The fans IIFE writes the latest
+    // snapshot to window._lhmSnapshot on every poll.
+    const lhm = window._lhmSnapshot;
+    let lhmCpuTemp = null;
+    if (lhm?.temps?.length) {
+      // Prefer "CPU Package" by name (the on-die thermal sensor),
+      // then any CPU-prefixed sensor, then any temp on a CPU device.
+      lhmCpuTemp =
+        lhm.temps.find((s) => /package/i.test(s.name)) ||
+        lhm.temps.find((s) => /^cpu/i.test(s.name)) ||
+        lhm.temps.find((s) => /(intel|amd|ryzen|core i)/i.test(s.device));
+    }
+    let displayTemp;
     let isTempEst = false;
-    const isAcpiSource = Array.isArray(t.sources) && t.sources.includes('acpi:cpu');
-    if (isAcpiSource && Number.isFinite(t.cpu)) {
-      window._acpiTempHistory = window._acpiTempHistory || [];
-      window._acpiTempHistory.push(t.cpu);
-      if (window._acpiTempHistory.length > 4) window._acpiTempHistory.shift();
-      const stuck = window._acpiTempHistory.length >= 4 &&
-        window._acpiTempHistory.every((v) => v === window._acpiTempHistory[0]);
-      if (stuck) {
-        // Generic Intel-desktop curve: ~30°C idle, ~65°C at full load
-        // with Turbo Boost disabled (matches a 13900KS on adequate
-        // cooling; for boost-enabled / high-end systems actual temps
-        // run hotter, but the estimate stays in the right ballpark).
-        const load = Number.isFinite(window._lastCpuLoadFrac) ? window._lastCpuLoadFrac : 0;
-        displayTemp = 30 + Math.min(1, Math.max(0, load)) * 35;
-        isTempEst = true;
-      }
-    } else {
-      // Reset history when a non-ACPI source is in play so re-entering
-      // the stuck path requires a fresh streak of identical readings.
+    let lhmCpuActive = false;
+    if (lhmCpuTemp && Number.isFinite(lhmCpuTemp.value)) {
+      displayTemp = lhmCpuTemp.value;
+      lhmCpuActive = true;
       window._acpiTempHistory = [];
+    } else {
+      // Detect ACPI thermal-zone "stuck reading" — many Intel desktop
+      // BIOSes implement MSAcpi_ThermalZoneTemperature as a literal
+      // constant (the chip's TjMax minus an arbitrary delta, or just
+      // a hardcoded value) instead of an actual sensor query. Symptom:
+      // the number never moves regardless of CPU activity. We keep a
+      // short history of recent ACPI readings; if the last 4 are all
+      // identical we assume the sensor is broken and switch to a
+      // CPU-load-derived estimate.
+      displayTemp = t.cpu;
+      const isAcpiSource = Array.isArray(t.sources) && t.sources.includes('acpi:cpu');
+      if (isAcpiSource && Number.isFinite(t.cpu)) {
+        window._acpiTempHistory = window._acpiTempHistory || [];
+        window._acpiTempHistory.push(t.cpu);
+        if (window._acpiTempHistory.length > 4) window._acpiTempHistory.shift();
+        const stuck = window._acpiTempHistory.length >= 4 &&
+          window._acpiTempHistory.every((v) => v === window._acpiTempHistory[0]);
+        if (stuck) {
+          // Generic Intel-desktop curve: ~30°C idle, ~65°C at full load
+          // with Turbo Boost disabled. Clamped so a NaN or negative
+          // load fraction can't produce a negative temperature.
+          const load = Math.max(0, Math.min(1, Number(window._lastCpuLoadFrac) || 0));
+          displayTemp = 30 + load * 35;
+          isTempEst = true;
+        }
+      } else {
+        window._acpiTempHistory = [];
+      }
     }
     paintTemp(tempCpuEl, tempCpuBarEl, displayTemp, isTempEst);
     // Estimate CPU watts when Windows RAPL is offline. Common cause:
@@ -1695,6 +1862,7 @@ async function refreshTemps() {
     // same chip). Showing the right label means the gap between this
     // dashboard's value and a tool reading DTS isn't mysterious.
     const sourceLabel = (() => {
+      if (lhmCpuActive) return 'LHM · CPU';
       if (t.cpu == null) return 'NEEDS LHM/OHM';
       if (isTempEst) return 'EST CPU';
       const srcs = Array.isArray(t.sources) ? t.sources : [];
@@ -1715,13 +1883,34 @@ async function refreshTemps() {
       tempCpuNameEl.title = title;
     }
 
+    // LHM-sourced GPU temp lookup. LHM groups sensors under a device
+    // name like "NVIDIA GeForce RTX 4090" / "Intel UHD Graphics" /
+    // "AMD Radeon …". For each si-reported GPU we look up a matching
+    // LHM temp sensor and prefer that reading.
+    function pickLhmGpuTemp(siName) {
+      if (!lhm?.temps?.length || !siName) return null;
+      const n = String(siName).toLowerCase();
+      const isNv     = /nvidia|geforce|gtx|rtx/.test(n);
+      const isAmdGpu = /amd|radeon|rx\s?\d/.test(n);
+      const isIntel  = /intel|uhd|iris|arc/.test(n);
+      return lhm.temps.find((s) => {
+        const d = String(s.device || '').toLowerCase();
+        if (isNv     && /nvidia|geforce|gtx|rtx/.test(d)) return true;
+        if (isAmdGpu && /amd|radeon|rx\s?\d/.test(d))     return true;
+        if (isIntel  && /intel|uhd|iris|arc/.test(d))     return true;
+        return false;
+      }) || null;
+    }
+
     const g0 = t.gpus?.[0];
-    paintTemp(tempGpu0El, tempGpu0BarEl, g0?.temp);
+    const g0LhmTemp = pickLhmGpuTemp(g0?.name);
+    paintTemp(tempGpu0El, tempGpu0BarEl, g0LhmTemp ? g0LhmTemp.value : g0?.temp);
     paintPower(powerGpu0El, g0?.power);
     tempGpu0NameEl.textContent = g0 ? shortGpuName(g0.name) : 'NONE';
 
     const g1 = t.gpus?.[1];
-    paintTemp(tempGpu1El, tempGpu1BarEl, g1?.temp);
+    const g1LhmTemp = pickLhmGpuTemp(g1?.name);
+    paintTemp(tempGpu1El, tempGpu1BarEl, g1LhmTemp ? g1LhmTemp.value : g1?.temp);
     paintPower(powerGpu1El, g1?.power);
     tempGpu1NameEl.textContent = g1 ? shortGpuName(g1.name) : 'NONE';
 
@@ -1830,6 +2019,69 @@ function _sparkSizeCanvas(st, container) {
   st.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   st.grad = null; // height changed → rebuild gradient on next draw
 }
+// E-Ink chart frame — draws a left Y-axis with scale labels, a dashed
+// bottom X-axis and faint horizontal gridlines, then returns the inner
+// plot rect { px, py, pw, ph } the caller draws its trace into. `rgb`
+// is the ink colour triple; `yLabels` is [{ frac, text }] measured from
+// the bottom (frac 0 = bottom edge, 1 = top). Pass empty `text` for a
+// gridline with no label. Labels + their left margin collapse on
+// canvases too small to print them legibly.
+function drawEinkChartFrame(ctx, w, h, rgb, yLabels) {
+  const [r, g, b] = rgb;
+  const axisCol  = `rgba(${r},${g},${b},0.55)`;
+  const gridCol  = `rgba(${r},${g},${b},0.16)`;
+  const labelCol = `rgba(${r},${g},${b},0.70)`;
+  const hasText  = !!(yLabels && yLabels.some((l) => l.text));
+  const showLabels = hasText && w >= 120 && h >= 46;
+  const fs = Math.max(7, Math.min(10, Math.floor(h / 9)));
+  const mL = showLabels ? Math.round(fs * 2.4) + 7 : 1;
+  const mT = 3, mB = 3, mR = 2;
+  const px = mL, py = mT;
+  const pw = Math.max(1, w - mL - mR);
+  const ph = Math.max(1, h - mT - mB);
+  const baseY = py + ph;
+  // Gridlines + scale labels.
+  if (yLabels && yLabels.length) {
+    ctx.font = `${fs}px 'Share Tech Mono', monospace`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (const yl of yLabels) {
+      const gy = baseY - yl.frac * ph;
+      if (yl.frac > 0.01) {            // frac 0 is the X-axis itself
+        ctx.strokeStyle = gridCol;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(px, Math.round(gy) + 0.5);
+        ctx.lineTo(px + pw, Math.round(gy) + 0.5);
+        ctx.stroke();
+      }
+      if (showLabels && yl.text) {
+        ctx.fillStyle = labelCol;
+        ctx.fillText(yl.text, mL - 5, Math.min(h - fs / 2, Math.max(fs / 2, gy)));
+      }
+    }
+  }
+  // Left Y-axis (solid) + bottom X-axis (dashed, like graph paper).
+  ctx.strokeStyle = axisCol;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(px + 0.5, py);
+  ctx.lineTo(px + 0.5, baseY);
+  ctx.stroke();
+  ctx.setLineDash([3, 2]);
+  ctx.beginPath();
+  ctx.moveTo(px, baseY + 0.5);
+  ctx.lineTo(px + pw, baseY + 0.5);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  return { px, py, pw, ph };
+}
+// Exposed for feature modules in their own chunks (music.js) so their
+// e-ink visualizers can draw the same axis-framed line chart.
+window.drawEinkChartFrame = drawEinkChartFrame;
+
 function renderSpark(container, samples) {
   if (!container) return;
   const targetN = targetSparkBarCount(container, samples.length);
@@ -1904,6 +2156,47 @@ function renderSpark(container, samples) {
     st.dim    = [Math.round(st.bright[0]*0.25), Math.round(st.bright[1]*0.25), Math.round(st.bright[2]*0.25)];
     st.peakColor = redStr;
     st.gradTheme = _themeVersion;
+  }
+  // E-Ink themes swap the segmented-LED meter for a flat line chart:
+  // a continuous 1px ink stroke over a faint solid fill, no segments,
+  // no glow, no peak markers — matching the still, matte e-paper look.
+  if ((document.documentElement.getAttribute('data-theme') || '').startsWith('matte')) {
+    const [ir, ig, ib] = st.bright;
+    const ink = `rgb(${ir},${ig},${ib})`;
+    const frame = drawEinkChartFrame(ctx, W, H, st.bright, [
+      { frac: 0,   text: '0' },
+      { frac: 0.5, text: '' },
+      { frac: 1,   text: fmtRate(max).num },
+    ]);
+    const n = view.length;
+    const baseY = frame.py + frame.ph;
+    const xOf = (i) => frame.px + (n > 1 ? (i / (n - 1)) * frame.pw : 0);
+    const yOf = (v) => frame.py + frame.ph * (1 - Math.min(100, (v / max) * 100) / 100);
+    // Faint solid fill under the trace.
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), baseY);
+    for (let i = 0; i < n; i++) ctx.lineTo(xOf(i), yOf(view[i]));
+    ctx.lineTo(xOf(n - 1), baseY);
+    ctx.closePath();
+    ctx.fillStyle = einkChartGradient(ctx, frame.py, baseY, 0.16);
+    ctx.fill();
+    // The trace — green→yellow→red value gradient by height.
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = xOf(i); const y = yOf(view[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = einkChartGradient(ctx, frame.py, baseY, 1);
+    ctx.lineWidth = 1.25;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    // Dot marker on the most recent sample.
+    ctx.beginPath();
+    ctx.arc(xOf(n - 1), yOf(view[n - 1]), 2, 0, Math.PI * 2);
+    ctx.fillStyle = einkChartGradient(ctx, frame.py, baseY, 1);
+    ctx.fill();
+    return;
   }
   // Segmented LED-cell layout — same shape as the audio-in / audio-out
   // visualizers. Each bar is a stack of small horizontal "cells" with a
@@ -2671,6 +2964,46 @@ function createAudioVisualizer({
     targetCtx.clearRect(0, 0, W, H);
     if (barCount <= 0 || W <= 0 || H <= 0) return;
     _diagDrawCalls++;
+    // E-Ink themes render the spectrum as a flat line chart — a 1px ink
+    // trace over a faint solid fill, matching the network / drive
+    // sparklines. No segmented cells, no reflection, no peak markers,
+    // no side scale; just the spectrum profile as a still e-paper graph.
+    if ((document.documentElement.getAttribute('data-theme') || '').startsWith('matte')) {
+      const n = barCount;
+      const frame = drawEinkChartFrame(targetCtx, W, H, _brightRgb, [
+        { frac: 0,   text: '0'   },
+        { frac: 0.5, text: '50'  },
+        { frac: 1,   text: '100' },
+      ]);
+      const baseY = frame.py + frame.ph;
+      const xOf = (i) => frame.px + (n > 1 ? (i / (n - 1)) * frame.pw : 0);
+      const yOf = (i) => {
+        const dist  = n > 1 ? Math.abs(i / (n - 1) - 0.5) * 2 : 0;
+        const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
+        const v     = Math.min(1, (displayed[i] / 100) * scale);
+        return frame.py + frame.ph * (1 - v);
+      };
+      // Faint solid fill under the trace — green→yellow→red by height.
+      targetCtx.beginPath();
+      targetCtx.moveTo(xOf(0), baseY);
+      for (let i = 0; i < n; i++) targetCtx.lineTo(xOf(i), yOf(i));
+      targetCtx.lineTo(xOf(n - 1), baseY);
+      targetCtx.closePath();
+      targetCtx.fillStyle = einkChartGradient(targetCtx, frame.py, baseY, 0.16);
+      targetCtx.fill();
+      // The spectrum trace — value gradient colours each band by level.
+      targetCtx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const x = xOf(i); const y = yOf(i);
+        if (i === 0) targetCtx.moveTo(x, y); else targetCtx.lineTo(x, y);
+      }
+      targetCtx.strokeStyle = einkChartGradient(targetCtx, frame.py, baseY, 1);
+      targetCtx.lineWidth = 1.25;
+      targetCtx.lineJoin = 'round';
+      targetCtx.lineCap = 'round';
+      targetCtx.stroke();
+      return;
+    }
     // Segmented EQ style: each bar is a vertical stack of small horizontal
     // cells rising from a baseline near the bottom of the canvas. Below the
     // baseline a faded copy of the lowest cells reads as a glass-floor
@@ -4166,6 +4499,237 @@ function readyAzure() {
   return !!(c.endpoint && c.deployment && c.key);
 }
 
+// ── Multi-source chat plumbing ──────────────────────────────────────
+// The CHAT pane displays one of several sources:
+//   ollama / azure  — LLM conversation (existing flow)
+//   discord         — mirrored DM/mention notifications from the
+//                     STREAM tab's Discord BrowserView
+//   all             — union view (LLM history + Discord, time-sorted)
+// `chatSource` drives the visible UI; `chatProvider` still drives the
+// LLM call site, so existing LLM logic stays unchanged.
+let chatSource = 'ollama';
+// Per-kind message buffers + dedupe sets. Adding a new stream kind
+// is one entry in each map. The chat-source dropdown decides which
+// (or all) get rendered.
+const _streamMessages = { discord: [], facebook: [] };
+const _streamSeenIds  = { discord: new Set(), facebook: new Set() };
+const STREAM_MAX_BUFFER = 200;
+// Back-compat aliases for any code that still references the old
+// Discord-only names (kept short — full removal can come later).
+const _discordMessages = _streamMessages.discord;
+const DISCORD_MAX_BUFFER = STREAM_MAX_BUFFER;
+const chatSourceEl   = document.getElementById('chat-source');
+const chatPaneEl     = document.querySelector('.combo-pane-chat');
+const chatInputRowEl = document.querySelector('.chat-input-row');
+
+function renderStreamSource(kindToShow) {
+  // Generic per-kind renderer. 'discord' / 'facebook' show only that
+  // buffer. 'all' (handled by renderAllSources) is separate.
+  if (!chatMessagesEl) return;
+  const buf = _streamMessages[kindToShow] || [];
+  if (!buf.length) {
+    const label = (kindToShow || '').toUpperCase();
+    chatMessagesEl.innerHTML =
+      '<div class="chat-empty">NO ' + label + ' MESSAGES YET<br><br>OPEN STREAM TAB · CLICK INTO THE CONVERSATION YOU WANT TO MIRROR · NEW MESSAGES THERE WILL SYNC HERE LIVE</div>';
+    return;
+  }
+  // Chronological sort — backfilled history can arrive in any order
+  // (initial DOM sweep is in source order, lazy-loaded older
+  // messages get prepended on scroll-up). 200-row cap keeps it cheap.
+  buf.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  const html = buf.map((m) => {
+    const t = new Date(m.timestamp);
+    const stamp = String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
+    return '<div class="chat-msg chat-msg-discord">'
+      + '<div class="chat-msg-head"><span class="chat-msg-source">DISCORD</span><span class="chat-msg-stamp">' + stamp + '</span></div>'
+      + '<div class="chat-msg-title">' + _escHtml(m.title || '(no title)') + '</div>'
+      + (m.body ? '<div class="chat-msg-body">' + _escHtml(m.body) + '</div>' : '')
+      + '</div>';
+  }).join('');
+  chatMessagesEl.innerHTML = html;
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
+function renderAllSources() {
+  // Merge LLM history with every stream-kind buffer, time-sorted.
+  if (!chatMessagesEl) return;
+  const llmEntries = (chatHistory || []).map((m, i) => ({
+    kind: 'llm', role: m.role, content: m.content, idx: i, timestamp: m.__ts || (i * 1),
+  }));
+  const streamEntries = [];
+  for (const k of Object.keys(_streamMessages)) {
+    for (const m of _streamMessages[k]) streamEntries.push({ ...m, kind: k });
+  }
+  const merged = llmEntries.concat(streamEntries);
+  merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  if (!merged.length) {
+    chatMessagesEl.innerHTML = '<div class="chat-empty">NO MESSAGES YET</div>';
+    return;
+  }
+  const html = merged.map((m) => {
+    if (m.kind === 'discord' || m.kind === 'facebook') {
+      const t = new Date(m.timestamp);
+      const stamp = String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
+      const srcLabel = m.kind.toUpperCase();
+      return '<div class="chat-msg chat-msg-' + m.kind + '">'
+        + '<div class="chat-msg-head"><span class="chat-msg-source">' + srcLabel + '</span><span class="chat-msg-stamp">' + stamp + '</span></div>'
+        + '<div class="chat-msg-title">' + _escHtml(m.title || '(no title)') + '</div>'
+        + (m.body ? '<div class="chat-msg-body">' + _escHtml(m.body) + '</div>' : '')
+        + '</div>';
+    }
+    // LLM message — reuse the existing message style classes.
+    return '<div class="chat-msg chat-msg-' + (m.role === 'assistant' ? 'asst' : 'user') + '">'
+      + _escHtml(m.content || '')
+      + '</div>';
+  }).join('');
+  chatMessagesEl.innerHTML = html;
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
+function _escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+function applySource(src) {
+  const VALID = ['ollama','azure','discord','facebook','all'];
+  chatSource = VALID.includes(src) ? src : 'ollama';
+  if (chatPaneEl) chatPaneEl.dataset.chatSource = chatSource;
+  if (chatSourceEl) chatSourceEl.value = chatSource;
+  // Hide LLM-specific chrome when viewing a non-LLM source.
+  const isLLM    = (chatSource === 'ollama' || chatSource === 'azure');
+  const isStream = !!_streamMessages[chatSource];
+  if (chatModelEl)    chatModelEl.style.display    = (isLLM && chatSource === 'ollama') ? '' : 'none';
+  if (chatAutoBtn)    chatAutoBtn.style.display    = isLLM ? '' : 'none';
+  if (azureConfigEl)  azureConfigEl.hidden         = !(isLLM && chatProvider === 'azure' && azureConfigVisible);
+  // Hide the LLM input row for stream-only sources (you can't type
+  // back at Discord/Facebook from here). ALL keeps it so you can
+  // still chat with the LLM while seeing the mirror inline.
+  if (chatInputRowEl) chatInputRowEl.style.display = isStream ? 'none' : '';
+  // Mirror LLM-source selection into the legacy chat-provider element
+  // so all the LLM call sites still work without changes.
+  if (isLLM) applyProvider(chatSource);
+  // Repaint with the new view.
+  if (isStream)                      renderStreamSource(chatSource);
+  else if (chatSource === 'all')     renderAllSources();
+  else                                renderMessages();
+}
+chatSourceEl?.addEventListener('change', async () => {
+  applySource(chatSourceEl.value);
+  if (window.dash?.setConfig) await window.dash.setConfig({ chatSource });
+});
+// Subscribe to mirrored Discord notifications. Buffer + render if
+// currently viewing a source that includes them. The console.log is
+// intentional — diagnoses the renderer-side hop for the mirror.
+// Track whether a stream embed drove the webcam ON, so we only
+// stopWebcam() on the OFF event if WE started it (don't kill a
+// manually-started dashboard webcam preview).
+let _discordDroveWebcam = false;
+if (window.dash?.onStreamNotification) {
+  window.dash.onStreamNotification((payload) => {
+    console.log('[stream:notification] renderer ←', payload);
+    // Camera-state events from any stream embed → drive the
+    // dashboard's webcam. startWebcam routes the stream into the
+    // profile-pic slot via setProfilePicLive.
+    if (payload && payload.kind === 'camera-state') {
+      if (payload.state === 'on') {
+        if (typeof startWebcam === 'function') {
+          _discordDroveWebcam = true;
+          startWebcam().catch?.(() => { _discordDroveWebcam = false; });
+        }
+      } else if (payload.state === 'off') {
+        if (_discordDroveWebcam && typeof stopWebcam === 'function') {
+          stopWebcam();
+          _discordDroveWebcam = false;
+        }
+      }
+      return;
+    }
+    if (!payload) return;
+    const k = String(payload.kind || '');
+    // Only known stream kinds get a buffer slot. Other kinds (or
+    // missing) silently drop so a stray event can't poison the buffer.
+    if (!_streamMessages[k]) return;
+    // Dedupe by messageId when present (live DOM mirror). The
+    // MutationObserver in each embed may fire repeatedly for the
+    // same row on re-render. Each kind has its own seen-set.
+    const seen = _streamSeenIds[k];
+    if (payload.messageId) {
+      if (seen.has(payload.messageId)) return;
+      seen.add(payload.messageId);
+      if (seen.size > 2000) {
+        const arr = Array.from(seen);
+        for (let i = 0; i < 1000; i++) seen.delete(arr[i]);
+      }
+    }
+    _streamMessages[k].push({
+      kind:  k,
+      type:  String(payload.type || 'notification'),
+      title: String(payload.title || ''),
+      body:  String(payload.body  || ''),
+      timestamp: Number(payload.timestamp) || Date.now(),
+    });
+    while (_streamMessages[k].length > STREAM_MAX_BUFFER) _streamMessages[k].shift();
+    if (chatSource === k)            renderStreamSource(chatSource);
+    else if (chatSource === 'all')   renderAllSources();
+  });
+}
+
+// ── Discord pipeline test buttons (visible when source is discord/all)
+const chatDiscordFetchBtn    = document.getElementById('chat-discord-fetch');
+const chatDiscordTestBtn     = document.getElementById('chat-discord-test');
+const chatDiscordDevToolsBtn = document.getElementById('chat-discord-devtools');
+// FETCH: ask the Discord embed to re-sweep its DOM and emit any
+// messages we haven't seen yet. Useful when the auto-sweep on
+// install missed something (e.g., user navigated to a new channel
+// after the embed loaded). Reports back whether the DOM even has
+// message rows — if rowsInDom is 0, the user hasn't opened any
+// conversation yet and there's nothing to mirror.
+// Helper — the embed kind to target with FETCH/TEST/DEV. When the
+// source is a specific stream (discord/facebook), target that. For
+// 'all' we default to discord (most common live-mirror target).
+function _activeStreamKind() {
+  if (_streamMessages[chatSource]) return chatSource;
+  return 'discord';
+}
+chatDiscordFetchBtn?.addEventListener('click', async () => {
+  const k = _activeStreamKind();
+  setChatStatus('FETCHING ' + k.toUpperCase() + '…', 'amber');
+  try {
+    const r = await window.dash?.streamRescan?.(k);
+    if (!r?.ok) {
+      setChatStatus('FETCH FAILED · ' + (r?.error || 'unknown'), 'red');
+      return;
+    }
+    if (r.rowsInDom === 0) {
+      setChatStatus('NO MESSAGES IN DOM · OPEN A CONVERSATION IN THE STREAM TAB FIRST', 'amber');
+    } else if (r.newlyEmitted === 0) {
+      setChatStatus(`ALREADY IN SYNC · ${r.rowsInDom} ROWS VISIBLE · ${(_streamMessages[k] || []).length} MIRRORED HERE`, 'ok');
+    } else {
+      setChatStatus(`FETCHED · ${r.newlyEmitted} NEW MESSAGES (${r.rowsInDom} VISIBLE IN EMBED)`, 'ok');
+    }
+  } catch (err) {
+    setChatStatus('FETCH ERR · ' + err.message, 'red');
+  }
+});
+chatDiscordTestBtn?.addEventListener('click', async () => {
+  setChatStatus('FIRING PIPELINE SELF-TEST…', 'amber');
+  try {
+    const r = await window.dash?.streamSelfTest?.(_activeStreamKind());
+    if (r?.ok) {
+      setChatStatus('TEST FIRED · IF MIRROR WORKS, A "SELF-TEST" ENTRY APPEARS BELOW', 'ok');
+    } else {
+      setChatStatus('TEST FAILED · ' + (r?.error || r?.result || 'unknown'), 'red');
+    }
+  } catch (err) {
+    setChatStatus('TEST ERR · ' + err.message, 'red');
+  }
+});
+chatDiscordDevToolsBtn?.addEventListener('click', async () => {
+  try {
+    const r = await window.dash?.streamOpenDevTools?.(_activeStreamKind());
+    if (!r?.ok) setChatStatus('DEVTOOLS FAILED · ' + (r?.error || 'unknown'), 'red');
+  } catch (err) {
+    setChatStatus('DEVTOOLS ERR · ' + err.message, 'red');
+  }
+});
+
 function initChat(cfg) {
   // Restore Azure config fields (so user doesn't have to retype every launch).
   if (cfg?.azure) {
@@ -4174,7 +4738,9 @@ function initChat(cfg) {
     if (azureVersionEl)    azureVersionEl.value    = cfg.azure.apiVersion || '';
     if (azureKeyEl)        azureKeyEl.value        = cfg.azure.key        || '';
   }
-  applyProvider(cfg?.chatProvider || 'ollama');
+  // Source defaults to cfg.chatSource (or cfg.chatProvider for legacy
+  // installs that predate the source picker). Falls back to ollama.
+  applySource(cfg?.chatSource || cfg?.chatProvider || 'ollama');
   if (chatProvider === 'ollama') {
     loadOllamaModels();
   } else {
@@ -4484,6 +5050,15 @@ function attachDrag(panel) {
         nx = resolved.left;
         ny = resolved.top;
       }
+      // The PRODUCTIVITY (combo) panel must never slide under the topbar —
+      // its header would end up unreachable behind it (which feels like the
+      // panel is "locked"). Clamp its top to the topbar's bottom edge — this
+      // applies even when Alt bypasses the grid snap.
+      if (panel.classList.contains('panel-combo')) {
+        const topbar = document.querySelector('.topbar-controls');
+        const minTop = topbar ? Math.round(topbar.getBoundingClientRect().bottom) : 0;
+        if (ny < minTop) ny = minTop;
+      }
       panel.style.left = `${nx}px`;
       panel.style.top  = `${ny}px`;
     };
@@ -4736,7 +5311,7 @@ if (comboPanel) {
   const browserPane     = comboPanel.querySelector('.combo-pane-browser');
   const tasksPane       = comboPanel.querySelector('.combo-pane-tasks');
   const musicPane       = comboPanel.querySelector('.combo-pane-music');
-  const generatePane    = comboPanel.querySelector('.combo-pane-generate');
+  const streamPane      = comboPanel.querySelector('.combo-pane-stream');
 
   function paintComboHeader() {
     // Bail while the OFFLINE → STANDBY → ONLINE state machine is using
@@ -4779,7 +5354,7 @@ if (comboPanel) {
     } else if (mode === 'browser') {
       titleEl.innerHTML = 'PRODUCTIVITY <em>B1</em>';
       codeEl.textContent = 'BROWSER · PRIVATE';
-      tagEl.textContent = _browserState?.tabs?.length ? `${_browserState.tabs.length} TAB${_browserState.tabs.length === 1 ? '' : 'S'}` : '—';
+      tagEl.textContent = window._browserState?.tabs?.length ? `${window._browserState.tabs.length} TAB${window._browserState.tabs.length === 1 ? '' : 'S'}` : '—';
       footerLabelEl.textContent = 'BROWSER URL';
     } else if (mode === 'tasks') {
       titleEl.innerHTML = 'PRODUCTIVITY <em>T1</em>';
@@ -4795,11 +5370,6 @@ if (comboPanel) {
         ? (window._bgmState.genre || '—').toUpperCase()
         : 'IDLE';
       footerLabelEl.textContent = 'MUSIC STATUS';
-    } else if (mode === 'generate') {
-      titleEl.innerHTML = 'PRODUCTIVITY <em>G1</em>';
-      codeEl.textContent = 'GENERATE · COMFYUI';
-      tagEl.textContent = window._genState?.workflowName || 'IDLE';
-      footerLabelEl.textContent = 'GENERATE STATUS';
     } else {
       titleEl.innerHTML = 'PRODUCTIVITY <em>X1</em>';
       const provider = document.getElementById('chat-provider')?.value;
@@ -4809,8 +5379,54 @@ if (comboPanel) {
     }
   }
 
+  // ── Lazy combo panes ───────────────────────────────────────────
+  // Each entry's code lives in its own file and is fetched as a
+  // separate Vite chunk only the first time its tab is opened — it
+  // never parses or runs at startup. Modules export init() (one-time
+  // setup), activate() (tab shown) and deactivate() (tab left).
+  const _lazyPaneImports = {
+    stream:     () => import('./features/stream.js'),
+    explore:    () => import('./features/explore.js'),
+    browser:    () => import('./features/browser.js'),
+    visualizer: () => import('./features/visualizer.js'),
+    music:      () => import('./features/music.js'),
+  };
+  const _lazyPaneState = {};   // mode -> loaded module
+  // Seeded here (not in visualizer.js) so file deletes made in EXPLORE
+  // before REC ROOM is ever opened still get recorded for UNDO.
+  window._visualizerUndoStack = window._visualizerUndoStack || [];
+  // Dependencies handed to each lazy pane's init() so the extracted
+  // modules stay free of this file's enclosing scope.
+  const _paneDeps = {
+    fmtBytes,
+    playSfx,
+    paintComboHeader,
+    // EXPLORE hands delete batches to the VISUALIZER undo stack. The
+    // refresh callback is a no-op until REC ROOM has been opened.
+    pushUndo: (batch) => {
+      window._visualizerUndoStack.push({ batch, at: Date.now() });
+      try { window._visualizerRefreshUndoBtn?.(); } catch {}
+    },
+  };
+
+  function activateLazyPane(mode) {
+    // Detach any other lazy pane that's currently loaded + active.
+    for (const k of Object.keys(_lazyPaneState)) {
+      if (k !== mode) { try { _lazyPaneState[k]?.deactivate?.(); } catch {} }
+    }
+    const importer = _lazyPaneImports[mode];
+    if (!importer) return;
+    const loaded = _lazyPaneState[mode];
+    if (loaded) { try { loaded.activate?.(); } catch {} return; }
+    importer().then(async (m) => {
+      _lazyPaneState[mode] = m;
+      try { await m.init?.(_paneDeps); } catch (e) { console.warn(`[pane:${mode}] init failed`, e); }
+      try { m.activate?.(); } catch (e) { console.warn(`[pane:${mode}] activate failed`, e); }
+    }).catch((e) => console.warn(`[pane:${mode}] load failed`, e));
+  }
+
   function setComboMode(mode, persist = true) {
-    const VALID = new Set(['notes', 'chat', 'paper', 'explore', 'visualizer', 'browser', 'tasks', 'music', 'generate']);
+    const VALID = new Set(['notes', 'chat', 'paper', 'explore', 'visualizer', 'browser', 'tasks', 'music', 'stream']);
     if (!VALID.has(mode)) mode = 'notes';
     comboPanel.dataset.mode = mode;
     notesPane     ?.classList.toggle('is-visible', mode === 'notes');
@@ -4821,6 +5437,7 @@ if (comboPanel) {
     browserPane   ?.classList.toggle('is-visible', mode === 'browser');
     tasksPane     ?.classList.toggle('is-visible', mode === 'tasks');
     musicPane     ?.classList.toggle('is-visible', mode === 'music');
+    streamPane    ?.classList.toggle('is-visible', mode === 'stream');
     // Music meter visibility — drives whether the rAF redraw chain runs
     // (see _bgmDrawMeter + window._bgmMaybeStartMeter in the music init
     // block). When music tab isn't visible we skip canvas work entirely;
@@ -4829,27 +5446,15 @@ if (comboPanel) {
     if (window._isMusicTabVisible) {
       try { window._bgmMaybeStartMeter?.(); } catch {}
     }
-    generatePane  ?.classList.toggle('is-visible', mode === 'generate');
     comboPanel.querySelectorAll('.combo-mode-tab').forEach(b => {
       b.classList.toggle('is-active', b.dataset.mode === mode);
     });
     _comboInVisualizer = (mode === 'visualizer');
     paintComboHeader();
-    if (mode === 'explore')    refreshExplore();
-    if (mode === 'visualizer') refreshVisualizer();
-    if (mode === 'browser')    initBrowserOnce();
     if (mode === 'tasks')      refreshTasksNow();
-    // BROWSER pane tracks attach/detach state so BrowserView gets
-    // detached from the host window when the user leaves the tab.
-    if (window._browserState) {
-      const wasBrowser = window._browserState.inBrowserMode;
-      window._browserState.inBrowserMode = (mode === 'browser');
-      if (mode === 'browser') {
-        try { window._browserApplyStageMode?.(); } catch {}
-      } else if (wasBrowser) {
-        try { window.dash?.browserTabActivate?.(null); } catch {}
-      }
-    }
+    // Lazy combo panes (STREAM, …) — load the module on first open,
+    // then activate it / deactivate any other lazy pane that was up.
+    activateLazyPane(mode);
     if (persist && window.dash?.setConfig) window.dash.setConfig({ comboMode: mode });
   }
 
@@ -4938,5838 +5543,25 @@ if (comboPanel) {
   if (paperStatsEl)  new MutationObserver(paintComboHeader).observe(paperStatsEl,  { childList: true, characterData: true, subtree: true });
   document.getElementById('chat-provider')?.addEventListener('change', paintComboHeader);
 
-  // EXPLORE pane tab strip — flips the visible section between gallery
-  // and docs. Persists under config.exploreTab so the same view is
-  // restored next launch.
-  function setExploreTab(which, persist = true) {
-    if (which !== 'gallery' && which !== 'docs' && which !== 'downloads') which = 'gallery';
-    if (!explorePane) return;
-    explorePane.dataset.exploreTab = which;
-    explorePane.querySelectorAll('.explore-tab').forEach((btn) => {
-      btn.classList.toggle('is-active', btn.dataset.exploreTabBtn === which);
-    });
-    if (persist && window.dash?.setConfig) window.dash.setConfig({ exploreTab: which });
-  }
-  explorePane?.querySelectorAll('.explore-tab').forEach((btn) => {
-    btn.addEventListener('mousedown', (ev) => ev.stopPropagation());
-    btn.addEventListener('click', () => setExploreTab(btn.dataset.exploreTabBtn));
-  });
+  // ── EXPLORE tab ──────────────────────────────────────────────────────
+  // Lazy combo pane — code lives in features/explore.js, loaded on first
+  // open by activateLazyPane(). Its injected pushUndo dep feeds deletes
+  // into the VISUALIZER undo stack.
 
-  // EXPLORE pane — in-panel mini-Explorer for the gallery + docs roots.
-  // Each section tracks its own current subdir + selected row. Click a
-  // row to select; double-click a folder to navigate into it; double-click
-  // a file to open in the OS default app. F2 renames, Del → trash. The
-  // ＋ button creates a folder in the current view; ↑ goes up one level.
-  const exploreGalleryListEl   = document.getElementById('explore-gallery-list');
-  const exploreDocsListEl      = document.getElementById('explore-docs-list');
-  const exploreDownloadsListEl = document.getElementById('explore-downloads-list');
-  const exploreGalleryPathEl   = document.getElementById('explore-gallery-path');
-  const exploreDocsPathEl      = document.getElementById('explore-docs-path');
-  const exploreDownloadsPathEl = document.getElementById('explore-downloads-path');
-  // Per-section lookups — adding a new managed root (downloads/) only
-  // needs entries here plus an IPC bridge in preload + main, instead of
-  // updating every which==='gallery'?a:b ternary in the file.
-  const _exploreListEls = {
-    gallery:   exploreGalleryListEl,
-    docs:      exploreDocsListEl,
-    downloads: exploreDownloadsListEl,
-  };
-  const _explorePathEls = {
-    gallery:   exploreGalleryPathEl,
-    docs:      exploreDocsPathEl,
-    downloads: exploreDownloadsPathEl,
-  };
-  const _exploreSubdir   = { gallery: '', docs: '', downloads: '' };
-  // Multi-select state: a Set of absolute paths per section, plus an
-  // anchor row for shift-click range selection. Anchor is the row that
-  // last received a non-shift click.
-  const _exploreSelected = { gallery: new Set(), docs: new Set(), downloads: new Set() };
-  const _exploreAnchor   = { gallery: null, docs: null, downloads: null };
-  const _exploreEntries  = { gallery: [], docs: [], downloads: [] };
-  const _exploreRoots    = { gallery: '',  docs: '',  downloads: '' };
+  // ── VISUALIZER / REC ROOM tab ────────────────────────────────────────
+  // Lazy combo pane — code lives in features/visualizer.js, loaded on
+  // first open by activateLazyPane(). Shares window._visualizerUndoStack
+  // with EXPLORE (seeded near _paneDeps so deletes pre-load still record).
 
-  function fmtFileTime(ms) {
-    if (!Number.isFinite(ms)) return '—';
-    const d = new Date(ms);
-    const sameDay = d.toDateString() === new Date().toDateString();
-    return sameDay
-      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : d.toLocaleDateString([], { month: 'short', day: '2-digit' });
-  }
+  // ── BROWSER pane ─────────────────────────────────────────────────────
+  // Lazy combo pane — code lives in features/browser.js, loaded on first
+  // open by activateLazyPane(). It exposes window._browserState (tab count
+  // for paintComboHeader) and window._browserApplyStageMode.
 
-  // Image extensions Chromium can render via <img>. TIFF / PSD aren't in
-  // the native set so they render as a styled "PSD"/"TIF" placeholder tile
-  // until / unless we add a thumbnail extractor in main.
-  const _IMG_RENDER_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i;
-  const _IMG_KNOWN_RE  = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico|tiff?|psd|heic|heif|raw|cr2|nef|arw)$/i;
-  // Video extensions. The first regex is what Chromium can play in a
-  // <video> tag (H.264/AAC mp4, vp8/9/av1 webm, etc.). The second
-  // catches anything we still want to keep OUT of the gallery thumb
-  // view and route to the VISUALIZER tab — the player will show an
-  // "unsupported codec" message when it can't decode them.
-  // .mkv included so our own screen-record output (WebM bytes wrapped in
-  // a .mkv extension — Chromium decodes them fine since the EBML bytes
-  // are valid WebM) plays inline. Generic MKVs with non-WebM codecs
-  // will fail silently and the user can fall back to the OS player.
-  const _VIDEO_RENDER_RE = /\.(mp4|webm|m4v|ogv|ogg|mov|mkv)$/i;
-  const _VIDEO_KNOWN_RE  = /\.(mp4|webm|m4v|ogv|ogg|mov|avi|mkv|wmv|flv|3gp|3g2|asf)$/i;
-
-  function renderExploreList(which, result) {
-    const listEl = _exploreListEls[which];
-    if (!listEl) return;
-    listEl.classList.toggle('is-thumbnails', which === 'gallery');
-    listEl.innerHTML = '';
-    if (!result || result.error) {
-      listEl.innerHTML = `<li class="explore-empty">${(result?.error || 'NOT FOUND').toUpperCase()}</li>`;
-      return;
-    }
-    const entries = result.entries || [];
-    if (!entries.length) {
-      listEl.innerHTML = '<li class="explore-empty">EMPTY · DROP FILES INTO THE FOLDER</li>';
-      return;
-    }
-    // Gallery hides video files — those route to the VISUALIZER tab so
-    // the thumbnail grid stays image-only. Folders and non-video files
-    // pass through unchanged.
-    const filteredEntries = which === 'gallery'
-      ? entries.filter((e) => e.isDir || !_VIDEO_KNOWN_RE.test(e.name))
-      : entries;
-    // Capture the ordered entry list for shift-click range selection.
-    _exploreEntries[which] = filteredEntries;
-    const selSet = _exploreSelected[which];
-    const isGallery = which === 'gallery';
-    for (const e of filteredEntries) {
-      const row = document.createElement('li');
-      const isSel = selSet.has(e.path);
-      row.className = 'explore-row' + (e.isDir ? ' is-dir' : '') + (isSel ? ' is-selected' : '');
-      row.dataset.path  = e.path;
-      row.dataset.isDir = String(e.isDir);
-      row.dataset.name  = e.name;
-      row.dataset.which = which;
-      // Relative-to-managed-root path for dash3d-file:// URLs — used by
-      // the inline media viewer below.
-      if (e.rel) row.dataset.rel = e.rel;
-      row.title = e.path;
-      if (isGallery) {
-        const preview = document.createElement('div');
-        preview.className = 'explore-thumb-preview';
-        const ext = (e.name.match(/\.([^.]+)$/) || [])[1]?.toUpperCase() || '';
-        if (e.isDir) {
-          preview.innerHTML = '<span class="explore-thumb-icon">▣</span>';
-        } else if (_IMG_RENDER_RE.test(e.name)) {
-          // Real preview via the dash3d-file:// scheme (registered in
-          // main). URL shape is `dash3d-file://<root>/<rel>` — `<root>`
-          // is the host segment (gallery|docs) so URL parsers don't try
-          // to interpret a Windows drive-letter colon as host:port.
-          const img = document.createElement('img');
-          img.loading = 'lazy';
-          img.alt = '';
-          img.src = `dash3d-file://${which}/${encodeURI(e.rel)}`;
-          img.addEventListener('error', () => {
-            preview.innerHTML = `<span class="explore-thumb-ext">${ext || 'IMG'}</span>`;
-          });
-          preview.appendChild(img);
-        } else if (_IMG_KNOWN_RE.test(e.name)) {
-          // TIFF / PSD / RAW: known image but Chromium can't decode it.
-          preview.innerHTML = `<span class="explore-thumb-ext">${ext}</span>`;
-        } else {
-          preview.innerHTML = '<span class="explore-thumb-icon">▤</span>';
-        }
-        const name = document.createElement('span');
-        name.className = 'explore-row-name';
-        name.textContent = e.name;
-        row.appendChild(preview);
-        row.appendChild(name);
-      } else {
-        row.innerHTML =
-          `<span class="explore-row-name">${e.name.replace(/</g, '&lt;')}</span>` +
-          `<span class="explore-row-size">${e.isDir ? '—' : fmtBytes(e.size)}</span>` +
-          `<span class="explore-row-time">${fmtFileTime(e.mtime)}</span>`;
-      }
-      listEl.appendChild(row);
-    }
-  }
-
-  function exploreDisplayPath(which) {
-    const root = _exploreRoots[which] || '';
-    const sub = _exploreSubdir[which] || '';
-    const pathEl = _explorePathEls[which];
-    if (!pathEl) return;
-    pathEl.textContent = sub ? `${root}/${sub}`.replace(/\\/g, '/') : root;
-  }
-
-  // IPC list bridges keyed by section — add an entry per managed root.
-  const _exploreListBridges = {
-    gallery:   () => window.dash?.galleryList,
-    docs:      () => window.dash?.docsList,
-    downloads: () => window.dash?.downloadsList,
-  };
-  async function refreshExploreSection(which) {
-    if (!window.dash) return;
-    const list = _exploreListBridges[which]?.();
-    const result = await list?.(_exploreSubdir[which]) ?? null;
-    if (result?.root) _exploreRoots[which] = result.root;
-    exploreDisplayPath(which);
-    renderExploreList(which, result);
-  }
-
-  async function refreshExplore() {
-    await Promise.all([
-      refreshExploreSection('gallery'),
-      refreshExploreSection('docs'),
-      refreshExploreSection('downloads'),
-    ]);
-  }
-
-  function applyExploreSelection(which) {
-    const listEl = _exploreListEls[which];
-    const set = _exploreSelected[which];
-    listEl?.querySelectorAll('.explore-row').forEach((r) => {
-      r.classList.toggle('is-selected', set.has(r.dataset.path));
-    });
-  }
-  function _selectOnly(which, abs) {
-    _exploreSelected[which] = new Set(abs ? [abs] : []);
-    _exploreAnchor[which] = abs || null;
-    applyExploreSelection(which);
-  }
-  function _toggleSelected(which, abs) {
-    const s = _exploreSelected[which];
-    if (s.has(abs)) s.delete(abs); else s.add(abs);
-    _exploreAnchor[which] = abs;
-    applyExploreSelection(which);
-  }
-  function _selectRange(which, fromAbs, toAbs) {
-    const entries = _exploreEntries[which];
-    const fi = entries.findIndex((e) => e.path === fromAbs);
-    const ti = entries.findIndex((e) => e.path === toAbs);
-    if (fi < 0 || ti < 0) return _selectOnly(which, toAbs);
-    const [a, b] = fi <= ti ? [fi, ti] : [ti, fi];
-    const next = new Set();
-    for (let i = a; i <= b; i++) next.add(entries[i].path);
-    _exploreSelected[which] = next;
-    // Anchor stays at `fromAbs` so successive shift-clicks expand from
-    // the original point, Explorer-style. Caller is responsible for not
-    // moving _exploreAnchor here.
-    applyExploreSelection(which);
-  }
-  // Ctrl+Shift-click variant: ADD the anchor→target range to the
-  // existing selection instead of replacing. Matches Windows Explorer's
-  // multi-range selection model (shift = replace range, ctrl+shift =
-  // append range, ctrl = toggle one).
-  function _addRange(which, fromAbs, toAbs) {
-    const entries = _exploreEntries[which];
-    const fi = entries.findIndex((e) => e.path === fromAbs);
-    const ti = entries.findIndex((e) => e.path === toAbs);
-    if (fi < 0 || ti < 0) return _toggleSelected(which, toAbs);
-    const [a, b] = fi <= ti ? [fi, ti] : [ti, fi];
-    for (let i = a; i <= b; i++) _exploreSelected[which].add(entries[i].path);
-    applyExploreSelection(which);
-  }
-  function _clearSelection(which) {
-    _exploreSelected[which].clear();
-    _exploreAnchor[which] = null;
-    applyExploreSelection(which);
-  }
-
-  function navigateInto(which, relSegment) {
-    const cur = _exploreSubdir[which] || '';
-    _exploreSubdir[which] = cur ? `${cur}/${relSegment}` : relSegment;
-    _clearSelection(which);
-    refreshExploreSection(which);
-  }
-
-  function navigateUp(which) {
-    const cur = _exploreSubdir[which] || '';
-    if (!cur) return;
-    const parts = cur.split('/').filter(Boolean);
-    parts.pop();
-    _exploreSubdir[which] = parts.join('/');
-    _clearSelection(which);
-    refreshExploreSection(which);
-  }
-
-  function handleExploreRowClick(e) {
-    const row = e.target.closest('.explore-row');
-    if (!row) return;
-    const which = row.dataset.which;
-    const abs   = row.dataset.path;
-    // Anchor is only valid if it still exists in the current entries
-    // list (after refresh / navigation the prior path may be gone).
-    const anchor = _exploreAnchor[which];
-    const haveAnchor = anchor
-      && _exploreEntries[which].some((x) => x.path === anchor);
-    // Windows-style rules: shift = replace range, ctrl+shift = add
-    // range to existing, ctrl alone = toggle, plain click = select only.
-    if (e.shiftKey && haveAnchor) {
-      if (e.ctrlKey || e.metaKey) _addRange(which, anchor, abs);
-      else                        _selectRange(which, anchor, abs);
-    } else if (e.ctrlKey || e.metaKey) {
-      _toggleSelected(which, abs);
-    } else {
-      _selectOnly(which, abs);
-    }
-  }
-
-  function handleExploreRowDblClick(e) {
-    const row = e.target.closest('.explore-row');
-    if (!row) return;
-    const which = row.dataset.which;
-    const isDir = row.dataset.isDir === 'true';
-    const name  = row.dataset.name;
-    const abs   = row.dataset.path;
-    const rel   = row.dataset.rel || name;
-    if (isDir) {
-      navigateInto(which, name);
-      return;
-    }
-    // Images + videos play in the inline viewer (cover overlay inside
-    // the explore pane). Native <video controls> gives seek / volume /
-    // fullscreen / PiP for free. Anything else (text, archives, etc.)
-    // falls through to the OS default app.
-    if (_IMG_RENDER_RE.test(name) || _VIDEO_RENDER_RE.test(name)) {
-      _openExploreViewer(which, abs, name, rel);
-    } else {
-      window.dash?.shellOpenPath?.(abs).catch(() => {});
-    }
-  }
-
-  // ── Inline media viewer (explore pane) ───────────────────────────
-  // Used by handleExploreRowDblClick. Image or video chosen by extension.
-  const exploreViewerEl       = document.getElementById('explore-viewer');
-  const exploreViewerNameEl   = document.getElementById('explore-viewer-name');
-  const exploreViewerImgEl    = document.getElementById('explore-viewer-img');
-  const exploreViewerVidEl    = document.getElementById('explore-viewer-vid');
-  const exploreViewerStageEl  = document.getElementById('explore-viewer-stage');
-  const exploreViewerCloseBtn = document.getElementById('explore-viewer-close-btn');
-  const exploreViewerFsBtn    = document.getElementById('explore-viewer-fs-btn');
-  const exploreViewerPopoutBtn= document.getElementById('explore-viewer-popout-btn');
-  let _exploreViewerCurrent = null; // { which, abs, name }
-  function _openExploreViewer(which, abs, name, rel) {
-    if (!exploreViewerEl) return;
-    _exploreViewerCurrent = { which, abs, name };
-    if (exploreViewerNameEl) exploreViewerNameEl.textContent = name;
-    const url = `dash3d-file://${which}/${encodeURI(rel || name)}`;
-    const isVid = _VIDEO_RENDER_RE.test(name);
-    if (isVid) {
-      if (exploreViewerImgEl) { exploreViewerImgEl.hidden = true; exploreViewerImgEl.removeAttribute('src'); }
-      if (exploreViewerVidEl) {
-        exploreViewerVidEl.hidden = false;
-        exploreViewerVidEl.src = url;
-        try { exploreViewerVidEl.load(); } catch {}
-        // Auto-play unmuted on click — user intent is clear.
-        exploreViewerVidEl.play?.().catch(() => {});
-      }
-    } else {
-      if (exploreViewerVidEl) {
-        try { exploreViewerVidEl.pause(); } catch {}
-        exploreViewerVidEl.removeAttribute('src');
-        try { exploreViewerVidEl.load(); } catch {}
-        exploreViewerVidEl.hidden = true;
-      }
-      if (exploreViewerImgEl) {
-        exploreViewerImgEl.hidden = false;
-        exploreViewerImgEl.src = url;
-      }
-    }
-    exploreViewerEl.hidden = false;
-  }
-  function _closeExploreViewer() {
-    if (!exploreViewerEl || exploreViewerEl.hidden) return;
-    if (document.fullscreenElement === exploreViewerEl) {
-      try { document.exitFullscreen(); } catch {}
-    }
-    if (exploreViewerVidEl) {
-      try { exploreViewerVidEl.pause(); } catch {}
-      exploreViewerVidEl.removeAttribute('src');
-      try { exploreViewerVidEl.load(); } catch {}
-      exploreViewerVidEl.hidden = true;
-    }
-    if (exploreViewerImgEl) {
-      exploreViewerImgEl.removeAttribute('src');
-      exploreViewerImgEl.hidden = true;
-    }
-    exploreViewerEl.hidden = true;
-    _exploreViewerCurrent = null;
-  }
-  // × button + Esc key close.
-  exploreViewerCloseBtn?.addEventListener('click', _closeExploreViewer);
-  document.addEventListener('keydown', (ev) => {
-    if (!exploreViewerEl || exploreViewerEl.hidden) return;
-    if (ev.key === 'Escape' && !document.fullscreenElement) {
-      _closeExploreViewer();
-    } else if ((ev.key === 'f' || ev.key === 'F') && !ev.metaKey && !ev.ctrlKey) {
-      const tag = (ev.target && ev.target.tagName) || '';
-      // Don't grab F while the user is typing in an input.
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || (ev.target && ev.target.isContentEditable)) return;
-      ev.preventDefault();
-      _toggleExploreViewerFullscreen();
-    }
-  });
-  // ⛶ fullscreen — request fullscreen on the viewer wrapper so both
-  // image + video modes get edge-to-edge display. The viewer's CSS
-  // hides the head row inside :fullscreen and stretches the media.
-  function _toggleExploreViewerFullscreen() {
-    if (!exploreViewerEl) return;
-    if (document.fullscreenElement === exploreViewerEl) {
-      try { document.exitFullscreen(); } catch {}
-    } else {
-      try { exploreViewerEl.requestFullscreen?.(); } catch {}
-    }
-  }
-  exploreViewerFsBtn?.addEventListener('click', _toggleExploreViewerFullscreen);
-  // ⇱ pop-out — falls back to the original frameless overlay window
-  // (main.js: open-image-viewer) for images. For videos, hands off to
-  // the OS default app since main's overlay only displays an <img>.
-  exploreViewerPopoutBtn?.addEventListener('click', () => {
-    const cur = _exploreViewerCurrent;
-    if (!cur) return;
-    if (_IMG_RENDER_RE.test(cur.name) && window.dash?.openImageViewer) {
-      window.dash.openImageViewer(cur.abs).catch(() => {});
-    } else {
-      window.dash?.shellOpenPath?.(cur.abs).catch(() => {});
-    }
-  });
-
-  // Inline new-folder row — prepends a placeholder row with an input to
-  // the top of the list. Enter calls exploreMkdir; Esc / empty-blur drops
-  // the row. We use this pattern instead of window.prompt() because
-  // Electron's renderer returns null from prompt() by default (no host
-  // dialog handler), which silently swallowed clicks before.
-  function startNewFolder(which) {
-    const listEl = _exploreListEls[which];
-    if (!listEl) return;
-    // Drop any existing placeholder so successive clicks don't stack rows.
-    listEl.querySelector('.explore-row.is-creating')?.remove();
-    // If the list is empty (showing "EMPTY · DROP FILES …"), clear that
-    // hint while we add the input row.
-    const empty = listEl.querySelector('.explore-empty');
-    if (empty) empty.remove();
-    const row = document.createElement('li');
-    row.className = 'explore-row is-dir is-creating';
-    row.innerHTML =
-      `<input type="text" class="explore-row-rename" placeholder="new folder">` +
-      `<span class="explore-row-size">—</span>` +
-      `<span class="explore-row-time">—</span>`;
-    listEl.prepend(row);
-    const input = row.querySelector('.explore-row-rename');
-    input.focus();
-    let done = false;
-    const finish = async (commit) => {
-      if (done) return; done = true;
-      const name = input.value.trim();
-      row.remove();
-      if (!commit || !name) { refreshExploreSection(which); return; }
-      const sub = _exploreSubdir[which] || '';
-      const rel = sub ? `${sub}/${name}` : name;
-      const r = await window.dash?.exploreMkdir?.(which, rel);
-      if (!r?.ok) console.warn('[explore] mkdir failed:', r?.error);
-      refreshExploreSection(which);
-    };
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
-      else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
-    });
-    input.addEventListener('blur', () => finish(true));
-    input.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  }
-
-  // Inline rename — replaces the row's name span with a text input. Enter
-  // commits, Esc cancels, blur commits. Filenames with path separators
-  // are rejected by main and surface as an error log.
-  function startRename(row) {
-    if (!row) return;
-    const nameEl = row.querySelector('.explore-row-name');
-    if (!nameEl || nameEl.dataset.editing === 'true') return;
-    const oldName = row.dataset.name;
-    const oldAbs  = row.dataset.path;
-    const which   = row.dataset.which;
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'explore-row-rename';
-    input.value = oldName;
-    nameEl.dataset.editing = 'true';
-    nameEl.replaceWith(input);
-    input.focus();
-    // Select the basename minus extension so common rename = retype name.
-    const dot = oldName.lastIndexOf('.');
-    input.setSelectionRange(0, dot > 0 ? dot : oldName.length);
-    let done = false;
-    const commit = async (cancel) => {
-      if (done) return; done = true;
-      const next = input.value.trim();
-      const restoreSpan = () => {
-        const span = document.createElement('span');
-        span.className = 'explore-row-name';
-        span.textContent = next || oldName;
-        input.replaceWith(span);
-      };
-      if (cancel || !next || next === oldName) { restoreSpan(); refreshExploreSection(which); return; }
-      const r = await window.dash?.exploreRename?.(oldAbs, next);
-      if (!r?.ok) console.warn('[explore] rename failed:', r?.error);
-      restoreSpan();
-      refreshExploreSection(which);
-    };
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); commit(false); }
-      else if (ev.key === 'Escape') { ev.preventDefault(); commit(true); }
-    });
-    input.addEventListener('blur', () => commit(false));
-    input.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  }
-
-  function handleExploreKeydown(ev) {
-    // Only react when EXPLORE is the active combo mode (so typing in the
-    // chat / notes editors keeps working). Pick whichever section has a
-    // non-empty selection when the event isn't otherwise scoped.
-    if (comboPanel?.dataset.mode !== 'explore') return;
-    const w = _exploreSelected.gallery.size ? 'gallery'
-            : _exploreSelected.docs.size    ? 'docs'
-            : null;
-    if (!w) return;
-    const sel = [..._exploreSelected[w]];
-    if (ev.key === 'F2') {
-      if (sel.length !== 1) return;
-      ev.preventDefault();
-      const listEl = _exploreListEls[w];
-      const row = listEl?.querySelector(`.explore-row[data-path="${CSS.escape(sel[0])}"]`);
-      startRename(row);
-    } else if (ev.key === 'Delete') {
-      ev.preventDefault();
-      deleteSelectedAll(w);
-    } else if (ev.key === 'Backspace' && ev.altKey) {
-      ev.preventDefault();
-      navigateUp(w);
-    } else if (ev.key === ' ') {
-      // Spacebar — fullscreen view. One image → single-image viewer; many
-      // → contact-sheet grid window. Folders / non-images are skipped.
-      ev.preventDefault();
-      const imgs = sel.filter((p) => _IMG_RENDER_RE.test(p));
-      if (imgs.length === 1 && window.dash?.openImageViewer) {
-        window.dash.openImageViewer(imgs[0]).catch(() => {});
-      } else if (imgs.length > 1 && window.dash?.openContactSheet) {
-        window.dash.openContactSheet(imgs).catch(() => {});
-      }
-    } else if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'a' || ev.key === 'A')) {
-      ev.preventDefault();
-      const next = new Set(_exploreEntries[w].map((e) => e.path));
-      _exploreSelected[w] = next;
-      applyExploreSelection(w);
-    }
-  }
-
-  // Multi-aware delete: trash every selected entry. Uses the same
-  // shell.trashItem path as the single-row delete so items are
-  // recoverable from the OS Recycle Bin.
-  async function deleteSelectedAll(which) {
-    const paths = [..._exploreSelected[which]];
-    if (!paths.length) return;
-    const batch = [];
-    for (const abs of paths) {
-      try {
-        const r = await window.dash?.exploreDelete?.(abs);
-        if (r?.ok && r.trashPath && r.origPath) {
-          batch.push({ origPath: r.origPath, trashPath: r.trashPath, name: r.name });
-        } else if (!r?.ok) {
-          console.warn('[explore] delete failed:', abs, r?.error);
-        }
-      } catch {}
-    }
-    if (batch.length && typeof _visualizerUndoStack !== 'undefined') {
-      _visualizerUndoStack.push({ batch, at: Date.now() });
-      if (typeof _refreshUndoBtn === 'function') _refreshUndoBtn();
-    }
-    _exploreSelected[which].clear();
-    _exploreAnchor[which] = null;
-    refreshExploreSection(which);
-  }
-  // Copy selected paths to the OS clipboard as Windows file objects so
-  // they can be pasted into Explorer / Photos / etc.
-  async function copySelectedAll(which) {
-    const paths = [..._exploreSelected[which]];
-    if (!paths.length || !window.dash?.clipboardCopyFiles) return;
-    const r = await window.dash.clipboardCopyFiles(paths);
-    if (!r?.ok) console.warn('[explore] copy failed:', r?.error);
-  }
-
-  // Double-click on the name span specifically to start a rename even
-  // without pre-selecting (matches Explorer-on-Windows behavior).
-  function handleNameDblClick(ev) {
-    if (!ev.target.classList?.contains('explore-row-name')) return;
-    if (!ev.altKey) return; // Alt+dbl-click renames; plain dbl-click navigates/opens
-    ev.preventDefault();
-    const row = ev.target.closest('.explore-row');
-    startRename(row);
-  }
-
-  // Right-click context menu — COPY (CF_HDROP via PowerShell Set-Clipboard)
-  // and DELETE (Recycle Bin). Floats next to the cursor; auto-dismisses on
-  // any outside click or escape. If the right-clicked row isn't already in
-  // the selection, switch the selection to just that row first so the
-  // menu actions match the visual selection.
-  let _exploreCtxMenu = null;
-  function hideExploreCtxMenu() {
-    _exploreCtxMenu?.remove();
-    _exploreCtxMenu = null;
-  }
-  function showExploreCtxMenu(x, y, which) {
-    hideExploreCtxMenu();
-    const menu = document.createElement('div');
-    menu.className = 'explore-context-menu';
-    menu.innerHTML =
-      '<button type="button" class="explore-context-item" data-action="copy">COPY</button>' +
-      '<button type="button" class="explore-context-item" data-action="delete">DELETE</button>';
-    document.body.appendChild(menu);
-    // Clamp to viewport edges so the menu doesn't render off-screen.
-    const r = menu.getBoundingClientRect();
-    const px = Math.min(x, window.innerWidth  - r.width  - 4);
-    const py = Math.min(y, window.innerHeight - r.height - 4);
-    menu.style.left = `${px}px`;
-    menu.style.top  = `${py}px`;
-    _exploreCtxMenu = menu;
-    menu.addEventListener('click', (ev) => {
-      const a = ev.target?.dataset?.action;
-      if (a === 'copy')   copySelectedAll(which);
-      if (a === 'delete') deleteSelectedAll(which);
-      hideExploreCtxMenu();
-    });
-    menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  }
-  function handleExploreContextMenu(ev) {
-    const row = ev.target.closest('.explore-row');
-    if (!row) return;
-    ev.preventDefault();
-    const which = row.dataset.which;
-    if (!_exploreSelected[which].has(row.dataset.path)) {
-      _selectOnly(which, row.dataset.path);
-    }
-    showExploreCtxMenu(ev.clientX, ev.clientY, which);
-  }
-  document.addEventListener('mousedown', (ev) => {
-    if (_exploreCtxMenu && !_exploreCtxMenu.contains(ev.target)) hideExploreCtxMenu();
-  }, true);
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && _exploreCtxMenu) hideExploreCtxMenu();
-  });
-
-  for (const listEl of Object.values(_exploreListEls)) {
-    if (!listEl) continue;
-    listEl.addEventListener('click',       handleExploreRowClick);
-    listEl.addEventListener('dblclick',    handleExploreRowDblClick);
-    listEl.addEventListener('dblclick',    handleNameDblClick);
-    listEl.addEventListener('contextmenu', handleExploreContextMenu);
-  }
-  document.addEventListener('keydown', handleExploreKeydown);
-
-  function bindExploreActionButtons(attr, handler) {
-    explorePane?.querySelectorAll(`[${attr}]`).forEach((btn) => {
-      btn.addEventListener('mousedown', (ev) => ev.stopPropagation());
-      btn.addEventListener('click', () => handler(btn.getAttribute(attr)));
-    });
-  }
-  bindExploreActionButtons('data-explore-refresh', (which) => refreshExploreSection(which));
-  bindExploreActionButtons('data-explore-up',      (which) => navigateUp(which));
-  bindExploreActionButtons('data-explore-mkdir',   (which) => startNewFolder(which));
-
-  // Header delete button — multi-aware; trashes everything in the
-  // selection set. Discoverable equivalent of the Del key.
-  bindExploreActionButtons('data-explore-delete', (which) => deleteSelectedAll(which));
-  // Same shape as _exploreListBridges — IPC bridges for root-path lookup.
-  const _explorePathBridges = {
-    gallery:   () => window.dash?.galleryPath,
-    docs:      () => window.dash?.docsPath,
-    downloads: () => window.dash?.downloadsPath,
-  };
-  bindExploreActionButtons('data-explore-open', async (which) => {
-    const pathFn = _explorePathBridges[which]?.();
-    const root = await pathFn?.();
-    const sub = _exploreSubdir[which] || '';
-    const target = sub ? `${root}\\${sub.replace(/\//g, '\\')}` : root;
-    if (target) window.dash?.shellOpenPath?.(target).catch(() => {});
-  });
-
-  // ── Visualizer (video player) ───────────────────────────────────────
-  // Pulls video files (recursively-ish via the same `gallery-list` IPC,
-  // currently flat) from the gallery folder and lets the user pick one to
-  // play in an inline <video>. Audio visualization comes for free from the
-  // dashboard's existing system-loopback bars — anything playing here
-  // routes through Windows audio and shows up in the OUTPUT bars panel.
-  const visualizerListEl = document.getElementById('visualizer-list');
-  const visualizerVideoEl = document.getElementById('visualizer-video');
-  const visualizerWrapEl = visualizerPane?.querySelector('.visualizer-player-wrap');
-  const visualizerNowEl = document.getElementById('visualizer-now');
-  let _visualizerEntries = [];
-  let _visualizerCurrent = null;
-  // Subdir within the gallery root. '' = top of gallery; otherwise a
-  // forward-slash relative path like 'recordings' or 'screencap'.
-  // The list acts as a navigator — clicking a folder enters it, the
-  // first row is an UP entry when not at root.
-  let _visualizerSubdir = '';
-  // Multi-select state — only image entries can be selected (used by
-  // the PROCESS button to stitch snaps into a video). Anchor is the
-  // last non-shift clicked path; shift-click range-selects to it.
-  let _visualizerSelected = new Set();
-  let _visualizerAnchor = null;
-
-  function _crumbFromSubdir(subdir) {
-    if (!subdir) return 'REC ROOM · CAPTURES';
-    return 'REC ROOM / ' + subdir.split('/').filter(Boolean).map(s => s.toUpperCase()).join(' / ');
-  }
-
-  function renderVisualizerList(entries) {
-    if (!visualizerListEl) return;
-    visualizerListEl.innerHTML = '';
-    // Up-row when in a subdir, so the user can climb back out without
-    // a separate button.
-    if (_visualizerSubdir) {
-      const upRow = document.createElement('li');
-      upRow.className = 'visualizer-row is-dir is-up';
-      upRow.dataset.action = 'up';
-      upRow.innerHTML =
-        `<span class="visualizer-row-name">.. (UP)</span>` +
-        `<span class="visualizer-row-size">—</span>` +
-        `<span class="visualizer-row-time">—</span>`;
-      visualizerListEl.appendChild(upRow);
-    }
-    if (!entries.length && !_visualizerSubdir) {
-      const empty = document.createElement('li');
-      empty.className = 'explore-empty';
-      empty.textContent = 'EMPTY · USE REC / SNAP TO CREATE CAPTURES, OR DROP MEDIA INTO gallery/';
-      visualizerListEl.appendChild(empty);
-      return;
-    }
-    for (const e of entries) {
-      const row = document.createElement('li');
-      row.className = 'visualizer-row'
-        + (e.isDir ? ' is-dir' : '')
-        + (_visualizerCurrent === e.path ? ' is-playing' : '')
-        + (_visualizerSelected.has(e.path) ? ' is-selected' : '');
-      row.dataset.path  = e.path;
-      row.dataset.rel   = e.rel;
-      row.dataset.isDir = String(e.isDir);
-      row.dataset.name  = e.name;
-      row.title = e.path;
-      // Make video AND image rows draggable into the editor's
-      // timeline. The custom mime carries the path + a `kind` token so
-      // the drop target knows whether to set up a video or still-image
-      // clip without re-checking the extension.
-      const isVidRow = !e.isDir && _VIDEO_RENDER_RE.test(e.name);
-      const isImgRow = !e.isDir && _IMG_RENDER_RE.test(e.name);
-      if (isVidRow || isImgRow) {
-        row.draggable = true;
-        row.addEventListener('dragstart', (ev) => {
-          ev.dataTransfer.setData('application/x-dash3d-capture', e.path);
-          ev.dataTransfer.setData('application/x-dash3d-kind', isImgRow ? 'image' : 'video');
-          ev.dataTransfer.setData('text/plain', e.name);
-          ev.dataTransfer.effectAllowed = 'copy';
-        });
-      }
-      // Lead glyph hints at the type without taking grid space.
-      const glyph = e.isDir ? '▣ '
-        : _VIDEO_KNOWN_RE.test(e.name) ? '▶ '
-        : _IMG_KNOWN_RE.test(e.name) ? '◇ '
-        : '∙ ';
-      row.innerHTML =
-        `<span class="visualizer-row-name">${glyph}${e.name.replace(/</g, '&lt;')}</span>` +
-        `<span class="visualizer-row-size">${e.isDir ? '—' : fmtBytes(e.size)}</span>` +
-        `<span class="visualizer-row-time">${fmtFileTime(e.mtime)}</span>`;
-      visualizerListEl.appendChild(row);
-    }
-  }
-
-  // Folders the rec-room is allowed to surface at root. Both live under
-  // the main gallery so they're also visible in the EXPLORE pane, but
-  // the rec-room only ever shows these two and what's inside them —
-  // user-imported gallery files stay invisible here.
-  const RECROOM_ROOT_DIRS = ['recordings', 'screencap'];
-  async function refreshVisualizer() {
-    if (!window.dash?.galleryList) return;
-    let entries;
-    if (!_visualizerSubdir) {
-      // Synthesize the two managed folders at root. We don't show any
-      // other top-level gallery content here — only the rec-room's own
-      // captures. If a folder doesn't physically exist yet (no caps
-      // recorded), inject an empty placeholder so the user can still
-      // see it. Sizes / mtimes come from the real galleryList entry
-      // when available so the row reads accurately.
-      const result = await window.dash.galleryList('');
-      const real = new Map();
-      for (const e of (result?.entries || [])) {
-        if (e.isDir && RECROOM_ROOT_DIRS.includes(e.name)) real.set(e.name, e);
-      }
-      entries = RECROOM_ROOT_DIRS.map((name) => real.get(name) || {
-        name, path: '', rel: name, isDir: true, size: 0, mtime: 0,
-      });
-    } else {
-      const result = await window.dash.galleryList(_visualizerSubdir);
-      // Inside recordings/ or screencap/: show every video + image.
-      entries = (result?.entries || []).filter((e) => e.isDir
-        || _VIDEO_KNOWN_RE.test(e.name)
-        || _IMG_KNOWN_RE.test(e.name));
-    }
-    _visualizerEntries = entries;
-    renderVisualizerList(entries);
-    const titleEl = visualizerPane?.querySelector('.visualizer-list-title');
-    if (titleEl) titleEl.textContent = _crumbFromSubdir(_visualizerSubdir);
-  }
-
-  function playVisualizerEntry(entry) {
-    if (!visualizerVideoEl || !entry) return;
-    if (!_VIDEO_RENDER_RE.test(entry.name)) {
-      // Codec the browser can't decode — fall back to the OS default app.
-      window.dash?.shellOpenPath?.(entry.path).catch(() => {});
-      return;
-    }
-    // If the mirror is live, tear it down first — playing a recorded
-    // file means switching the <video> element from MediaStream
-    // (srcObject) back to a plain URL (src), which is messy if both
-    // are set. _stopVisualizerMirror cascades into _stopScreenrec so
-    // any in-progress recording is flushed cleanly first.
-    if (_mirrorStream) {
-      try { _stopVisualizerMirror(); } catch {}
-    }
-    // Auto-disable CROP when starting playback. CROP applies to the
-    // live mirror; once a recorded file is on screen the user wants
-    // the full frame, not a cropped subregion. Mirror the click-handler
-    // side-effects so the toggle button, overlay, and FIT view all
-    // reflect the new state.
-    if (_cropActive) {
-      _cropActive = false;
-      const btn = document.getElementById('visualizer-crop-btn');
-      if (btn) {
-        btn.classList.remove('is-active');
-        btn.textContent = 'CROP';
-      }
-      try { _refreshCropFitView(); } catch {}
-    }
-    // Switch out of still-image mode (in case the last click was a snap).
-    const stillEl = document.getElementById('visualizer-still');
-    if (stillEl) stillEl.src = '';
-    visualizerWrapEl?.classList.remove('is-still');
-    _visualizerCurrent = entry.path;
-    const url = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-    // Setting src on a fresh video element naturally starts it
-    // paused at currentTime=0 — no need to force pause() or
-    // currentTime=0 here (forcing them before metadata had loaded
-    // was leaving the element in a state where the subsequent
-    // play() click from the toolbar would silently reject).
-    visualizerVideoEl.src = url;
-    // Honour the saved mute preference — without this, the element
-    // would inherit the force-mute it picked up during a prior mirror
-    // session and recordings would play silently.
-    if (typeof _applyMute === 'function') _applyMute(!!_recRoomMutedPref);
-    // `is-playing` here means "a video is loaded" (toggles the empty
-    // overlay off) — keep adding it even though we're not actively
-    // playing. CSS that depends on it stays correct.
-    visualizerWrapEl?.classList.add('is-playing');
-    if (visualizerNowEl) visualizerNowEl.textContent = entry.name;
-    // Repaint list to highlight the now-playing row.
-    renderVisualizerList(_visualizerEntries);
-    _refreshDeleteBtn();
-    if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
-  }
-
-  // Show a still image (snap) in the player wrap. We stop any video
-  // playback first so the audio doesn't keep going while staring at a
-  // static frame, and never call openImageViewer — per the rec-room
-  // rule that media plays in this pane and nowhere else.
-  // Source dimensions — updated whenever a mirror starts, a recording's
-  // metadata loads, or a still snap loads. Drives the wrap's aspect
-  // (auto-fit always wins now — no manual portrait/landscape toggle)
-  // and the FIT-crop preview pipeline below.
-  let _lastSourceW = 0;
-  let _lastSourceH = 0;
-  let _cropFitActive = false;
-  function _refreshWrapShape() {
-    if (!visualizerWrapEl) return;
-    // FIT+CROP active → wrap reshapes to the crop region's pixel
-    // aspect, so the cropped fill fills the wrap with no letterbox.
-    // Otherwise → wrap matches the raw source aspect.
-    let w = 0, h = 0;
-    if (_cropFitActive && _cropActive && _lastSourceW > 0 && _lastSourceH > 0) {
-      w = Math.max(1, _cropRect.w * _lastSourceW);
-      h = Math.max(1, _cropRect.h * _lastSourceH);
-    } else if (_lastSourceW > 0 && _lastSourceH > 0) {
-      w = _lastSourceW;
-      h = _lastSourceH;
-    }
-    if (w > 0 && h > 0) {
-      visualizerWrapEl.style.setProperty('--source-aspect', `${w} / ${h}`);
-      // Cap the wrap to the source's native pixel size so the player
-      // never upscales beyond what's actually in the file/stream. A
-      // 1280x720 .mp4 will display at 1280x720 (or smaller if the pane
-      // can't fit it), not stretched up to fill 1920x1080. CSS reads
-      // these as `max-width: min(100%, var(...))` etc.
-      visualizerWrapEl.style.setProperty('--source-max-width',  `${Math.round(w)}px`);
-      visualizerWrapEl.style.setProperty('--source-max-height', `${Math.round(h)}px`);
-      visualizerWrapEl.classList.add('is-source-aspect');
-    } else {
-      visualizerWrapEl.style.removeProperty('--source-aspect');
-      visualizerWrapEl.style.removeProperty('--source-max-width');
-      visualizerWrapEl.style.removeProperty('--source-max-height');
-      visualizerWrapEl.classList.remove('is-source-aspect');
-    }
-  }
-  function _setSourceDims(w, h) {
-    _lastSourceW = w | 0;
-    _lastSourceH = h | 0;
-    _refreshWrapShape();
-  }
-
-  function showStillImage(entry) {
-    if (!entry || !_IMG_KNOWN_RE.test(entry.name)) return;
-    // Tear down the mirror so viewing a snap doesn't keep a live
-    // MediaStream silently churning behind the still image.
-    if (_mirrorStream) {
-      try { _stopVisualizerMirror(); } catch {}
-    }
-    if (visualizerVideoEl) {
-      try { visualizerVideoEl.pause(); } catch {}
-      visualizerVideoEl.removeAttribute('src');
-      try { visualizerVideoEl.load(); } catch {}
-    }
-    _visualizerCurrent = entry.path;
-    const stillEl = document.getElementById('visualizer-still');
-    if (stillEl) stillEl.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-    visualizerWrapEl?.classList.remove('is-playing');
-    visualizerWrapEl?.classList.add('is-still');
-    if (visualizerNowEl) visualizerNowEl.textContent = entry.name;
-    renderVisualizerList(_visualizerEntries);
-    _refreshDeleteBtn();
-    if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
-  }
-
-  // ── Transport controls ──────────────────────────────────────────────
-  // List of playable video entries from the current view. Used by the
-  // play/pause + prev/next transport so they skip over folders and
-  // image files that the gallery browser also surfaces.
-  function _playableEntries() {
-    return _visualizerEntries.filter((e) => !e.isDir && _VIDEO_KNOWN_RE.test(e.name));
-  }
-  function togglePlayPause() {
-    if (!visualizerVideoEl) return;
-    if (!visualizerVideoEl.currentSrc) {
-      const first = _playableEntries()[0];
-      if (first) playVisualizerEntry(first);
-      return;
-    }
-    if (visualizerVideoEl.paused) {
-      // Log a rejected play() — it used to be silently swallowed,
-      // which made "click play, nothing happens" indistinguishable
-      // from a real bug. Now we'll see the actual reason in dev
-      // tools (autoplay-policy, unsupported codec, etc.).
-      visualizerVideoEl.play().catch((err) => {
-        console.warn('[rec-room] play() rejected:', err?.name, err?.message);
-      });
-    }
-    else visualizerVideoEl.pause();
-  }
-  function playRelative(step) {
-    const playable = _playableEntries();
-    if (!playable.length) return;
-    const idx = playable.findIndex((e) => e.path === _visualizerCurrent);
-    let nextIdx;
-    if (idx < 0) {
-      nextIdx = step > 0 ? 0 : playable.length - 1;
-    } else {
-      nextIdx = (idx + step + playable.length) % playable.length;
-    }
-    playVisualizerEntry(playable[nextIdx]);
-  }
-  function updatePlayPauseIcon() {
-    const btn = document.getElementById('visualizer-playpause-btn');
-    if (!btn) return;
-    const playing = visualizerVideoEl && !visualizerVideoEl.paused && !!visualizerVideoEl.currentSrc;
-    // Toggle visibility on the two embedded SVGs (.vis-play-icon /
-    // .vis-pause-icon). currentColor is bound to the parent button's
-    // `color`, so they pick up the theme automatically.
-    const playIcon  = btn.querySelector('.vis-play-icon');
-    const pauseIcon = btn.querySelector('.vis-pause-icon');
-    if (playIcon)  playIcon.hidden  = !!playing;
-    if (pauseIcon) pauseIcon.hidden = !playing;
-    btn.title = playing ? 'Pause' : 'Play';
-  }
-
-  // List of image entries from the current view, ordered as displayed
-  // (folders + the up-row are skipped). Used for shift-click range
-  // selection so the range only includes selectable items.
-  function _imageEntriesInView() {
-    return _visualizerEntries.filter((e) => !e.isDir && _IMG_KNOWN_RE.test(e.name));
-  }
-  function _repaintSelection() {
-    if (!visualizerListEl) return;
-    for (const row of visualizerListEl.querySelectorAll('.visualizer-row')) {
-      row.classList.toggle('is-selected', _visualizerSelected.has(row.dataset.path));
-    }
-    _refreshProcessBtn();
-    _refreshDeleteBtn();
-    if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
-  }
-  function _refreshProcessBtn() {
-    const btn = document.getElementById('visualizer-process-btn');
-    if (!btn) return;
-    // Enable when the selection has any folder (folders get expanded to
-    // their image children at PROCESS time) OR ≥2 standalone images.
-    let folders = 0, images = 0;
-    for (const p of _visualizerSelected) {
-      const ent = _visualizerEntries.find((x) => x.path === p);
-      if (!ent) continue;
-      if (ent.isDir) folders++;
-      else if (_IMG_KNOWN_RE.test(ent.name)) images++;
-    }
-    btn.disabled = folders === 0 && images < 2;
-    if (folders > 0) btn.textContent = `PROCESS (${folders === 1 ? 'folder' : folders + ' folders'})`;
-    else if (images >= 2) btn.textContent = `PROCESS (${images})`;
-    else btn.textContent = 'PROCESS';
-  }
-  function _refreshDeleteBtn() {
-    const btn = document.getElementById('visualizer-delete-btn');
-    if (!btn) return;
-    const n = _visualizerSelected.size;
-    btn.disabled = n === 0 && !_visualizerCurrent;
-    btn.textContent = n >= 2 ? `DELETE (${n})` : 'DELETE';
-  }
-  function _clearVisualizerSelection() {
-    _visualizerSelected.clear();
-    _visualizerAnchor = null;
-    _repaintSelection();
-  }
-
-  visualizerListEl?.addEventListener('click', (e) => {
-    const row = e.target.closest('.visualizer-row');
-    if (!row) return;
-    // Up-row: pop the last segment off the subdir and refresh.
-    if (row.dataset.action === 'up') {
-      _clearVisualizerSelection();
-      const parts = _visualizerSubdir.split('/').filter(Boolean);
-      parts.pop();
-      _visualizerSubdir = parts.join('/');
-      refreshVisualizer();
-      return;
-    }
-    const entry = _visualizerEntries.find((x) => x.path === row.dataset.path);
-    if (!entry) return;
-    // Canonical Windows selection rules — separated from activation:
-    //   • shift            → replace selection with range from anchor
-    //   • ctrl+shift       → add range from anchor to selection
-    //   • ctrl (no shift)  → toggle this row in selection, anchor moves
-    //   • plain click      → select only this row, anchor=this, ACTIVATE
-    // If shift is pressed but the anchor is missing or no longer in the
-    // current view, the click falls through to plain-click behaviour.
-    const view = _visualizerEntries;
-    const haveAnchor = _visualizerAnchor
-      && view.some((x) => x.path === _visualizerAnchor);
-    if (e.shiftKey && haveAnchor) {
-      const ai = view.findIndex((x) => x.path === _visualizerAnchor);
-      const bi = view.findIndex((x) => x.path === entry.path);
-      const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
-      const range = view.slice(lo, hi + 1).map((x) => x.path);
-      if (e.ctrlKey || e.metaKey) {
-        for (const p of range) _visualizerSelected.add(p);
-      } else {
-        _visualizerSelected = new Set(range);
-      }
-      // Anchor stays put so successive shift-clicks expand from the
-      // original point (Explorer-style).
-      _repaintSelection();
-      return;
-    }
-    if (e.ctrlKey || e.metaKey) {
-      if (_visualizerSelected.has(entry.path)) _visualizerSelected.delete(entry.path);
-      else _visualizerSelected.add(entry.path);
-      _visualizerAnchor = entry.path;
-      _repaintSelection();
-      return;
-    }
-    // Plain click (or shift with no usable anchor). Always select-only +
-    // set anchor; the activation (preview / play / nothing) depends on
-    // the row type.
-    _visualizerSelected = new Set([entry.path]);
-    _visualizerAnchor = entry.path;
-    _repaintSelection();
-    // Shift-with-no-anchor: act as plain selection, no activation —
-    // matches Explorer when you shift-click without a prior selection.
-    if (e.shiftKey) return;
-    if (entry.isDir) {
-      // Plain click on a folder just selects (Windows behaviour).
-      // Double-click handler navigates into it.
-      return;
-    }
-    if (_IMG_KNOWN_RE.test(entry.name)) {
-      showStillImage(entry);
-    } else {
-      // Video — play in-place.
-      playVisualizerEntry(entry);
-    }
-  });
-
-  // ── Rec-room context menu: COPY (files to clipboard) + DELETE.
-  // Mirrors the EXPLORE pane's right-click. COPY uses the existing
-  // clipboardCopyFiles IPC (Windows CF_HDROP via PowerShell) so paths
-  // can be pasted into File Explorer, Photos, chat apps, etc. If the
-  // right-clicked row isn't already in the selection we switch the
-  // selection to just that row first so the menu actions match what's
-  // visually highlighted.
-  let _recCtxMenu = null;
-  function _hideRecCtxMenu() {
-    _recCtxMenu?.remove();
-    _recCtxMenu = null;
-  }
-  async function _copyVisualizerSelection() {
-    const paths = [..._visualizerSelected];
-    if (!paths.length) return;
-    try {
-      const r = await window.dash?.clipboardCopyFiles?.(paths);
-      if (!r?.ok) console.warn('[rec-room] copy failed:', r?.error);
-    } catch (err) { console.warn('[rec-room] copy threw:', err); }
-  }
-  async function _deleteVisualizerSelection() {
-    const targets = _visualizerSelected.size
-      ? [..._visualizerSelected]
-      : (_visualizerCurrent ? [_visualizerCurrent] : []);
-    if (!targets.length) return;
-    if (_visualizerCurrent && targets.includes(_visualizerCurrent)) {
-      try { visualizerVideoEl?.pause(); } catch {}
-      try { visualizerVideoEl?.removeAttribute('src'); visualizerVideoEl?.load(); } catch {}
-      _visualizerCurrent = null;
-      visualizerWrapEl?.classList.remove('is-playing', 'is-still');
-      if (visualizerNowEl) visualizerNowEl.textContent = '—';
-    }
-    for (const abs of targets) {
-      try {
-        const r = await window.dash?.exploreDelete?.(abs);
-        if (!r?.ok) console.warn('[rec-room] delete failed:', abs, r?.error);
-      } catch {}
-    }
-    _clearVisualizerSelection();
-    await refreshVisualizer();
-  }
-  function _showRecCtxMenu(x, y) {
-    _hideRecCtxMenu();
-    const menu = document.createElement('div');
-    menu.className = 'explore-context-menu';
-    menu.innerHTML =
-      '<button type="button" class="explore-context-item" data-action="copy">COPY</button>' +
-      '<button type="button" class="explore-context-item" data-action="delete">DELETE</button>';
-    document.body.appendChild(menu);
-    const r = menu.getBoundingClientRect();
-    const px = Math.min(x, window.innerWidth  - r.width  - 4);
-    const py = Math.min(y, window.innerHeight - r.height - 4);
-    menu.style.left = `${px}px`;
-    menu.style.top  = `${py}px`;
-    _recCtxMenu = menu;
-    menu.addEventListener('click', (ev) => {
-      const a = ev.target?.dataset?.action;
-      if (a === 'copy')   _copyVisualizerSelection();
-      if (a === 'delete') _deleteVisualizerSelection();
-      _hideRecCtxMenu();
-    });
-    menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  }
-  visualizerListEl?.addEventListener('contextmenu', (ev) => {
-    const row = ev.target.closest('.visualizer-row');
-    if (!row) return;
-    if (row.dataset.action === 'up' || row.dataset.isDir === 'true') return;
-    ev.preventDefault();
-    const p = row.dataset.path;
-    if (!_visualizerSelected.has(p)) {
-      _visualizerSelected = new Set([p]);
-      _visualizerAnchor = p;
-      _repaintSelection();
-    }
-    _showRecCtxMenu(ev.clientX, ev.clientY);
-  });
-  document.addEventListener('mousedown', (ev) => {
-    if (_recCtxMenu && !_recCtxMenu.contains(ev.target)) _hideRecCtxMenu();
-  }, true);
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && _recCtxMenu) _hideRecCtxMenu();
-    // Delete / Ctrl+C in the rec room — only fires when the rec-room
-    // list owns the active element so it doesn't conflict with the
-    // explore pane or text inputs.
-    const focusInList = document.activeElement === visualizerListEl
-      || visualizerListEl?.contains(document.activeElement);
-    const recRoomVisible = visualizerPane?.classList?.contains('is-visible');
-    if (!recRoomVisible) return;
-    // The visualizer list isn't normally focused (no tabindex), so also
-    // accept key events when the rec-room pane is the visible mode AND
-    // there's a non-empty selection — that's the user's clear signal
-    // that they're acting on the rec-room.
-    if (!focusInList && !_visualizerSelected.size) return;
-    if (ev.target.matches?.('input, textarea, [contenteditable=""], [contenteditable="true"]')) return;
-    if (ev.key === 'Delete') {
-      ev.preventDefault();
-      _deleteVisualizerSelection();
-    } else if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'c' || ev.key === 'C')) {
-      ev.preventDefault();
-      _copyVisualizerSelection();
-    }
-  });
-  // Double-click on a folder enters it. Single-click no longer navigates so
-  // selecting / right-clicking folders doesn't dump the user into them.
-  visualizerListEl?.addEventListener('dblclick', (e) => {
-    const row = e.target.closest('.visualizer-row');
-    if (!row) return;
-    if (row.dataset.action === 'up') return;
-    if (row.dataset.isDir !== 'true') return;
-    _clearVisualizerSelection();
-    _visualizerSubdir = row.dataset.rel;
-    refreshVisualizer();
-  });
-  document.getElementById('visualizer-refresh-btn')  ?.addEventListener('click', () => refreshVisualizer());
-  document.getElementById('visualizer-playpause-btn')?.addEventListener('click', togglePlayPause);
-  document.getElementById('visualizer-prev-btn')     ?.addEventListener('click', () => playRelative(-1));
-  document.getElementById('visualizer-next-btn')     ?.addEventListener('click', () => playRelative(+1));
-  // Session-scoped undo stack for deletions. Each entry remembers the
-  // managed-trash path + original path so a single button-click can
-  // restore the most recent batch. Cleared on app restart (the file
-  // remains in <root>/.trash so it's still recoverable via Empty Trash
-  // → OS Recycle Bin if needed).
-  const _visualizerUndoStack = []; // [{batch: [{origPath, trashPath, name}], ...}, ...]
-  function _refreshUndoBtn() {
-    const btn = document.getElementById('visualizer-undo-btn');
-    if (!btn) return;
-    btn.disabled = _visualizerUndoStack.length === 0;
-    btn.textContent = _visualizerUndoStack.length > 1
-      ? `UNDO (${_visualizerUndoStack.length})` : 'UNDO';
-  }
-  document.getElementById('visualizer-delete-btn')   ?.addEventListener('click', async () => {
-    const targets = _visualizerSelected.size
-      ? [..._visualizerSelected]
-      : (_visualizerCurrent ? [_visualizerCurrent] : []);
-    if (!targets.length) return;
-    if (_visualizerCurrent && targets.includes(_visualizerCurrent)) {
-      try { visualizerVideoEl?.pause(); } catch {}
-      try { visualizerVideoEl?.removeAttribute('src'); visualizerVideoEl?.load(); } catch {}
-      _visualizerCurrent = null;
-      visualizerWrapEl?.classList.remove('is-playing', 'is-still');
-      if (visualizerNowEl) visualizerNowEl.textContent = '—';
-    }
-    const batch = [];
-    for (const abs of targets) {
-      try {
-        const r = await window.dash?.exploreDelete?.(abs);
-        if (r?.ok && r.trashPath && r.origPath) {
-          batch.push({ origPath: r.origPath, trashPath: r.trashPath, name: r.name });
-        } else if (!r?.ok) {
-          console.warn('[rec-room] delete failed:', abs, r?.error);
-        }
-      } catch (err) { console.warn('[rec-room] delete threw:', err); }
-    }
-    if (batch.length) {
-      _visualizerUndoStack.push({ batch, at: Date.now() });
-      _refreshUndoBtn();
-      if (visualizerNowEl) visualizerNowEl.textContent = `DELETED ${batch.length} · UNDO READY`;
-    }
-    _clearVisualizerSelection();
-    await refreshVisualizer();
-  });
-  document.getElementById('visualizer-undo-btn')?.addEventListener('click', async () => {
-    const entry = _visualizerUndoStack.pop();
-    if (!entry) return;
-    _refreshUndoBtn();
-    let restored = 0;
-    for (const item of entry.batch) {
-      try {
-        const r = await window.dash?.exploreRestore?.({
-          origPath: item.origPath, trashPath: item.trashPath,
-        });
-        if (r?.ok) restored++;
-        else console.warn('[rec-room] restore failed:', item.name, r?.error);
-      } catch (err) { console.warn('[rec-room] restore threw:', err); }
-    }
-    if (visualizerNowEl) visualizerNowEl.textContent = `RESTORED ${restored}/${entry.batch.length}`;
-    await refreshVisualizer();
-  });
-  _refreshUndoBtn();
-
-  // ── §rec-split ── DRAGGABLE SPLITTER ──────────────────────────────
-  // Slim horizontal bar between the player/edit area and the captures
-  // list. Drag it to give more vertical space to either side. The %
-  // is stored in cfg.recSplitPct so it survives restarts.
-  const recSplitEl = document.getElementById('visualizer-split');
-  const _CLAMP = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-  function _applyRecSplit(pct) {
-    if (!visualizerPane) return;
-    const v = _CLAMP(Number(pct) || 60, 20, 85);
-    visualizerPane.style.setProperty('--rec-split-pct', `${v}%`);
-  }
-  (async () => {
-    try {
-      const cfg = (await window.dash?.getConfig?.()) || {};
-      if (Number.isFinite(cfg.recSplitPct)) _applyRecSplit(cfg.recSplitPct);
-      else _applyRecSplit(60);
-    } catch { _applyRecSplit(60); }
-  })();
-  let _splitDragging = false;
-  let _splitStartY = 0;
-  let _splitStartPct = 60;
-  recSplitEl?.addEventListener('pointerdown', (e) => {
-    if (!visualizerPane) return;
-    _splitDragging = true;
-    _splitStartY = e.clientY;
-    const paneRect = visualizerPane.getBoundingClientRect();
-    const curPctStr = getComputedStyle(visualizerPane).getPropertyValue('--rec-split-pct').trim();
-    _splitStartPct = parseFloat(curPctStr) || 60;
-    recSplitEl.classList.add('is-dragging');
-    recSplitEl.setPointerCapture?.(e.pointerId);
-    e.preventDefault();
-  });
-  recSplitEl?.addEventListener('pointermove', (e) => {
-    if (!_splitDragging || !visualizerPane) return;
-    const paneRect = visualizerPane.getBoundingClientRect();
-    if (paneRect.height <= 0) return;
-    const dy = e.clientY - _splitStartY;
-    const deltaPct = (dy / paneRect.height) * 100;
-    const next = _CLAMP(_splitStartPct + deltaPct, 20, 85);
-    visualizerPane.style.setProperty('--rec-split-pct', `${next}%`);
-  });
-  function _endSplitDrag() {
-    if (!_splitDragging) return;
-    _splitDragging = false;
-    recSplitEl?.classList.remove('is-dragging');
-    if (visualizerPane) {
-      const curPctStr = getComputedStyle(visualizerPane).getPropertyValue('--rec-split-pct').trim();
-      const v = parseFloat(curPctStr) || 60;
-      window.dash?.setConfig?.({ recSplitPct: v });
-    }
-  }
-  recSplitEl?.addEventListener('pointerup',     _endSplitDrag);
-  recSplitEl?.addEventListener('pointercancel', _endSplitDrag);
-
-  // ── §rec-edit ── EDIT MODE (trim + filters) ────────────────────
-  // Opens a split-pane editor on the currently-playing video. The
-  // ORIGINAL side plays straight; the EDITED side has a live CSS
-  // `filter:` chain driven by sliders. EXPORT pipes the same params
-  // (plus trim in/out) to ffmpeg in main, producing a new file in
-  // gallery/recordings/ next to the source.
-  const editBtn       = document.getElementById('visualizer-edit-btn');
-  const editPane      = document.getElementById('visualizer-edit-pane');
-  const editOrigVid   = document.getElementById('vis-edit-orig');
-  const editOutVid    = document.getElementById('vis-edit-out');
-  const editNameEl    = document.getElementById('vis-edit-name');
-  const editTimelineEl= document.getElementById('vis-edit-timeline');
-  const editTrimRangeEl= document.getElementById('vis-edit-trim-range');
-  const editTrimInEl  = document.getElementById('vis-edit-trim-in');
-  const editTrimOutEl = document.getElementById('vis-edit-trim-out');
-  const editPlayheadEl= document.getElementById('vis-edit-playhead');
-  const editTimeEl    = document.getElementById('vis-edit-time');
-  const editTrimTimesEl = document.getElementById('vis-edit-trim-times');
-  const editPlayBtn   = document.getElementById('vis-edit-play');
-  const editResetBtn  = document.getElementById('vis-edit-reset');
-  const editExportBtn = document.getElementById('vis-edit-export');
-  const editCloseBtn  = document.getElementById('vis-edit-close');
-  const editAutoBtn   = document.getElementById('vis-edit-auto');
-  const editDenoiseBtn= document.getElementById('vis-edit-denoise');
-  const editStatusEl  = document.getElementById('vis-edit-status');
-
-  // Editor state. trimIn/Out in seconds; duration cached once metadata
-  // loads. All filter values default to identity (no-op CSS string).
-  // sliders[*]:
-  //   brightness/contrast/saturation/hue/blur — CSS filter() chain
-  //   sharpen  — 0..200, unsharp-mask amount on export
-  //   vignette — 0..100, edge darkening strength
-  //   speed    — 25..400, playback rate as %
-  //   volume   — 0..200, audio gain as %
-  // crop is normalized [0..1] x [0..1]; rotate is degrees (0/90/180/270).
-  const _editState = {
-    open: false,
-    src: '',           // absolute file path of the source/anchor video
-    // Optional appended clips. First entry mirrors `src` and is treated
-    // as the anchor — trim handles on the timeline apply to it. The
-    // rest play in full after the anchor. Each: { path, name, duration }.
-    clips: [],
-    duration: 0,
-    trimIn: 0,
-    trimOut: 0,
-    auto: false,
-    denoise: false,
-    bw: false,
-    sepia: false,
-    invert: false,
-    reverse: false,
-    mute: false,
-    flipH: false,
-    flipV: false,
-    rotate: 0,
-    cropOn: false,
-    crop: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 },
-    sliders: {
-      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
-      sharpen: 0, vignette: 0, speed: 100, volume: 100,
-    },
-  };
-  // Mirror process popover filter state — same shape so the same
-  // helpers serialize both into a -vf string.
-  const _procFilterState = {
-    auto: false,
-    denoise: false,
-    sliders: {
-      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
-    },
-  };
-  function _editIsIdentity(s, flags) {
-    return s.brightness === 100 && s.contrast === 100 && s.saturation === 100
-      && s.hue === 0 && s.blur === 0 && !flags.auto && !flags.denoise;
-  }
-  function _editCssFilter(state) {
-    const s = state.sliders;
-    const parts = [];
-    let brightness = s.brightness, contrast = s.contrast, saturation = s.saturation;
-    if (state.auto) { contrast = Math.min(200, contrast + 15); saturation = Math.min(200, saturation + 10); }
-    if (brightness !== 100) parts.push(`brightness(${brightness}%)`);
-    if (contrast   !== 100) parts.push(`contrast(${contrast}%)`);
-    if (saturation !== 100) parts.push(`saturate(${saturation}%)`);
-    if (s.hue !== 0)        parts.push(`hue-rotate(${s.hue}deg)`);
-    if (s.blur > 0)         parts.push(`blur(${s.blur}px)`);
-    // Sharpen has no native CSS filter. The "sharper" look comes from a
-    // contrast nudge in preview; the real unsharp-mask runs in ffmpeg.
-    if (s.sharpen > 0) parts.push(`contrast(${100 + s.sharpen * 0.1}%)`);
-    // Black-and-white / sepia / invert as single-shot toggles.
-    if (state.bw)      parts.push('grayscale(100%)');
-    if (state.sepia)   parts.push('sepia(100%)');
-    if (state.invert)  parts.push('invert(100%)');
-    // CSS approximation of denoise: light blur so the user sees that
-    // SOMETHING happens live. True denoising runs in ffmpeg on export.
-    if (state.denoise) parts.push('blur(0.3px) contrast(102%)');
-    return parts.join(' ') || 'none';
-  }
-  // Pan/zoom view state — applied to BOTH the original and edited
-  // videos in sync so they show the same region. translate is in pixels
-  // relative to the side container; scale is a multiplier. The rotate
-  // + flip from _editState is composed on top of pan/zoom on the
-  // EDITED side only.
-  const _editView = { scale: 1, tx: 0, ty: 0 };
-  function _editCssTransform(state, withRotate) {
-    const parts = [];
-    if (_editView.tx || _editView.ty) parts.push(`translate(${_editView.tx}px, ${_editView.ty}px)`);
-    if (_editView.scale !== 1)        parts.push(`scale(${_editView.scale})`);
-    if (withRotate) {
-      if (state.rotate) parts.push(`rotate(${state.rotate}deg)`);
-      if (state.flipH)  parts.push('scaleX(-1)');
-      if (state.flipV)  parts.push('scaleY(-1)');
-    }
-    return parts.join(' ') || 'none';
-  }
-  function _applyEditPreview() {
-    if (!editOutVid) return;
-    editOutVid.style.filter = _editCssFilter(_editState);
-    editOutVid.style.transform = _editCssTransform(_editState, true);
-    // Mirror pan/zoom (without rotate/flip) on the ORIGINAL side so
-    // both windows show the same region.
-    if (editOrigVid) editOrigVid.style.transform = _editCssTransform(_editState, false);
-    // Mirror the playback rate so the EDITED side previews the speed.
-    const rate = Math.max(0.25, Math.min(4, (_editState.sliders.speed || 100) / 100));
-    if (editOrigVid && Math.abs(editOrigVid.playbackRate - rate) > 0.005) {
-      try { editOrigVid.playbackRate = rate; editOutVid.playbackRate = rate; } catch {}
-    }
-    // Toggle the crop overlay visibility based on cropOn.
-    const cropEl = document.getElementById('vis-edit-crop');
-    if (cropEl) cropEl.hidden = !_editState.cropOn;
-  }
-  function _resetEditView() {
-    _editView.scale = 1;
-    _editView.tx = 0;
-    _editView.ty = 0;
-    _applyEditPreview();
-  }
-  function _fmtTime(t) {
-    if (!Number.isFinite(t) || t < 0) t = 0;
-    const m = Math.floor(t / 60);
-    const s = Math.floor(t % 60);
-    return `${m}:${String(s).padStart(2, '0')}`;
-  }
-  // ── §rec-edit-timeline ── DaVinci-style multi-track timeline ────
-  // Project state — separate from the single-clip _editState because
-  // it's a distinct mental model (a real NLE timeline). Each track
-  // has a list of clips; each clip has its own in/out (trim) and a
-  // start time on the global timeline.
-  const _editProject = {
-    fps: 30,
-    width: 1920,
-    height: 1080,
-    pxPerSec: 50,
-    duration: 30,    // bumped as clips are added/moved
-    tracks: {
-      V2: [],
-      V1: [],
-      A1: [],
-    },
-    selectedClipId: null,
-  };
-  let _editClipSeq = 0;
-
-  // Cap the timeline length at 24h so a bogus duration (Chromium
-  // returns Infinity for some webm clips that have no duration
-  // metadata in the header) can't blow up the ruler render loop.
-  const _EDIT_MAX_DURATION = 24 * 60 * 60;
-  function _safeDur(v, fallback) {
-    if (!Number.isFinite(v) || v < 0) return fallback;
-    return Math.min(v, _EDIT_MAX_DURATION);
-  }
-  function _editTotalDuration() {
-    let max = 30;
-    for (const tid of ['V2', 'V1', 'A1']) {
-      for (const c of _editProject.tracks[tid]) {
-        const start = _safeDur(c.start, 0);
-        const trim  = _safeDur((c.out || 0) - (c.in || 0), 0);
-        const end = start + trim;
-        if (end > max) max = end;
-      }
-    }
-    return Math.ceil(Math.min(max + 5, _EDIT_MAX_DURATION));
-  }
-
-  function _editFmtTC(t) {
-    if (!Number.isFinite(t) || t < 0) t = 0;
-    const m = Math.floor(t / 60);
-    const s = Math.floor(t % 60);
-    return `${m}:${String(s).padStart(2, '0')}`;
-  }
-
-  // Render the time ruler. Tick every second; major tick every 5 s
-  // with a numeric label. Density adapts to pxPerSec so the ruler
-  // doesn't crowd at low zoom.
-  function _renderEditRuler() {
-    const ruler = document.getElementById('vis-edit-tl-ruler');
-    if (!ruler) return;
-    // Hard-clamp every input to finite, sane numbers so a bogus duration
-    // can't generate an infinite loop here.
-    const dur = _safeDur(_editProject.duration, 30);
-    const pps = Math.max(1, Math.min(2000, _editProject.pxPerSec || 50));
-    const w = Math.max(1, Math.min(1_000_000, Math.round(dur * pps)));
-    ruler.innerHTML = '';
-    // Choose tick interval based on zoom — keep labels at least 60px apart.
-    const minLabelPx = 60;
-    let tickSec = 1;
-    while (tickSec * pps < minLabelPx / 5 && tickSec < dur) tickSec *= 2;
-    let labelSec = tickSec * 5;
-    while (labelSec * pps < minLabelPx && labelSec < dur) labelSec *= 2;
-    // Cap the number of ticks generated as a final safety net (e.g. user
-    // sets fps=24 + zooms way out + duration is 12h — still bounded).
-    const MAX_TICKS = 4000;
-    let ticksDrawn = 0;
-    for (let t = 0; t <= dur && ticksDrawn < MAX_TICKS; t += tickSec) {
-      const x = Math.round(t * pps);
-      const isMajor = (Math.round(t / labelSec) * labelSec === Math.round(t));
-      const tick = document.createElement('div');
-      tick.className = 'vis-edit-tl-ruler-tick' + (isMajor ? ' is-major' : '');
-      tick.style.left = `${x}px`;
-      ruler.appendChild(tick);
-      if (isMajor) {
-        const lbl = document.createElement('span');
-        lbl.className = 'vis-edit-tl-ruler-label';
-        lbl.style.left = `${x}px`;
-        lbl.textContent = _editFmtTC(t);
-        ruler.appendChild(lbl);
-      }
-      ticksDrawn++;
-    }
-    const content = document.getElementById('vis-edit-tl-content');
-    if (content) content.style.width = `${w}px`;
-  }
-
-  function _editTrackEl(trackId) {
-    return document.getElementById(`vis-edit-tl-track-${trackId}`);
-  }
-
-  function _renderEditTracks() {
-    const pps = _editProject.pxPerSec;
-    for (const tid of ['V2', 'V1', 'A1']) {
-      const trackEl = _editTrackEl(tid);
-      if (!trackEl) continue;
-      trackEl.innerHTML = '';
-      for (const clip of _editProject.tracks[tid]) {
-        const el = document.createElement('div');
-        el.className = 'vis-edit-tl-clip';
-        if (clip.id === _editProject.selectedClipId) el.classList.add('is-selected');
-        el.dataset.clipId = clip.id;
-        const dur = Math.max(0.05, clip.out - clip.in);
-        el.style.left  = `${Math.round(clip.start * pps)}px`;
-        el.style.width = `${Math.max(20, Math.round(dur * pps))}px`;
-        // Resize handles on the LEFT and RIGHT edges. Dragging stretches
-        // the clip along the time axis. For images the duration grows
-        // freely; for videos out is capped at srcDuration so we can't
-        // extend past the source's length.
-        el.innerHTML =
-          `<span class="vis-edit-tl-clip-resize is-left"  data-resize="left"></span>` +
-          `<span class="vis-edit-tl-clip-name">${clip.name}</span>` +
-          `<button class="vis-edit-tl-clip-remove" title="Remove clip">×</button>` +
-          `<span class="vis-edit-tl-clip-resize is-right" data-resize="right"></span>`;
-        _wireClipDrag(el, clip, tid);
-        _wireClipResize(el, clip, tid);
-        el.querySelector('.vis-edit-tl-clip-remove')?.addEventListener('mousedown', (e) => e.stopPropagation());
-        el.querySelector('.vis-edit-tl-clip-remove')?.addEventListener('click', (e) => {
-          e.stopPropagation();
-          _removeEditClip(clip.id);
-        });
-        trackEl.appendChild(el);
-      }
-    }
-    _refreshEditPlayhead();
-  }
-
-  function _refreshEditPlayhead() {
-    const ph = document.getElementById('vis-edit-tl-playhead');
-    if (!ph) return;
-    const t = _safeDur(editOrigVid?.currentTime, 0);
-    const pps = Math.max(1, Math.min(2000, _editProject.pxPerSec || 50));
-    ph.style.left = `${Math.round(t * pps)}px`;
-    _renderEditOverlays();
-  }
-
-  // Render every V2 clip that's "live" at the current playhead time
-  // as an absolutely-positioned overlay over the EDITED video. The
-  // selected clip (if it's on V2) gets a dashed border + 8 resize
-  // handles. Only image overlays for now — video-on-video compositing
-  // is a follow-up.
-  function _renderEditOverlays() {
-    const layer = document.getElementById('vis-edit-overlays');
-    if (!layer) return;
-    const t = _safeDur(editOrigVid?.currentTime, 0);
-    // Diff against the existing children so we don't thrash the DOM
-    // on every timeupdate. We rebuild only if the active-clip set
-    // changes or a clip's position is dirty.
-    const active = _editProject.tracks.V2.filter((c) => {
-      const dur = Math.max(0.05, (c.out || c.srcDuration || 3) - (c.in || 0));
-      return c.kind === 'image' && t >= c.start && t < c.start + dur;
-    });
-    const sigOf = (arr) => arr.map((c) => `${c.id}:${c.x.toFixed(4)},${c.y.toFixed(4)},${c.w.toFixed(4)},${c.h.toFixed(4)}:${c.id === _editProject.selectedClipId}`).join('|');
-    const sig = sigOf(active);
-    if (layer.dataset.sig === sig) return;
-    layer.dataset.sig = sig;
-    layer.innerHTML = '';
-    for (const clip of active) {
-      const el = document.createElement('div');
-      el.className = 'vis-edit-overlay' + (clip.id === _editProject.selectedClipId ? ' is-selected' : '');
-      el.dataset.clipId = clip.id;
-      el.style.left   = `${(clip.x * 100).toFixed(3)}%`;
-      el.style.top    = `${(clip.y * 100).toFixed(3)}%`;
-      el.style.width  = `${(clip.w * 100).toFixed(3)}%`;
-      el.style.height = `${(clip.h * 100).toFixed(3)}%`;
-      const img = document.createElement('img');
-      const rel = (_visualizerEntries.find((e) => e.path === clip.path)?.rel) || '';
-      img.src = `dash3d-file://gallery/${encodeURI(rel)}`;
-      img.alt = '';
-      img.draggable = false;
-      el.appendChild(img);
-      if (clip.id === _editProject.selectedClipId) {
-        for (const side of ['nw','n','ne','e','se','s','sw','w']) {
-          const h = document.createElement('span');
-          h.className = `vis-edit-overlay-handle is-h-${side}`;
-          h.dataset.handle = side;
-          el.appendChild(h);
-        }
-      }
-      _wireOverlayDrag(el, clip);
-      layer.appendChild(el);
-    }
-  }
-
-  function _wireOverlayDrag(el, clip) {
-    const layer = document.getElementById('vis-edit-overlays');
-    if (!layer) return;
-    let drag = null;
-    el.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      // Select this clip so handles appear (and the timeline reflects).
-      _editProject.selectedClipId = clip.id;
-      _renderEditTracks();
-      const handle = e.target.closest?.('.vis-edit-overlay-handle');
-      const r = layer.getBoundingClientRect();
-      drag = {
-        mode: handle ? 'resize' : 'move',
-        side: handle?.dataset.handle || null,
-        startX: e.clientX,
-        startY: e.clientY,
-        layerW: r.width,
-        layerH: r.height,
-        orig: { x: clip.x, y: clip.y, w: clip.w, h: clip.h },
-      };
-      e.preventDefault();
-      e.stopPropagation();
-    });
-    function onMove(e) {
-      if (!drag) return;
-      const dxFrac = (e.clientX - drag.startX) / Math.max(1, drag.layerW);
-      const dyFrac = (e.clientY - drag.startY) / Math.max(1, drag.layerH);
-      const o = drag.orig;
-      if (drag.mode === 'move') {
-        clip.x = Math.max(0, Math.min(1 - o.w, o.x + dxFrac));
-        clip.y = Math.max(0, Math.min(1 - o.h, o.y + dyFrac));
-      } else {
-        const s = drag.side;
-        // East / South: adjust w/h directly.
-        if (s.includes('e')) clip.w = Math.max(0.03, Math.min(1 - o.x, o.w + dxFrac));
-        if (s.includes('s')) clip.h = Math.max(0.03, Math.min(1 - o.y, o.h + dyFrac));
-        // West / North: adjust x/y and inverse w/h so the opposite edge
-        // stays pinned.
-        if (s.includes('w')) {
-          const right = o.x + o.w;
-          const nx = Math.max(0, Math.min(right - 0.03, o.x + dxFrac));
-          clip.x = nx; clip.w = right - nx;
-        }
-        if (s.includes('n')) {
-          const bottom = o.y + o.h;
-          const ny = Math.max(0, Math.min(bottom - 0.03, o.y + dyFrac));
-          clip.y = ny; clip.h = bottom - ny;
-        }
-      }
-      _renderEditOverlays();
-    }
-    function onUp() {
-      drag = null;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup',   onUp);
-    }
-    el.addEventListener('mousedown', () => {
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup',   onUp);
-    });
-  }
-
-  function _addEditClip(trackId, capture, startSec) {
-    const kind = capture.kind || (_IMG_RENDER_RE.test(capture.name) ? 'image' : 'video');
-    // Images have no inherent duration — give them a sensible default
-    // (3s) that the user can later resize. Video duration comes from
-    // its metadata probe.
-    const dur = Number.isFinite(capture.duration) && capture.duration > 0
-      ? capture.duration
-      : (kind === 'image' ? 3 : 5);
-    const clip = {
-      id: ++_editClipSeq,
-      path: capture.path,
-      name: capture.name,
-      kind,
-      srcDuration: dur,
-      in: 0,
-      out: dur,
-      start: Math.max(0, startSec),
-      track: trackId,
-      // Transform (position + size) for overlay clips on V2. Fractions
-      // of the EDITED preview canvas. V1 anchors ignore these (they
-      // cover the canvas). Default: centered at 50% size.
-      x: 0.25, y: 0.25, w: 0.5, h: 0.5,
-    };
-    _editProject.tracks[trackId].push(clip);
-    _editProject.duration = _editTotalDuration();
-    _renderEditRuler();
-    _renderEditTracks();
-    // If V1 is empty no longer, retarget preview to this clip.
-    if (trackId === 'V1' && _editProject.tracks.V1.length === 1) {
-      _retargetEditorAnchor(clip);
-    }
-    // Newly-added V2 overlays should appear immediately if their time
-    // range covers the current playhead. Auto-select the new clip so
-    // the handles are visible right away.
-    if (trackId === 'V2' && clip.kind === 'image') {
-      _editProject.selectedClipId = clip.id;
-      _renderEditOverlays();
-    }
-  }
-
-  function _removeEditClip(clipId) {
-    for (const tid of ['V2', 'V1', 'A1']) {
-      const idx = _editProject.tracks[tid].findIndex((c) => c.id === clipId);
-      if (idx !== -1) {
-        const wasFirstV1 = (tid === 'V1' && idx === 0);
-        _editProject.tracks[tid].splice(idx, 1);
-        if (_editProject.selectedClipId === clipId) _editProject.selectedClipId = null;
-        _editProject.duration = _editTotalDuration();
-        _renderEditRuler();
-        _renderEditTracks();
-        _renderEditOverlays();
-        if (wasFirstV1) {
-          const next = _editProject.tracks.V1[0];
-          if (next) _retargetEditorAnchor(next);
-        }
-        return;
-      }
-    }
-  }
-
-  // Reposition a clip by dragging. Clip can move left/right along
-  // time, and up/down between tracks of the same kind (V2↔V1 for
-  // video, A1 only for audio).
-  //
-  // Hot path optimization: during drag we DO NOT re-render the
-  // whole track DOM on every mousemove (used to call
-  // _renderEditTracks() per move — that's ~3 destroyAll + N create
-  // for every pointer event, blowing GC and the compositor when the
-  // user has any sizable clip list). Instead we mutate the live
-  // element's `style.left` directly, and only re-render at mouseup
-  // (which also handles track changes properly). Project-duration
-  // recalc is deferred to mouseup too.
-  // Resize a timeline clip from either edge. Dragging the RIGHT edge
-  // extends/shrinks the out point (and srcDuration for images, which
-  // have no inherent length). Dragging the LEFT edge moves the start
-  // and in point together so the right edge stays where it is.
-  function _wireClipResize(el, clip, trackId) {
-    const leftH  = el.querySelector('.vis-edit-tl-clip-resize.is-left');
-    const rightH = el.querySelector('.vis-edit-tl-clip-resize.is-right');
-    function wireEdge(handle, side) {
-      if (!handle) return;
-      let drag = null;
-      handle.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return;
-        _editProject.selectedClipId = clip.id;
-        drag = {
-          startX: e.clientX,
-          origStart: clip.start,
-          origIn:    clip.in,
-          origOut:   clip.out,
-          origSrc:   clip.srcDuration,
-        };
-        el.classList.add('is-dragging');
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup',   onUp);
-        e.preventDefault();
-        e.stopPropagation();   // don't fire the body-drag handler
-      });
-      function onMove(e) {
-        if (!drag) return;
-        const pps = Math.max(1, _editProject.pxPerSec || 50);
-        const dt = (e.clientX - drag.startX) / pps;
-        if (side === 'right') {
-          // Drag right edge — change out (and srcDuration for images).
-          let newOut = Math.max(drag.origIn + 0.1, drag.origOut + dt);
-          if (clip.kind === 'video') {
-            // Videos can't go past their natural source length.
-            const cap = Number.isFinite(drag.origSrc) && drag.origSrc > 0
-              ? drag.origSrc : newOut;
-            newOut = Math.min(newOut, cap);
-          } else {
-            // Images: stretch srcDuration freely. Cap at 24h so we
-            // can never feed Infinity through the ruler math.
-            newOut = Math.min(newOut, 24 * 60 * 60);
-            clip.srcDuration = newOut - drag.origIn;
-          }
-          clip.out = newOut;
-          el.style.width = `${Math.max(20, Math.round((clip.out - clip.in) * pps))}px`;
-        } else {
-          // Drag left edge — start + in shift by dt; right edge stays
-          // anchored (so the visible content's right border doesn't
-          // move). For images, in stays 0; we just adjust start and
-          // srcDuration symmetrically.
-          if (clip.kind === 'image') {
-            let newStart = Math.max(0, drag.origStart + dt);
-            // Don't let the clip shrink to nothing — keep at least 0.1s.
-            const minLen = 0.1;
-            const rightEdge = drag.origStart + (drag.origOut - drag.origIn);
-            if (newStart > rightEdge - minLen) newStart = rightEdge - minLen;
-            clip.start = newStart;
-            clip.srcDuration = Math.max(minLen, rightEdge - newStart);
-            clip.in  = 0;
-            clip.out = clip.srcDuration;
-          } else {
-            let newIn = Math.max(0, drag.origIn + dt);
-            const minLen = 0.1;
-            if (newIn > drag.origOut - minLen) newIn = drag.origOut - minLen;
-            clip.in    = newIn;
-            clip.start = drag.origStart + (newIn - drag.origIn);
-          }
-          el.style.left  = `${Math.round(clip.start * pps)}px`;
-          el.style.width = `${Math.max(20, Math.round((clip.out - clip.in) * pps))}px`;
-        }
-      }
-      function onUp() {
-        if (!drag) return;
-        drag = null;
-        el.classList.remove('is-dragging');
-        _editProject.duration = _editTotalDuration();
-        _renderEditRuler();
-        _renderEditTracks();
-        _renderEditOverlays();
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup',   onUp);
-      }
-    }
-    wireEdge(leftH,  'left');
-    wireEdge(rightH, 'right');
-  }
-
-  function _wireClipDrag(el, clip, trackId) {
-    let drag = null;
-    function onDown(e) {
-      if (e.button !== 0) return;
-      _editProject.selectedClipId = clip.id;
-      // Re-render overlays so the selected V2 clip's handles appear.
-      _renderEditOverlays();
-      drag = {
-        startX: e.clientX,
-        startY: e.clientY,
-        origStart: clip.start,
-        origTrack: trackId,
-        movedTrack: false,
-      };
-      el.classList.add('is-dragging');
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup',   onUp);
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    function onMove(e) {
-      if (!drag) return;
-      const dx = e.clientX - drag.startX;
-      const newStart = Math.max(0, drag.origStart + dx / _editProject.pxPerSec);
-      clip.start = newStart;
-      // Cheap live update — just slide the element. No DOM rebuild.
-      el.style.left = `${Math.round(newStart * _editProject.pxPerSec)}px`;
-      // Vertical movement between video tracks. Triggers a one-time
-      // full re-render so the clip ends up in the right track's DOM,
-      // but only on the threshold cross — not every move.
-      const dy = e.clientY - drag.startY;
-      const kind = (drag.origTrack === 'A1') ? 'audio' : 'video';
-      if (Math.abs(dy) > 22 && kind === 'video') {
-        const nextTrack = (dy < 0) ? 'V2' : 'V1';
-        if (nextTrack !== clip.track) {
-          const from = _editProject.tracks[clip.track];
-          const idx = from.findIndex((c) => c.id === clip.id);
-          if (idx !== -1) from.splice(idx, 1);
-          _editProject.tracks[nextTrack].push(clip);
-          clip.track = nextTrack;
-          drag.origTrack = nextTrack;
-          drag.startY = e.clientY;
-          drag.movedTrack = true;
-          _renderEditTracks(); // unavoidable for track changes
-        }
-      }
-    }
-    function onUp() {
-      if (!drag) return;
-      drag = null;
-      el.classList.remove('is-dragging');
-      _editProject.duration = _editTotalDuration();
-      // Final reconcile (ruler width, sort order, etc.) once.
-      _renderEditRuler();
-      _renderEditTracks();
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup',   onUp);
-    }
-    el.addEventListener('mousedown', onDown);
-  }
-
-  // Wire each track body to accept drops from the captures list.
-  // The drag payload is the dragged row's data-path; we look up the
-  // entry to get its name + probed duration.
-  function _wireTrackDrop(trackId) {
-    const trackEl = _editTrackEl(trackId);
-    if (!trackEl) return;
-    trackEl.addEventListener('dragover', (e) => {
-      // Only accept drops if the drag carries a recording path.
-      if (e.dataTransfer?.types?.includes('application/x-dash3d-capture')) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy';
-        trackEl.classList.add('is-drag-over');
-      }
-    });
-    trackEl.addEventListener('dragleave', () => trackEl.classList.remove('is-drag-over'));
-    trackEl.addEventListener('drop', (e) => {
-      e.preventDefault();
-      trackEl.classList.remove('is-drag-over');
-      const path = e.dataTransfer.getData('application/x-dash3d-capture');
-      const kindHint = e.dataTransfer.getData('application/x-dash3d-kind');
-      if (!path) return;
-      const entry = _visualizerEntries.find((x) => x.path === path);
-      if (!entry) return;
-      const isVideo = _VIDEO_RENDER_RE.test(entry.name);
-      const isImage = _IMG_RENDER_RE.test(entry.name);
-      if (!isVideo && !isImage) return;
-      // Audio track only accepts video (we pull audio out of it on export).
-      if (trackId === 'A1' && isImage) return;
-      const rect = trackEl.getBoundingClientRect();
-      const startSec = Math.max(0, (e.clientX - rect.left) / _editProject.pxPerSec);
-      if (isImage || kindHint === 'image') {
-        // Images have no duration to probe — drop straight in with the
-        // default duration (3s, resizable later).
-        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'image' }, startSec);
-        return;
-      }
-      // Video: probe duration off-screen so the clip bar is sized
-      // correctly even before the user previews it.
-      const probe = document.createElement('video');
-      probe.preload = 'metadata';
-      probe.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-      probe.addEventListener('loadedmetadata', () => {
-        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'video', duration: probe.duration || 5 }, startSec);
-        try { probe.remove(); } catch {}
-      });
-      probe.addEventListener('error', () => {
-        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'video', duration: 5 }, startSec);
-        try { probe.remove(); } catch {}
-      });
-    });
-  }
-
-  function _initEditTimeline() {
-    ['V2', 'V1', 'A1'].forEach(_wireTrackDrop);
-    const fpsSel = document.getElementById('vis-edit-tl-fps');
-    const resSel = document.getElementById('vis-edit-tl-res');
-    const zoomEl = document.getElementById('vis-edit-tl-zoom');
-    fpsSel?.addEventListener('change', () => { _editProject.fps = parseInt(fpsSel.value, 10) || 30; });
-    resSel?.addEventListener('change', () => {
-      const [w, h] = String(resSel.value || '1920x1080').split('x').map((n) => parseInt(n, 10));
-      _editProject.width = w || 1920;
-      _editProject.height = h || 1080;
-    });
-    zoomEl?.addEventListener('input', () => {
-      _editProject.pxPerSec = parseInt(zoomEl.value, 10) || 50;
-      _renderEditRuler();
-      _renderEditTracks();
-    });
-    _renderEditRuler();
-    _renderEditTracks();
-  }
-
-  // Re-point the preview at the first V1 clip (or the supplied clip).
-  // For a video clip, both <video> elements get its src. For an image
-  // clip, the <video>s are hidden and the <img>s show the still — pan
-  // / zoom / filters still apply because both elements share the same
-  // .vis-edit-video / .vis-edit-still CSS rule chain.
-  function _retargetEditorAnchor(clipOverride) {
-    const anchor = clipOverride || _editProject.tracks.V1[0];
-    if (!anchor) return;
-    _editState.src = anchor.path;
-    const rel = (_visualizerEntries.find((e) => e.path === anchor.path)?.rel) || '';
-    const url = `dash3d-file://gallery/${encodeURI(rel)}`;
-    const origImg = document.getElementById('vis-edit-orig-img');
-    const outImg  = document.getElementById('vis-edit-out-img');
-    if (anchor.kind === 'image') {
-      // Hide video elements, show image stills.
-      if (editOrigVid) { try { editOrigVid.pause(); } catch {} editOrigVid.hidden = true; editOrigVid.removeAttribute('src'); try { editOrigVid.load(); } catch {} }
-      if (editOutVid)  { try { editOutVid.pause();  } catch {} editOutVid.hidden = true;  editOutVid.removeAttribute('src');  try { editOutVid.load();  } catch {} }
-      if (origImg) { origImg.src = url; origImg.hidden = false; }
-      if (outImg)  { outImg.src  = url; outImg.hidden  = false; }
-      // For images, the editor's playback model is "static" — set
-      // duration to the clip's chosen length and stop the playhead.
-      _editState.duration = anchor.srcDuration || 3;
-      _editState.trimIn   = 0;
-      _editState.trimOut  = _editState.duration;
-      _refreshEditTimeUi();
-    } else {
-      if (origImg) { origImg.hidden = true; origImg.removeAttribute('src'); }
-      if (outImg)  { outImg.hidden  = true; outImg.removeAttribute('src');  }
-      if (editOrigVid) { editOrigVid.hidden = false; editOrigVid.src = url; try { editOrigVid.load(); } catch {} }
-      if (editOutVid)  { editOutVid.hidden  = false; editOutVid.src  = url; try { editOutVid.load();  } catch {} }
-      // Keep the preview paused on the first frame — re-selecting a
-      // clip shouldn't auto-start playback.
-      try { editOrigVid?.pause(); editOutVid?.pause(); } catch {}
-      try { if (editOrigVid) editOrigVid.currentTime = 0; if (editOutVid) editOutVid.currentTime = 0; } catch {}
-    }
-    if (editNameEl)  editNameEl.textContent = anchor.name;
-  }
-
-  // Compatibility shim — old code still calls _renderEditClips at
-  // various points. Route it to the new timeline render.
-  function _renderEditClips() { _renderEditTracks(); _renderEditRuler(); }
-
-  function _refreshEditTimeUi() {
-    if (!editOrigVid) return;
-    const cur = editOrigVid.currentTime || 0;
-    const dur = _editState.duration || 0;
-    if (editTimeEl) editTimeEl.textContent = `${_fmtTime(cur)} / ${_fmtTime(dur)}`;
-    if (editTrimTimesEl) {
-      editTrimTimesEl.textContent = `TRIM ${_fmtTime(_editState.trimIn)} → ${_fmtTime(_editState.trimOut)}`;
-    }
-    if (editPlayheadEl && dur > 0) {
-      const pct = Math.max(0, Math.min(1, cur / dur)) * 100;
-      editPlayheadEl.style.left = `${pct}%`;
-    }
-    if (editTrimInEl && dur > 0)  editTrimInEl.style.left  = `${(_editState.trimIn  / dur) * 100}%`;
-    if (editTrimOutEl && dur > 0) editTrimOutEl.style.left = `${(_editState.trimOut / dur) * 100}%`;
-    if (editTrimRangeEl && dur > 0) {
-      const a = (_editState.trimIn  / dur) * 100;
-      const b = (_editState.trimOut / dur) * 100;
-      editTrimRangeEl.style.left  = `${a}%`;
-      editTrimRangeEl.style.width = `${Math.max(0, b - a)}%`;
-    }
-  }
-  function _refreshEditBtn() {
-    // Editor disabled for now — diagnosing CPU spikes attributed to the
-    // rec-room editor. Button stays hidden so it can't be triggered. The
-    // editor pane / state / wiring all stay in place so re-enabling is a
-    // one-line change here (remove the early return).
-    if (!editBtn) return;
-    editBtn.hidden = true;
-    editBtn.disabled = true;
-  }
-  // Open editor on the current playing video or image.
-  function _openEditor() {
-    // Editor disabled — see _refreshEditBtn note above.
-    return;
-    // eslint-disable-next-line no-unreachable
-    if (!_visualizerCurrent) return;
-    if (!_VIDEO_RENDER_RE.test(_visualizerCurrent) && !_IMG_RENDER_RE.test(_visualizerCurrent)) return;
-    _editState.src = _visualizerCurrent;
-    _editState.open = true;
-    document.body.classList.add('is-editing');
-    // Pause the main player while editing so audio doesn't double up.
-    try { visualizerVideoEl?.pause(); } catch {}
-    if (editPane) editPane.hidden = false;
-    if (visualizerWrapEl) visualizerWrapEl.style.display = 'none';
-    const url = `dash3d-file://gallery/${encodeURI((_visualizerEntries.find((e) => e.path === _editState.src)?.rel) || '')}`;
-    // Force metadata fetch (via .load()) so the video element gets its
-    // intrinsic dimensions BEFORE first paint. Without this, Chromium
-    // sometimes lazy-loads metadata only on first play, and the video
-    // renders stretched-to-container until the user hits play.
-    if (editOrigVid) { editOrigVid.src = url; try { editOrigVid.load(); } catch {} }
-    if (editOutVid)  { editOutVid.src  = url; try { editOutVid.load();  } catch {} }
-    if (editNameEl)  editNameEl.textContent = _editState.src.split(/[\\/]/).pop();
-    if (editStatusEl) { editStatusEl.textContent = ''; editStatusEl.className = 'vis-edit-status'; }
-    // Open paused — user has to press play to start. Otherwise the
-    // load() above can let the video auto-start when its metadata
-    // arrives (Chromium auto-resumes some preloaded media).
-    try { editOrigVid?.pause(); editOutVid?.pause(); } catch {}
-    try { if (editOrigVid) editOrigVid.currentTime = 0; if (editOutVid) editOutVid.currentTime = 0; } catch {}
-    // Seed the V1 track with the just-opened clip so the timeline
-    // isn't empty on first open.
-    const seedName = _editState.src.split(/[\\/]/).pop();
-    const seedKind = _IMG_RENDER_RE.test(seedName) ? 'image' : 'video';
-    _editProject.tracks.V2 = [];
-    _editProject.tracks.V1 = [{
-      id: ++_editClipSeq,
-      path: _editState.src,
-      name: seedName,
-      kind: seedKind,
-      srcDuration: seedKind === 'image' ? 3 : 0,
-      in: 0,
-      out: seedKind === 'image' ? 3 : 5,
-      start: 0,
-      track: 'V1',
-    }];
-    _editProject.tracks.A1 = [];
-    _editProject.selectedClipId = null;
-    _editProject.duration = _editTotalDuration();
-    _initEditTimeline();
-    // If we opened from an image still, immediately retarget so the
-    // <img> preview shows (skipping the video-load path).
-    if (seedKind === 'image') _retargetEditorAnchor(_editProject.tracks.V1[0]);
-    // Start each clip at fit (scale 1, no pan) — leftover pan from a
-    // previous clip is rarely what the user wants.
-    _editView.scale = 1; _editView.tx = 0; _editView.ty = 0;
-    _applyEditPreview();
-  }
-  function _closeEditor() {
-    _editState.open = false;
-    document.body.classList.remove('is-editing');
-    if (editPane) editPane.hidden = true;
-    if (visualizerWrapEl) visualizerWrapEl.style.display = '';
-    // Tear down the video decoders fully — pause alone leaves Chromium's
-    // video decoder allocated and the source buffered. Clearing src +
-    // calling load() releases the decoder + GPU textures.
-    try {
-      if (editOrigVid) { editOrigVid.pause(); editOrigVid.removeAttribute('src'); editOrigVid.load(); }
-      if (editOutVid)  { editOutVid.pause();  editOutVid.removeAttribute('src');  editOutVid.load();  }
-    } catch {}
-  }
-  // Keep the two videos in lockstep — when ORIGINAL drives play/seek,
-  // EDITED follows. We don't use editOutVid.captureStream because
-  // recordings often use codecs (mkv/h264) that don't play in muted
-  // captureStream cleanly; same-file double-load is simpler and works.
-  editOrigVid?.addEventListener('loadedmetadata', () => {
-    // Some .webm files report duration = Infinity until the user
-    // seeks past the end (Chromium quirk for clips missing duration
-    // metadata in the header). Coerce to a safe finite value so the
-    // ruler / trim handles / total-duration math don't blow up.
-    const rawDur = editOrigVid.duration;
-    _editState.duration = (Number.isFinite(rawDur) && rawDur > 0) ? rawDur : 30;
-    _editState.trimIn   = 0;
-    _editState.trimOut  = _editState.duration;
-    // Belt-and-suspenders: pause again here. Chromium occasionally
-    // resumes playback once metadata arrives if the element was
-    // previously playing under a different src — explicitly stop
-    // that so opening the editor never starts audio on its own.
-    try { editOrigVid.pause(); editOutVid?.pause(); } catch {}
-    // Push the video's natural aspect into a CSS variable so the
-    // side containers shrink-to-fit instead of letterboxing.
-    const w = editOrigVid.videoWidth;
-    const h = editOrigVid.videoHeight;
-    if (w > 0 && h > 0 && editPane) {
-      editPane.style.setProperty('--vid-aspect', `${w} / ${h}`);
-    }
-    // Record the anchor clip's duration into the timeline so its
-    // bar is sized correctly. Recompute project duration + redraw.
-    const anchor = _editProject.tracks.V1[0];
-    if (anchor) {
-      anchor.srcDuration = _editState.duration || 5;
-      anchor.in  = 0;
-      anchor.out = anchor.srcDuration;
-    }
-    _editProject.duration = _editTotalDuration();
-    _renderEditRuler();
-    _renderEditTracks();
-    _refreshEditTimeUi();
-  });
-  editOrigVid?.addEventListener('timeupdate', () => {
-    if (editOutVid && Math.abs((editOutVid.currentTime || 0) - editOrigVid.currentTime) > 0.15) {
-      try { editOutVid.currentTime = editOrigVid.currentTime; } catch {}
-    }
-    _refreshEditTimeUi();
-    if (typeof _refreshEditPlayhead === 'function') _refreshEditPlayhead();
-    // Honour trim while playing: bounce back to trimIn if we overshot.
-    if (!editOrigVid.paused && editOrigVid.currentTime >= _editState.trimOut) {
-      try { editOrigVid.currentTime = _editState.trimIn; } catch {}
-    }
-  });
-  editOrigVid?.addEventListener('play',  () => editOutVid?.play().catch(() => {}));
-  editOrigVid?.addEventListener('pause', () => editOutVid?.pause());
-  editOrigVid?.addEventListener('seeked',() => {
-    if (editOutVid) try { editOutVid.currentTime = editOrigVid.currentTime; } catch {}
-  });
-  // ── Pan + zoom on the previews ───────────────────────────────────
-  // Mouse-wheel zooms (anchored on the cursor); plain drag pans. Both
-  // sides receive the same transform so they show the same region.
-  // Double-click resets the view. Crop drag-rect still wins on the
-  // EDITED side when CROP is on (it grabs mousedown first).
-  function _wirePanZoom(el) {
-    if (!el) return;
-    el.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const r = el.getBoundingClientRect();
-      // Cursor position in element-relative pixels.
-      const cx = e.clientX - r.left - r.width  / 2;
-      const cy = e.clientY - r.top  - r.height / 2;
-      const oldS = _editView.scale;
-      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      const newS = Math.max(1, Math.min(8, oldS * factor));
-      // Shift translate so the point under the cursor stays put.
-      const ratio = newS / oldS;
-      _editView.tx = cx - (cx - _editView.tx) * ratio;
-      _editView.ty = cy - (cy - _editView.ty) * ratio;
-      _editView.scale = newS;
-      // Snap exactly back to 1× and clear pan when nearly identity.
-      if (Math.abs(newS - 1) < 0.01) { _editView.scale = 1; _editView.tx = 0; _editView.ty = 0; }
-      _applyEditPreview();
-    }, { passive: false });
-    let _panDrag = null;
-    el.addEventListener('mousedown', (e) => {
-      // Don't fight CROP drags or trim-handle drags.
-      if (_editState.cropOn && el === editOutVid) return;
-      if (e.button !== 0) return;
-      _panDrag = { x: e.clientX, y: e.clientY, tx: _editView.tx, ty: _editView.ty };
-      e.preventDefault();
-    });
-    window.addEventListener('mousemove', (e) => {
-      if (!_panDrag) return;
-      _editView.tx = _panDrag.tx + (e.clientX - _panDrag.x);
-      _editView.ty = _panDrag.ty + (e.clientY - _panDrag.y);
-      _applyEditPreview();
-    });
-    window.addEventListener('mouseup', () => { _panDrag = null; });
-    el.addEventListener('dblclick', () => _resetEditView());
-  }
-  _wirePanZoom(editOrigVid);
-  _wirePanZoom(editOutVid);
-  // Preview-audio volume + mute. ORIGINAL is the source of audio; EDITED
-  // stays muted to avoid double-audio. The slider drives ORIGINAL.volume,
-  // the speaker button toggles muted state. We default to muted so
-  // opening the editor doesn't blast audio that was previously off.
-  (() => {
-    const volSlider = document.getElementById('vis-edit-vol');
-    const volBtn    = document.getElementById('vis-edit-vol-btn');
-    if (!volSlider || !volBtn || !editOrigVid) return;
-    // Start muted — user opts in via the speaker button or by moving
-    // the slider. EDITED stays muted permanently (avoid stereo doubling).
-    editOrigVid.muted = true;
-    editOrigVid.volume = (parseInt(volSlider.value, 10) || 80) / 100;
-    if (editOutVid) editOutVid.muted = true;
-    volBtn.classList.add('is-muted');
-    volBtn.textContent = '🔇';
-    volSlider.addEventListener('input', () => {
-      const v = Math.max(0, Math.min(100, parseInt(volSlider.value, 10) || 0)) / 100;
-      editOrigVid.volume = v;
-      // Bumping the slider also un-mutes.
-      if (v > 0 && editOrigVid.muted) {
-        editOrigVid.muted = false;
-        volBtn.classList.remove('is-muted');
-        volBtn.textContent = '🔊';
-      }
-    });
-    volBtn.addEventListener('click', () => {
-      editOrigVid.muted = !editOrigVid.muted;
-      volBtn.classList.toggle('is-muted', editOrigVid.muted);
-      volBtn.textContent = editOrigVid.muted ? '🔇' : '🔊';
-    });
-  })();
-  // Timeline scrub: click empty timeline → seek; drag a handle →
-  // move trim. Listeners are attached directly to each handle so we
-  // don't depend on event delegation through the timeline (which can
-  // miss when the click lands on a pseudo-element or 1px off-edge).
-  let _dragHandle = null;
-  function _timelineFracFromEvent(e) {
-    if (!editTimelineEl) return 0;
-    const r = editTimelineEl.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  }
-  function _wireTrimHandle(el) {
-    if (!el) return;
-    el.addEventListener('mousedown', (e) => {
-      _dragHandle = el.dataset.handle;
-      el.classList.add('is-dragging');
-      e.preventDefault();
-      e.stopPropagation();
-    });
-  }
-  _wireTrimHandle(editTrimInEl);
-  _wireTrimHandle(editTrimOutEl);
-  // Click on the timeline body (not on a handle) — seek.
-  editTimelineEl?.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.vis-edit-trim-handle')) return; // handle wins
-    const frac = _timelineFracFromEvent(e);
-    if (editOrigVid) try { editOrigVid.currentTime = frac * _editState.duration; } catch {}
-  });
-  // ── Multi-track timeline scrubbing ──────────────────────────────
-  // Click + drag anywhere on the ruler / V2 / V1 / A1 backgrounds
-  // (NOT on a clip — clips handle their own drag) to seek the preview
-  // through the project's time axis. Position is computed against the
-  // timeline content's left edge, using the current pxPerSec.
-  let _tlScrubbing = false;
-  function _tlSeekFromEvent(e) {
-    const tlContent = document.getElementById('vis-edit-tl-content');
-    if (!tlContent || !editOrigVid) return;
-    const r = tlContent.getBoundingClientRect();
-    const x = Math.max(0, Math.min(r.width, e.clientX - r.left));
-    const pps = Math.max(1, _editProject.pxPerSec || 50);
-    const t = x / pps;
-    // Clamp by the source's actual duration so a wide project
-    // timeline doesn't park the video past its end (which would just
-    // show the last frame anyway).
-    const dur = Number.isFinite(editOrigVid.duration) && editOrigVid.duration > 0
-      ? editOrigVid.duration
-      : t;
-    try { editOrigVid.currentTime = Math.max(0, Math.min(dur, t)); } catch {}
-    if (typeof _refreshEditPlayhead === 'function') _refreshEditPlayhead();
-  }
-  const tlContentEl = document.getElementById('vis-edit-tl-content');
-  tlContentEl?.addEventListener('mousedown', (e) => {
-    // Clicks on a clip should NOT seek — the clip drag wins.
-    if (e.target.closest('.vis-edit-tl-clip')) return;
-    if (e.target.closest('.vis-edit-tl-clip-remove')) return;
-    if (e.button !== 0) return;
-    _tlScrubbing = true;
-    _tlSeekFromEvent(e);
-    e.preventDefault();
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (_tlScrubbing) _tlSeekFromEvent(e);
-  });
-  window.addEventListener('mouseup', () => { _tlScrubbing = false; });
-  window.addEventListener('mousemove', (e) => {
-    if (!_dragHandle) return;
-    const frac = _timelineFracFromEvent(e);
-    const t = frac * _editState.duration;
-    if (_dragHandle === 'in') {
-      _editState.trimIn = Math.max(0, Math.min(t, _editState.trimOut - 0.1));
-    } else if (_dragHandle === 'out') {
-      _editState.trimOut = Math.min(_editState.duration, Math.max(t, _editState.trimIn + 0.1));
-    }
-    _refreshEditTimeUi();
-    // Seek the preview to the active trim point so the user can see
-    // exactly where they're cutting.
-    if (editOrigVid) {
-      try { editOrigVid.currentTime = (_dragHandle === 'in') ? _editState.trimIn : _editState.trimOut; } catch {}
-    }
-  });
-  window.addEventListener('mouseup', () => {
-    if (_dragHandle) {
-      editTrimInEl?.classList.remove('is-dragging');
-      editTrimOutEl?.classList.remove('is-dragging');
-    }
-    _dragHandle = null;
-  });
-  // Slider wiring — generic factory so the EDIT panel and the PROCESS
-  // popover use the same code path.
-  function _bindSlider(id, valSel, state, key, suffix, decimals) {
-    const slider = document.getElementById(id);
-    const valEl  = document.querySelector(`.vis-edit-filter-val[data-for="${valSel}"]`);
-    if (!slider || !valEl) return;
-    const paint = () => {
-      const n = parseFloat(slider.value);
-      state.sliders[key] = n;
-      valEl.textContent = decimals ? `${n.toFixed(decimals)} ${suffix}` : `${Math.round(n)}${suffix}`;
-    };
-    slider.addEventListener('input', () => {
-      paint();
-      _applyEditPreview();
-    });
-    paint();
-  }
-  _bindSlider('vis-edit-brightness',  'brightness', _editState, 'brightness', '%',  0);
-  _bindSlider('vis-edit-contrast',    'contrast',   _editState, 'contrast',   '%',  0);
-  _bindSlider('vis-edit-saturation',  'saturation', _editState, 'saturation', '%',  0);
-  _bindSlider('vis-edit-hue',         'hue',        _editState, 'hue',        '°',  0);
-  _bindSlider('vis-edit-blur',        'blur',       _editState, 'blur',       'px', 1);
-  _bindSlider('vis-proc-brightness',  'proc-brightness', _procFilterState, 'brightness', '%',  0);
-  _bindSlider('vis-proc-contrast',    'proc-contrast',   _procFilterState, 'contrast',   '%',  0);
-  _bindSlider('vis-proc-saturation',  'proc-saturation', _procFilterState, 'saturation', '%',  0);
-  _bindSlider('vis-proc-hue',         'proc-hue',        _procFilterState, 'hue',        '°',  0);
-  _bindSlider('vis-proc-blur',        'proc-blur',       _procFilterState, 'blur',       'px', 1);
-  // New EDIT sliders.
-  _bindSlider('vis-edit-sharpen',  'sharpen',  _editState, 'sharpen',  '%', 0);
-  _bindSlider('vis-edit-vignette', 'vignette', _editState, 'vignette', '%', 0);
-  _bindSlider('vis-edit-volume',   'volume',   _editState, 'volume',   '%', 0);
-  // Speed slider — uses a `×` suffix and 2-decimal formatting because
-  // the user-facing unit is a multiplier, not a percentage.
-  (function bindSpeed() {
-    const slider = document.getElementById('vis-edit-speed');
-    const valEl  = document.querySelector('.vis-edit-filter-val[data-for="speed"]');
-    if (!slider || !valEl) return;
-    const paint = () => {
-      const n = parseFloat(slider.value);
-      _editState.sliders.speed = n;
-      valEl.textContent = `${(n / 100).toFixed(2)}×`;
-    };
-    slider.addEventListener('input', () => { paint(); _applyEditPreview(); });
-    paint();
-  })();
-  // Toggle helpers
-  function _wireToggle(btn, state, key, onChange) {
-    btn?.addEventListener('click', () => {
-      state[key] = !state[key];
-      btn.classList.toggle('is-active', state[key]);
-      if (onChange) onChange();
-    });
-  }
-  _wireToggle(editAutoBtn,    _editState, 'auto',    _applyEditPreview);
-  _wireToggle(editDenoiseBtn, _editState, 'denoise', _applyEditPreview);
-  _wireToggle(document.getElementById('vis-proc-auto'),    _procFilterState, 'auto',    null);
-  _wireToggle(document.getElementById('vis-proc-denoise'), _procFilterState, 'denoise', null);
-  // EFFECTS toggles: B&W / sepia / invert (mutex — picking one clears
-  // the others), reverse, mute. flipH/flipV (TRANSFORM) handled here too
-  // since they also use the same toggle pattern.
-  function _wireMutex(btns, state, keys) {
-    btns.forEach((btn, idx) => {
-      btn?.addEventListener('click', () => {
-        const key = keys[idx];
-        const willEnable = !state[key];
-        keys.forEach((k, i) => {
-          state[k] = (i === idx) ? willEnable : false;
-          btns[i]?.classList.toggle('is-active', state[k]);
-        });
-        _applyEditPreview();
-      });
-    });
-  }
-  _wireMutex(
-    [document.getElementById('vis-edit-bw'),
-     document.getElementById('vis-edit-sepia'),
-     document.getElementById('vis-edit-invert')],
-    _editState, ['bw', 'sepia', 'invert']);
-  _wireToggle(document.getElementById('vis-edit-reverse'), _editState, 'reverse', null);
-  _wireToggle(document.getElementById('vis-edit-mute'),    _editState, 'mute',    null);
-  _wireToggle(document.getElementById('vis-edit-flip-h'),  _editState, 'flipH',   _applyEditPreview);
-  _wireToggle(document.getElementById('vis-edit-flip-v'),  _editState, 'flipV',   _applyEditPreview);
-
-  // ROTATE cycles 0 → 90 → 180 → 270 → 0 on each click.
-  const editRotateBtn = document.getElementById('vis-edit-rotate');
-  editRotateBtn?.addEventListener('click', () => {
-    _editState.rotate = (_editState.rotate + 90) % 360;
-    editRotateBtn.textContent = `↻ ROTATE ${_editState.rotate}°`;
-    editRotateBtn.classList.toggle('is-active', _editState.rotate !== 0);
-    _applyEditPreview();
-  });
-
-  // CROP toggle + reset.
-  _wireToggle(document.getElementById('vis-edit-crop-toggle'), _editState, 'cropOn', _applyEditPreview);
-  document.getElementById('vis-edit-crop-reset')?.addEventListener('click', () => {
-    _editState.crop = { x: 0, y: 0, w: 1, h: 1 };
-    _applyCropOverlay();
-  });
-
-  // Crop drag-rect interactions. Coordinates are normalized [0..1] and
-  // converted to pixels on render. Drag the body to move; drag a handle
-  // to resize. Renamed `editCropOverlay` to avoid collision with the
-  // live-mirror crop overlay declared elsewhere in this file.
-  const editCropOverlay = document.getElementById('vis-edit-crop');
-  const editCropRect    = document.getElementById('vis-edit-crop-rect');
-  function _applyCropOverlay() {
-    if (!editCropRect) return;
-    const c = _editState.crop;
-    editCropRect.style.left   = `${(c.x * 100).toFixed(2)}%`;
-    editCropRect.style.top    = `${(c.y * 100).toFixed(2)}%`;
-    editCropRect.style.width  = `${(c.w * 100).toFixed(2)}%`;
-    editCropRect.style.height = `${(c.h * 100).toFixed(2)}%`;
-  }
-  _applyCropOverlay();
-  let _editCropDrag = null;
-  function _editCropFromEvent(e, box) {
-    const r = box.getBoundingClientRect();
-    return {
-      x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
-      y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
-    };
-  }
-  editCropOverlay?.addEventListener('mousedown', (e) => {
-    if (!_editState.cropOn) return;
-    const handle = e.target.closest?.('.vis-edit-crop-handle');
-    if (handle) {
-      _editCropDrag = { mode: 'resize', side: handle.dataset.chandle, start: { ..._editState.crop } };
-    } else if (e.target.closest?.('.vis-edit-crop-rect')) {
-      const p = _editCropFromEvent(e, editCropOverlay);
-      _editCropDrag = { mode: 'move', offset: { x: p.x - _editState.crop.x, y: p.y - _editState.crop.y } };
-    }
-    e.preventDefault();
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (!_editCropDrag || !editCropOverlay) return;
-    const p = _editCropFromEvent(e, editCropOverlay);
-    const c = _editState.crop;
-    if (_editCropDrag.mode === 'move') {
-      c.x = Math.max(0, Math.min(1 - c.w, p.x - _editCropDrag.offset.x));
-      c.y = Math.max(0, Math.min(1 - c.h, p.y - _editCropDrag.offset.y));
-    } else {
-      const s = _editCropDrag.side;
-      const start = _editCropDrag.start;
-      if (s.includes('e')) c.w = Math.max(0.02, Math.min(1 - start.x, p.x - start.x));
-      if (s.includes('s')) c.h = Math.max(0.02, Math.min(1 - start.y, p.y - start.y));
-      if (s.includes('w')) {
-        const right = start.x + start.w;
-        const nx = Math.max(0, Math.min(right - 0.02, p.x));
-        c.x = nx; c.w = right - nx;
-      }
-      if (s.includes('n')) {
-        const bottom = start.y + start.h;
-        const ny = Math.max(0, Math.min(bottom - 0.02, p.y));
-        c.y = ny; c.h = bottom - ny;
-      }
-    }
-    _applyCropOverlay();
-  });
-  window.addEventListener('mouseup', () => { _editCropDrag = null; });
-
-  // TAB switching for the new COLOR / TRANSFORM / EFFECTS panes.
-  document.querySelectorAll('.vis-edit-tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      const target = tab.dataset.tab;
-      document.querySelectorAll('.vis-edit-tab').forEach((t) =>
-        t.classList.toggle('is-active', t === tab));
-      document.querySelectorAll('.vis-edit-tabpane').forEach((p) =>
-        p.classList.toggle('is-active', p.dataset.tabpane === target));
-    });
-  });
-  // Collapse toggle on the tab strip — hides the entire tool body
-  // (sliders + presets) so the timeline + previews get more room.
-  // State stored in cfg.editToolsCollapsed and restored on next open.
-  const editTabsCollapseBtn = document.getElementById('vis-edit-tabs-collapse');
-  function _applyEditToolsCollapsed(collapsed) {
-    if (editPane) editPane.classList.toggle('is-tools-collapsed', !!collapsed);
-    if (editTabsCollapseBtn) editTabsCollapseBtn.textContent = collapsed ? '▸' : '▾';
-  }
-  (async () => {
-    try {
-      const cfg = (await window.dash?.getConfig?.()) || {};
-      _applyEditToolsCollapsed(!!cfg.editToolsCollapsed);
-    } catch {}
-  })();
-  editTabsCollapseBtn?.addEventListener('click', () => {
-    const next = !editPane?.classList.contains('is-tools-collapsed');
-    _applyEditToolsCollapsed(next);
-    window.dash?.setConfig?.({ editToolsCollapsed: next });
-  });
-
-  // EXPAND button — toggles a body class that the CSS uses to elevate
-  // the visualizer combo-pane over the rest of the combo panel and
-  // hide the captures list, giving the editor the whole canvas.
-  const editExpandBtn = document.getElementById('vis-edit-expand');
-  editExpandBtn?.addEventListener('click', () => {
-    const on = !document.body.classList.contains('has-rec-edit-expanded');
-    document.body.classList.toggle('has-rec-edit-expanded', on);
-    editExpandBtn.classList.toggle('is-active', on);
-    editExpandBtn.textContent = on ? '⛶ COLLAPSE' : '⛶';
-  });
-
-  // + ADD — append a clip to the timeline. Picks the first selected
-  // capture (or the currently-playing one if nothing is selected) and
-  // appends it to the clip list. Probes the file via a hidden video
-  // element to record its duration for the clip-bar label.
-  const editAddClipBtn = document.getElementById('vis-edit-clips-add');
-  editAddClipBtn?.addEventListener('click', () => {
-    // Source candidates: selection first, else currently-playing.
-    const candidates = _visualizerSelected.size
-      ? [..._visualizerSelected]
-      : (_visualizerCurrent ? [_visualizerCurrent] : []);
-    const pool = candidates
-      .map((abs) => _visualizerEntries.find((e) => e.path === abs))
-      .filter((e) => e && _VIDEO_RENDER_RE.test(e.name));
-    if (!pool.length) {
-      if (editStatusEl) { editStatusEl.textContent = 'SELECT A RECORDING TO ADD'; editStatusEl.className = 'vis-edit-status is-error'; }
-      return;
-    }
-    for (const e of pool) {
-      // Skip duplicates of the anchor or any already-listed clip.
-      if (_editState.clips.some((c) => c.path === e.path)) continue;
-      const clip = { path: e.path, name: e.name, duration: 0 };
-      _editState.clips.push(clip);
-      // Probe duration off-screen so the bar label can show it.
-      const probe = document.createElement('video');
-      probe.preload = 'metadata';
-      probe.src = `dash3d-file://gallery/${encodeURI(e.rel)}`;
-      probe.addEventListener('loadedmetadata', () => {
-        clip.duration = probe.duration || 0;
-        try { probe.remove(); } catch {}
-        _renderEditClips();
-      });
-      probe.addEventListener('error', () => { try { probe.remove(); } catch {} });
-    }
-    _renderEditClips();
-    if (editStatusEl) { editStatusEl.textContent = `${_editState.clips.length} clip(s) queued`; editStatusEl.className = 'vis-edit-status is-ok'; }
-  });
-
-  // SNAPSHOT — draw the current EDITED frame to a canvas (including
-  // applied CSS filter + transform) and save as PNG via comfySaveOutput
-  // (re-uses that handler since it writes to gallery/generated/image/).
-  const editSnapBtn = document.getElementById('vis-edit-snap');
-  editSnapBtn?.addEventListener('click', async () => {
-    if (!editOutVid || !editOutVid.videoWidth) return;
-    if (editStatusEl) { editStatusEl.textContent = 'SNAPSHOTTING…'; editStatusEl.className = 'vis-edit-status'; }
-    try {
-      const c = document.createElement('canvas');
-      c.width = editOutVid.videoWidth;
-      c.height = editOutVid.videoHeight;
-      const ctx = c.getContext('2d');
-      ctx.filter = _editCssFilter(_editState);
-      // Manual flip/rotate via canvas transform.
-      ctx.save();
-      ctx.translate(c.width / 2, c.height / 2);
-      if (_editState.rotate) ctx.rotate(_editState.rotate * Math.PI / 180);
-      ctx.scale(_editState.flipH ? -1 : 1, _editState.flipV ? -1 : 1);
-      ctx.translate(-c.width / 2, -c.height / 2);
-      ctx.drawImage(editOutVid, 0, 0, c.width, c.height);
-      ctx.restore();
-      const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
-      const buf  = new Uint8Array(await blob.arrayBuffer());
-      const stem = (_editState.src.split(/[\\/]/).pop() || 'frame').replace(/\.[^.]+$/, '');
-      const r = await window.dash?.comfySaveOutput?.('image', buf, '.png', `${stem} FRAME`);
-      if (r?.ok) {
-        if (editStatusEl) { editStatusEl.textContent = `SNAP SAVED · ${r.name}`; editStatusEl.className = 'vis-edit-status is-ok'; }
-        try { await refreshVisualizer(); } catch {}
-      } else {
-        if (editStatusEl) { editStatusEl.textContent = `SNAP ERROR · ${r?.error || 'unknown'}`; editStatusEl.className = 'vis-edit-status is-error'; }
-      }
-    } catch (err) {
-      if (editStatusEl) { editStatusEl.textContent = `SNAP ERROR · ${err.message || err}`; editStatusEl.className = 'vis-edit-status is-error'; }
-    }
-  });
-  // Buttons
-  editBtn?.addEventListener('click', () => { _openEditor(); playSfx?.('click'); });
-  editCloseBtn?.addEventListener('click', () => { _closeEditor(); playSfx?.('click'); });
-  // Manual playhead tick — used when there's no real <video> driving
-  // playback (e.g. V1 anchor is an image, or the user wants the
-  // timeline to scrub through V2 overlays without an underlying clip).
-  // Advances editOrigVid.currentTime manually so the playhead and
-  // overlay-timing math keep working.
-  let _editFakePlayTimer = null;
-  function _editStartFakePlay() {
-    if (_editFakePlayTimer) return;
-    const startWall = performance.now();
-    const startT    = editOrigVid?.currentTime || 0;
-    _editFakePlayTimer = setInterval(() => {
-      if (!editOrigVid) return;
-      const elapsed = (performance.now() - startWall) / 1000;
-      const dur = _editProject.duration || 30;
-      let t = startT + elapsed;
-      if (t >= dur) { t = 0; /* loop back */ }
-      try { editOrigVid.currentTime = t; } catch {}
-      if (typeof _refreshEditPlayhead === 'function') _refreshEditPlayhead();
-    }, 1000 / 30); // 30fps tick
-  }
-  function _editStopFakePlay() {
-    if (_editFakePlayTimer) { clearInterval(_editFakePlayTimer); _editFakePlayTimer = null; }
-  }
-  function _editPaintPlayBtn(isPlaying) {
-    if (editPlayBtn) editPlayBtn.textContent = isPlaying ? '⏸' : '▶';
-  }
-  editPlayBtn?.addEventListener('click', async () => {
-    if (!editOrigVid) return;
-    const v1Anchor = _editProject.tracks.V1[0];
-    const anchorIsImage = v1Anchor?.kind === 'image';
-    if (anchorIsImage || !editOrigVid.src) {
-      // No real video to play — drive the playhead manually.
-      if (_editFakePlayTimer) { _editStopFakePlay(); _editPaintPlayBtn(false); }
-      else                    { _editStartFakePlay(); _editPaintPlayBtn(true); }
-      return;
-    }
-    // Normal video path.
-    if (editOrigVid.paused) {
-      _editPaintPlayBtn(true);
-      try {
-        await editOrigVid.play();
-      } catch (err) {
-        console.warn('[edit] play failed:', err?.message || err);
-        _editPaintPlayBtn(false);
-      }
-    } else {
-      editOrigVid.pause();
-      _editPaintPlayBtn(false);
-    }
-  });
-  // Keep the button icon in sync if play state changes from somewhere
-  // else (auto-pause on trim drag, end-of-clip, etc.).
-  editOrigVid?.addEventListener('play',   () => _editPaintPlayBtn(true));
-  editOrigVid?.addEventListener('pause',  () => _editPaintPlayBtn(false));
-  editOrigVid?.addEventListener('ended',  () => _editPaintPlayBtn(false));
-  editResetBtn?.addEventListener('click', () => {
-    Object.assign(_editState.sliders, {
-      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
-      sharpen: 0, vignette: 0, speed: 100, volume: 100,
-    });
-    Object.assign(_editState, {
-      auto: false, denoise: false, bw: false, sepia: false, invert: false,
-      reverse: false, mute: false, flipH: false, flipV: false, rotate: 0,
-      cropOn: false, crop: { x: 0, y: 0, w: 1, h: 1 },
-      trimIn: 0, trimOut: _editState.duration,
-    });
-    // Slider inputs back to defaults.
-    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-    setVal('vis-edit-brightness', 100);
-    setVal('vis-edit-contrast',   100);
-    setVal('vis-edit-saturation', 100);
-    setVal('vis-edit-hue',        0);
-    setVal('vis-edit-blur',       0);
-    setVal('vis-edit-sharpen',    0);
-    setVal('vis-edit-vignette',   0);
-    setVal('vis-edit-speed',      100);
-    setVal('vis-edit-volume',     100);
-    // Clear all toggle pressed-states.
-    document.querySelectorAll('.visualizer-edit-pane .vis-edit-toggle').forEach((b) =>
-      b.classList.remove('is-active'));
-    if (editRotateBtn) editRotateBtn.textContent = '↻ ROTATE 0°';
-    // Re-paint slider value labels.
-    document.querySelectorAll('#visualizer-edit-pane .vis-edit-filter-val').forEach((el) => {
-      const k = el.dataset.for;
-      if (!k || !(k in _editState.sliders)) return;
-      const v = _editState.sliders[k];
-      if (k === 'blur')         el.textContent = `${(v || 0).toFixed(1)} px`;
-      else if (k === 'hue')     el.textContent = `${Math.round(v || 0)}°`;
-      else if (k === 'speed')   el.textContent = `${(v / 100).toFixed(2)}×`;
-      else                      el.textContent = `${Math.round(v || 0)}%`;
-    });
-    _editView.scale = 1; _editView.tx = 0; _editView.ty = 0;
-    _applyCropOverlay();
-    _applyEditPreview();
-    _refreshEditTimeUi();
-  });
-  // Progress bar lives in the status row of the editor. We inject it
-  // once on first export; subsequent exports just update its width.
-  function _ensureExportProgressEl() {
-    let bar = document.getElementById('vis-edit-progress');
-    if (bar) return bar;
-    const wrap = document.createElement('div');
-    wrap.className = 'vis-edit-progress-wrap';
-    bar = document.createElement('div');
-    bar.id = 'vis-edit-progress';
-    bar.className = 'vis-edit-progress';
-    wrap.appendChild(bar);
-    editStatusEl?.parentNode?.insertBefore(wrap, editStatusEl);
-    return bar;
-  }
-  function _renderEditExportProgress(p) {
-    const bar = _ensureExportProgressEl();
-    const pct = Math.max(0, Math.min(100, p?.percent || 0));
-    bar.style.width = `${pct}%`;
-    if (editStatusEl) {
-      const fps = p?.fps ? ` · ${Math.round(p.fps)}fps` : '';
-      const enc = p?.encoder ? ` · ${p.encoder}` : '';
-      editStatusEl.textContent = `RENDERING ${pct.toFixed(0)}%${fps}${enc}`;
-    }
-  }
-  function _hideEditExportProgress() {
-    const bar = document.getElementById('vis-edit-progress');
-    if (bar) bar.style.width = '0%';
-  }
-  editExportBtn?.addEventListener('click', async () => {
-    if (!_editState.src) return;
-    if (editStatusEl) { editStatusEl.textContent = 'PREPARING…'; editStatusEl.className = 'vis-edit-status'; }
-    _renderEditExportProgress({ percent: 0 });
-    editExportBtn.disabled = true;
-    editExportBtn.textContent = '… RENDERING';
-    try {
-      // Wire progress updates from main → progress bar in the editor.
-      const progressUnsub = window.dash?.onEditExportProgress?.((p) => {
-        _renderEditExportProgress(p);
-      });
-      const r = await window.dash?.editExportVideo?.({
-        srcPath: _editState.src,
-        trimIn:  _editState.trimIn,
-        trimOut: _editState.trimOut,
-        sliders: { ..._editState.sliders },
-        auto:    _editState.auto,
-        denoise: _editState.denoise,
-        bw:      _editState.bw,
-        sepia:   _editState.sepia,
-        invert:  _editState.invert,
-        reverse: _editState.reverse,
-        mute:    _editState.mute,
-        flipH:   _editState.flipH,
-        flipV:   _editState.flipV,
-        rotate:  _editState.rotate,
-        crop:    _editState.cropOn ? _editState.crop : null,
-        // Project output resolution — drives overlay scaling math.
-        projectWidth:  _editProject.width  || 1920,
-        projectHeight: _editProject.height || 1080,
-        projectFps:    _editProject.fps    || 30,
-        // Anchor metadata for the export pipeline. If the first clip
-        // is an image, the export pipeline switches into still-mode
-        // for the anchor input (`-loop 1 -t <duration>`).
-        anchorKind: _editProject.tracks.V1[0]?.kind || 'video',
-        anchorDuration: _editProject.tracks.V1[0]?.srcDuration || 3,
-        // Extra appended clips (V1 track in start-time order, skipping
-        // the anchor). Each entry carries its kind + duration so still
-        // images become looped inputs in the concat.
-        extraClips: _editProject.tracks.V1
-          .slice()
-          .sort((a, b) => a.start - b.start)
-          .slice(1)
-          .map((c) => ({
-            path: c.path,
-            kind: c.kind || 'video',
-            duration: c.srcDuration || 3,
-          })),
-        // V2 image overlays — each composes on top of the V1 output
-        // for its time range. Coordinates are fractions of the
-        // project canvas (same as the preview overlay).
-        v2Overlays: _editProject.tracks.V2
-          .filter((c) => c.kind === 'image')
-          .map((c) => ({
-            path: c.path,
-            start: c.start,
-            duration: Math.max(0.05, (c.out || 0) - (c.in || 0)),
-            x: c.x, y: c.y, w: c.w, h: c.h,
-          })),
-      });
-      try { progressUnsub?.(); } catch {}
-      if (r?.ok) {
-        if (editStatusEl) { editStatusEl.textContent = `SAVED · ${r.name}`; editStatusEl.className = 'vis-edit-status is-ok'; }
-        await refreshVisualizer();
-      } else {
-        if (editStatusEl) { editStatusEl.textContent = `ERROR · ${r?.error || 'unknown'}`; editStatusEl.className = 'vis-edit-status is-error'; }
-      }
-    } catch (err) {
-      if (editStatusEl) { editStatusEl.textContent = `ERROR · ${err.message || err}`; editStatusEl.className = 'vis-edit-status is-error'; }
-    } finally {
-      editExportBtn.disabled = false;
-      editExportBtn.textContent = '▶ EXPORT';
-      _hideEditExportProgress();
-    }
-  });
-  // Initial paint — the EDIT button's enabled state is also refreshed
-  // alongside DELETE at every playback / selection change point (see
-  // the `_refreshEditBtn();` calls added next to each `_refreshDeleteBtn()`
-  // callsite).
-  _refreshEditBtn();
-  // Expose process-filter state so the existing PROCESS submission
-  // can read it without us threading it through every helper.
-  window._procFilterState = _procFilterState;
-
-  // ── MUTE toggle ─────────────────────────────────────────────────
-  // Drives visualizerVideoEl.muted. Persists the user's preference
-  // separately from the live element state — the mirror needs to
-  // force-mute (so audio doesn't double up since the source already
-  // plays through the OS speakers), but that shouldn't permanently
-  // override what the user picked for recording playback. _applyMute()
-  // is called whenever we transition between playback modes to keep
-  // the live state in sync with the saved preference.
-  const muteBtn = document.getElementById('visualizer-mute-btn');
-  let _recRoomMutedPref = false;
-  function _paintMuteBtn(muted) {
-    if (!muteBtn) return;
-    muteBtn.textContent = muted ? 'SOUND' : 'MUTE';
-    muteBtn.title = muted ? 'Audio muted — click to unmute' : 'Audio on — click to mute';
-    muteBtn.classList.toggle('is-active', !!muted);
-  }
-  function _applyMute(muted) {
-    if (visualizerVideoEl) visualizerVideoEl.muted = !!muted;
-    _paintMuteBtn(!!muted);
-  }
-  muteBtn?.addEventListener('click', async () => {
-    _recRoomMutedPref = !_recRoomMutedPref;
-    _applyMute(_recRoomMutedPref);
-    try { await window.dash?.setConfig?.({ recRoomMuted: _recRoomMutedPref }); } catch {}
-    playSfx?.('click');
-  });
+  // Restore persisted combo mode. The EXPLORE section tab is restored by
+  // features/explore.js itself when that lazy pane first loads.
   (async () => {
     const cfg = await window.dash?.getConfig?.() || {};
-    _recRoomMutedPref = !!cfg.recRoomMuted;
-    _applyMute(_recRoomMutedPref);
-  })();
-
-
-  // ── MIRROR: route the active video into this pane ────────────────
-  // Uses Electron's desktopCapturer (via the visualizer-get-video-source
-  // IPC, which picks the YT popout window first, then the dashboard
-  // window for in-pane BrowserView videos, then a screen as a last
-  // resort) plus the legacy `chromeMediaSource: 'desktop'` constraint
-  // on getUserMedia to grab a MediaStream of that source. The stream
-  // is piped directly into the existing #visualizer-video element, so
-  // the surrounding chrome (play/pause, audio viz, etc.) keeps working.
-  // Toggle off → tracks are stopped and srcObject cleared.
-  const mirrorBtn = document.getElementById('visualizer-mirror-btn');
-  const sourceBtn = document.getElementById('visualizer-source-btn');
-  const sourcePickerEl = document.getElementById('visualizer-source-picker');
-  const sourceListEl   = document.getElementById('visualizer-source-list');
-  const sourceCloseBtn = document.getElementById('visualizer-source-close');
-  const screencapBtn   = document.getElementById('visualizer-screencap-btn');
-  let _mirrorStream = null;
-  // When set (via picker), startMirror uses this source instead of
-  // calling the auto-pick IPC. Cleared on stop so the next plain MIRROR
-  // click falls back to auto-pick.
-  let _mirrorSourceOverride = null;
-  function _stopVisualizerMirror() {
-    // Flush any in-progress screen record first so its writer closes
-    // cleanly before we kill the source stream.
-    if (typeof _stopScreenrec === 'function' && _screenrecState) {
-      try { _stopScreenrec(); } catch {}
-    }
-    if (_mirrorStream) {
-      for (const tr of _mirrorStream.getTracks()) { try { tr.stop(); } catch {} }
-      _mirrorStream = null;
-    }
-    if (visualizerVideoEl) {
-      visualizerVideoEl.srcObject = null;
-    }
-    mirrorBtn?.classList.remove('is-active');
-    if (mirrorBtn) mirrorBtn.textContent = 'MIRROR';
-    visualizerWrapEl?.classList.remove('is-mirroring');
-    _mirrorSourceOverride = null;
-    // Drop the dynamic source-aspect; the wrap goes back to default
-    // full-pane-width sizing until the next mirror or playback.
-    if (typeof _setSourceDims === 'function') _setSourceDims(0, 0);
-    // Restore the user's saved mute preference now that the mirror's
-    // force-mute is no longer needed.
-    if (typeof _applyMute === 'function') _applyMute(!!_recRoomMutedPref);
-  }
-  async function _startVisualizerMirror() {
-    if (!visualizerVideoEl) return;
-    let src = _mirrorSourceOverride;
-    if (!src && window.dash?.visualizerGetVideoSource) {
-      try { src = await window.dash.visualizerGetVideoSource(); } catch { src = null; }
-    }
-    if (!src?.id) { playSfx?.('error'); return; }
-    try {
-      // chromeMediaSource constraints are legacy/Chromium-specific but
-      // remain supported in Electron. Audio is also routed via the same
-      // capture so anything in the source plays through here too.
-      _mirrorStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: src.id,
-          },
-        },
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: src.id,
-            // Max-only constraints. min* forces Chromium to upscale
-            // (or fall back to a default 4:3 format) when the source is
-            // smaller than the minimum on either axis — which breaks
-            // portrait monitors (1080×1920 has width < 1280). Without
-            // mins, the desktop-capture path emits at the source's
-            // native dimensions, preserving aspect for both landscape
-            // and portrait sources.
-            maxWidth: 3840,
-            maxHeight: 3840,
-            maxFrameRate: 60,
-          },
-        },
-      });
-    } catch (errAv) {
-      // Some sources only allow video capture (no audio loopback for
-      // that window). Retry video-only.
-      try {
-        _mirrorStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: src.id,
-              maxWidth: 3840,
-              maxHeight: 3840,
-              maxFrameRate: 60,
-            },
-          },
-        });
-      } catch (errV) {
-        console.warn('[visualizer] mirror failed:', errV?.message || errV);
-        playSfx?.('error');
-        return;
-      }
-    }
-    // Diagnostic — confirm what tracks Chromium actually handed us.
-    // Window sources on Win32 always yield 0 audio tracks; screen
-    // sources usually yield 1. The REC button surfaces this to the
-    // user; the console log is the deep diagnostic.
-    console.log('[mirror] started:', {
-      sourceId: src.id,
-      kind: src.id?.startsWith('window:') ? 'window' : src.id?.startsWith('screen:') ? 'screen' : 'unknown',
-      audioTracks: _mirrorStream.getAudioTracks().length,
-      videoTracks: _mirrorStream.getVideoTracks().length,
-    });
-    visualizerVideoEl.srcObject = _mirrorStream;
-    // Force-mute the playback element while mirroring — the source
-    // audio already plays through the OS speakers, so unmuting here
-    // would double it. The MediaStream still carries the audio tracks
-    // so MediaRecorder picks them up. We don't write through to
-    // _recRoomMutedPref, so the user's saved preference is restored
-    // when the mirror stops.
-    visualizerVideoEl.muted = true;
-    _paintMuteBtn(true);
-    // Read source dimensions off the track settings ASAP so the wrap
-    // can size itself before the first frame paints. loadedmetadata
-    // below also fires once the stream produces its first frame, which
-    // catches the case where getSettings() returns no dims yet.
-    try {
-      const settings = _mirrorStream.getVideoTracks()[0]?.getSettings?.() || {};
-      if (settings.width && settings.height) {
-        _setSourceDims(settings.width, settings.height);
-      }
-    } catch {}
-    visualizerVideoEl.play().catch(() => {});
-    visualizerWrapEl?.classList.add('is-mirroring');
-    mirrorBtn?.classList.add('is-active');
-    if (mirrorBtn) mirrorBtn.textContent = 'MIRROR ON';
-    if (visualizerNowEl) visualizerNowEl.textContent = `MIRROR · ${src.name || 'source'}`.toUpperCase();
-    // If the captured stream ends (window closed, user revoked share),
-    // auto-disengage so the UI doesn't lie about being live.
-    const track = _mirrorStream.getVideoTracks()[0];
-    if (track) track.addEventListener('ended', _stopVisualizerMirror, { once: true });
-  }
-  mirrorBtn?.addEventListener('click', async () => {
-    if (_mirrorStream) {
-      _stopVisualizerMirror();
-      playSfx?.('click');
-    } else {
-      await _startVisualizerMirror();
-      playSfx?.('confirm');
-    }
-  });
-
-  // ── Source picker ────────────────────────────────────────────────
-  // SOURCE button opens an inline list of every window + screen with
-  // thumbnails. Clicking one tears down the current mirror (if any)
-  // and restarts capture against the chosen source.
-  function _hideSourcePicker() {
-    if (!sourcePickerEl) return;
-    sourcePickerEl.hidden = true;
-    sourceBtn?.classList.remove('is-active');
-  }
-  async function _showSourcePicker() {
-    if (!sourcePickerEl || !sourceListEl || !window.dash?.visualizerListSources) return;
-    sourceListEl.innerHTML = '<li class="explore-empty">LOADING SOURCES…</li>';
-    sourcePickerEl.hidden = false;
-    sourceBtn?.classList.add('is-active');
-    let sources;
-    try { sources = await window.dash.visualizerListSources(); } catch { sources = null; }
-    if (!Array.isArray(sources) || !sources.length) {
-      sourceListEl.innerHTML = '<li class="explore-empty">NO SOURCES AVAILABLE</li>';
-      return;
-    }
-    // Layout: screens first, then windows grouped by owning application
-    // so picking "the Discord window" is one read down the list rather
-    // than a search through every visible window title. Within each
-    // app group the windows are sorted by title.
-    const screens = sources.filter((s) => s.kind === 'screen');
-    const windows = sources.filter((s) => s.kind !== 'screen');
-    screens.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    const appGroups = new Map();
-    for (const w of windows) {
-      const key = w.appName || 'Other';
-      if (!appGroups.has(key)) appGroups.set(key, []);
-      appGroups.get(key).push(w);
-    }
-    // Sort groups alphabetically; sort windows within a group by title.
-    const sortedGroups = [...appGroups.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]));
-    for (const [, list] of sortedGroups) {
-      list.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    }
-
-    sourceListEl.innerHTML = '';
-    const renderRow = (s) => {
-      const row = document.createElement('li');
-      row.className = 'visualizer-source-row';
-      row.dataset.id = s.id;
-      row.dataset.name = s.name;
-      const safeName = String(s.name || '').replace(/</g, '&lt;');
-      const thumb = s.thumbnail
-        ? `<img class="visualizer-source-thumb" src="${s.thumbnail}" alt="">`
-        : `<div class="visualizer-source-thumb is-empty"></div>`;
-      row.innerHTML =
-        thumb +
-        `<span class="visualizer-source-name">${safeName}</span>` +
-        `<span class="visualizer-source-kind">${s.kind === 'screen' ? 'SCREEN' : 'WIN'}</span>`;
-      sourceListEl.appendChild(row);
-    };
-    // Screens section header + rows (only when at least one screen is
-    // reported — skip the empty header otherwise).
-    if (screens.length) {
-      const head = document.createElement('li');
-      head.className = 'visualizer-source-group';
-      head.textContent = 'SCREENS';
-      sourceListEl.appendChild(head);
-      for (const s of screens) renderRow(s);
-    }
-    // One group header per application — gives the user a quick scan
-    // by app instead of a flat list of every window title.
-    for (const [appName, list] of sortedGroups) {
-      const head = document.createElement('li');
-      head.className = 'visualizer-source-group';
-      head.textContent = String(appName).toUpperCase() + ` · ${list.length}`;
-      sourceListEl.appendChild(head);
-      for (const s of list) renderRow(s);
-    }
-  }
-  sourceBtn?.addEventListener('click', () => {
-    if (sourcePickerEl?.hidden) { _showSourcePicker(); playSfx?.('click'); }
-    else { _hideSourcePicker(); playSfx?.('click'); }
-  });
-  sourceCloseBtn?.addEventListener('click', () => { _hideSourcePicker(); playSfx?.('click'); });
-  sourceListEl?.addEventListener('click', async (e) => {
-    const row = e.target.closest('.visualizer-source-row');
-    if (!row) return;
-    _mirrorSourceOverride = { id: row.dataset.id, name: row.dataset.name };
-    // Restart the mirror with the new source. Stop first so the
-    // override doesn't get cleared by _stopVisualizerMirror.
-    if (_mirrorStream) {
-      for (const tr of _mirrorStream.getTracks()) { try { tr.stop(); } catch {} }
-      _mirrorStream = null;
-      visualizerVideoEl.srcObject = null;
-    }
-    _hideSourcePicker();
-    await _startVisualizerMirror();
-    playSfx?.('confirm');
-  });
-
-  // ── Screencap: input-driven JPEG capture ─────────────────────────
-  // Renderer owns frame encoding; main owns the powerMonitor poll and
-  // the file write. We only fire if the mirror stream is live (no
-  // point taking blank frames) and throttle to >= 1s between saves so
-  // continuous typing doesn't flood the gallery folder.
-  let _screencapOn = false;
-  let _screencapLastAt = 0;
-  let _screencapTriggerUnsub = null;
-  const _screencapCanvas = document.createElement('canvas');
-  function _screencapEncode() {
-    if (!visualizerVideoEl) return null;
-    const w = visualizerVideoEl.videoWidth  | 0;
-    const h = visualizerVideoEl.videoHeight | 0;
-    if (!w || !h) return null;
-    // Cap longest edge at 1600 to keep file sizes reasonable while
-    // still being readable. JPEG quality 0.82 = ~150-400 KB typical.
-    const maxEdge = 1600;
-    const scale = Math.min(1, maxEdge / Math.max(w, h));
-    _screencapCanvas.width  = Math.round(w * scale);
-    _screencapCanvas.height = Math.round(h * scale);
-    const ctx = _screencapCanvas.getContext('2d');
-    if (!ctx) return null;
-    try { ctx.drawImage(visualizerVideoEl, 0, 0, _screencapCanvas.width, _screencapCanvas.height); }
-    catch { return null; }
-    try { return _screencapCanvas.toDataURL('image/jpeg', 0.82); }
-    catch { return null; }
-  }
-  async function _screencapMaybeCapture() {
-    if (!_screencapOn) return;
-    // Need *something* to capture from — either an active live mirror
-    // or a video file currently loaded in the rec-room player. Without
-    // either, the canvas draw produces a black frame.
-    const hasVideoContent = (visualizerVideoEl && visualizerVideoEl.videoWidth > 0 && visualizerVideoEl.videoHeight > 0);
-    if (!_mirrorStream && !hasVideoContent) return;
-    const now = Date.now();
-    if (now - _screencapLastAt < 1000) return; // throttle 1/sec
-    const dataUrl = _screencapEncode();
-    if (!dataUrl) return;
-    _screencapLastAt = now;
-    try { await window.dash?.screencapSave?.(dataUrl); } catch {}
-    // Flash the button briefly so the user sees activity.
-    if (screencapBtn) {
-      screencapBtn.classList.add('is-flashing');
-      setTimeout(() => screencapBtn.classList.remove('is-flashing'), 220);
-    }
-  }
-  async function _startScreencap() {
-    if (_screencapOn) return;
-    _screencapOn = true;
-    _screencapLastAt = 0;
-    screencapBtn?.classList.add('is-active');
-    if (screencapBtn) screencapBtn.textContent = 'REC ON';
-    _screencapTriggerUnsub = window.dash?.onScreencapTrigger?.(_screencapMaybeCapture) || null;
-    try { await window.dash?.screencapWatchStart?.(); } catch {}
-  }
-  async function _stopScreencap() {
-    if (!_screencapOn) return;
-    _screencapOn = false;
-    screencapBtn?.classList.remove('is-active');
-    if (screencapBtn) screencapBtn.textContent = 'RECORD';
-    if (_screencapTriggerUnsub) { try { _screencapTriggerUnsub(); } catch {} _screencapTriggerUnsub = null; }
-    try { await window.dash?.screencapWatchStop?.(); } catch {}
-  }
-  screencapBtn?.addEventListener('click', () => {
-    if (_screencapOn) { _stopScreencap(); playSfx?.('click'); }
-    else              { _startScreencap(); playSfx?.('confirm'); }
-  });
-
-  // ── PROCESS: stitch selected snaps into a video ──────────────────
-  // Pipeline: decode each selected JPEG → drawImage to a fixed-size
-  // canvas (letterboxed) → canvas.captureStream into MediaRecorder →
-  // collect blob → send to main for write into gallery/recordings/.
-  // Time crunch is percentage-based: 100% = 1 s per snap (base hold);
-  // 200% = 0.5 s; 3000% = ~33 ms. Bitrate is a 3-way preset matrix
-  // indexed by [resolution][quality].
-  const processBtn        = document.getElementById('visualizer-process-btn');
-  const processPickerEl   = document.getElementById('visualizer-process-picker');
-  const processCloseBtn   = document.getElementById('visualizer-process-close');
-  const processCountEl    = document.getElementById('visualizer-process-count');
-  const processSpeedEl    = document.getElementById('visualizer-process-speed');
-  const processSpeedVal   = document.getElementById('visualizer-process-speed-val');
-  const processGoBtn      = document.getElementById('visualizer-process-go');
-  const processStatusEl   = document.getElementById('visualizer-process-status');
-  const _processOpts = { format: 'mp4', res: 'source', quality: 'std' };
-  // Cached ffmpeg probe — populated once at startup. When .available is
-  // true we route PROCESS through the GPU-accelerated ffmpeg pipeline
-  // (real-time savings vs MediaRecorder are 10-50x for snap stitching).
-  let _ffmpegInfo = null;
-  (async () => { try { _ffmpegInfo = await window.dash?.ffmpegInfo?.() || null; } catch {} })();
-
-  // Compression presets — chosen by eye for screen content where text
-  // legibility matters more than action smoothness. LITE = comfortable
-  // for embedding, STD = good general default, CRISP = near-archival.
-  const PROCESS_BITRATES = {
-    '720':    { lite: 1_500_000, std:  2_500_000, crisp:  5_000_000 },
-    '1080':   { lite: 3_000_000, std:  5_000_000, crisp:  8_000_000 },
-    '2160':   { lite: 8_000_000, std: 15_000_000, crisp: 25_000_000 },
-    'source': { lite: 5_000_000, std: 10_000_000, crisp: 20_000_000 },
-  };
-
-  function _setProcessStatus(msg, isErr) {
-    if (!processStatusEl) return;
-    processStatusEl.textContent = msg || '';
-    processStatusEl.classList.toggle('is-error', !!isErr);
-  }
-  function _formatSpeed(percent) {
-    const holdSec = 100 / percent;        // seconds per snap at this %
-    // Prefer the resolved image count (folder-expanded) when the picker
-    // has finished resolving; fall back to raw selection size otherwise.
-    const count = _processResolvedCount || _visualizerSelected.size;
-    const totalSec = holdSec * count;
-    return `${percent}% · ${holdSec.toFixed(2)}s/snap · ~${totalSec < 60 ? totalSec.toFixed(1) + 's' : (totalSec / 60).toFixed(1) + 'm'} total`;
-  }
-  function _paintProcessRadios() {
-    processPickerEl?.querySelectorAll('.visualizer-process-radios').forEach((grp) => {
-      const group = grp.dataset.group;
-      const val = _processOpts[group];
-      for (const btn of grp.querySelectorAll('button')) {
-        btn.classList.toggle('is-active', btn.dataset.val === val);
-      }
-    });
-  }
-  // Wire radio button groups to update _processOpts.
-  processPickerEl?.querySelectorAll('.visualizer-process-radios').forEach((grp) => {
-    grp.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-val]');
-      if (!btn) return;
-      _processOpts[grp.dataset.group] = btn.dataset.val;
-      _paintProcessRadios();
-      playSfx?.('click');
-    });
-  });
-  processSpeedEl?.addEventListener('input', () => {
-    if (processSpeedVal) processSpeedVal.textContent = _formatSpeed(Number(processSpeedEl.value) || 100);
-    // Live preview reads holdMs on every tick, so the new pace takes
-    // effect on the next frame — no need to restart the loop.
-  });
-
-  // ── Live time-crunch preview ────────────────────────────────────────
-  // Cycles the in-picker <img id="visualizer-process-preview-img">
-  // through the selected snaps at the current speed-slider pace. The
-  // preview lives INSIDE the picker (in its own slot) because the
-  // picker covers the player wrap; routing the preview through the
-  // wrap meant it was always hidden behind the controls.
-  // Each tick reads holdMs fresh from the slider, so moving the slider
-  // updates the pace without restarting.
-  const processPreviewImgEl  = document.getElementById('visualizer-process-preview-img');
-  const processPreviewSlotEl = document.querySelector('.visualizer-process-preview-slot');
-  let _processPreviewSnaps  = [];
-  let _processPreviewIdx    = 0;
-  let _processPreviewActive = false;
-  let _processPreviewTimer  = null;
-  function _previewHoldMs() {
-    const percent = Math.max(100, Number(processSpeedEl?.value) || 100);
-    return Math.max(16, (100 / percent) * 1000);
-  }
-  function _processPreviewTick() {
-    if (!_processPreviewActive || !_processPreviewSnaps.length) return;
-    const entry = _processPreviewSnaps[_processPreviewIdx % _processPreviewSnaps.length];
-    if (processPreviewImgEl && entry) {
-      processPreviewImgEl.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-    }
-    _processPreviewIdx++;
-    _processPreviewTimer = setTimeout(_processPreviewTick, _previewHoldMs());
-  }
-  function _startProcessPreview(snaps) {
-    _stopProcessPreview();
-    if (!Array.isArray(snaps) || snaps.length < 2) return;
-    _processPreviewSnaps = snaps.slice(0);
-    _processPreviewIdx = 0;
-    _processPreviewActive = true;
-    processPreviewSlotEl?.classList.add('is-running');
-    _processPreviewTick();
-  }
-  function _stopProcessPreview() {
-    _processPreviewActive = false;
-    if (_processPreviewTimer) { clearTimeout(_processPreviewTimer); _processPreviewTimer = null; }
-    _processPreviewSnaps = [];
-    _processPreviewIdx = 0;
-    processPreviewSlotEl?.classList.remove('is-running');
-    if (processPreviewImgEl) processPreviewImgEl.src = '';
-  }
-
-  // Cached resolved image count when the picker is open with a folder
-  // selection — so the speed-slider preview shows a real total duration
-  // instead of "1 item × N seconds".
-  let _processResolvedCount = 0;
-  function _openProcessPicker() {
-    if (!processPickerEl) return;
-    // Close any other picker.
-    sourcePickerEl   && (sourcePickerEl.hidden   = true);
-    sourceBtn        ?.classList.remove('is-active');
-    qualityPickerEl  && (qualityPickerEl.hidden  = true);
-    qualityBtn       ?.classList.remove('is-active');
-    osdPickerEl      && (osdPickerEl.hidden      = true);
-    processPickerEl.hidden = false;
-    processBtn?.classList.add('is-active');
-    if (processCountEl) processCountEl.textContent = String(_visualizerSelected.size);
-    _paintProcessRadios();
-    if (processSpeedVal) processSpeedVal.textContent = _formatSpeed(Number(processSpeedEl.value) || 100);
-    _setProcessStatus('Resolving images…');
-    // Async-resolve actual image count (folder expansion). Updates the
-    // count badge and re-renders the speed-time estimate when ready.
-    _processResolvedCount = 0;
-    _collectSelectedSnapsExpanded().then((list) => {
-      if (processPickerEl.hidden) return; // closed before resolve
-      _processResolvedCount = list.length;
-      if (processCountEl) processCountEl.textContent = String(list.length);
-      if (processSpeedVal) processSpeedVal.textContent = _formatSpeed(Number(processSpeedEl.value) || 100);
-      _setProcessStatus(list.length >= 2 ? '' : 'Selection has fewer than 2 images.', list.length < 2);
-      // Kick off the live preview once we know what we're working with.
-      if (list.length >= 2) _startProcessPreview(list);
-    }).catch(() => {});
-  }
-  function _closeProcessPicker() {
-    if (!processPickerEl) return;
-    processPickerEl.hidden = true;
-    processBtn?.classList.remove('is-active');
-    _processResolvedCount = 0;
-    _stopProcessPreview();
-  }
-  processBtn?.addEventListener('click', () => {
-    if (processBtn.disabled) return;
-    if (processPickerEl?.hidden) _openProcessPicker();
-    else _closeProcessPicker();
-    playSfx?.('click');
-  });
-  processCloseBtn?.addEventListener('click', () => { _closeProcessPicker(); playSfx?.('click'); });
-
-  // PREVIEW button — restart / toggle the live time-crunch preview.
-  // Auto-preview kicks off when the picker opens; this button lets the
-  // user restart it from frame 0 after fiddling with the slider, or
-  // pause it entirely. Click while active → stop; click while inactive
-  // → restart from frame 0.
-  const processPreviewBtn = document.getElementById('visualizer-process-preview');
-  function _paintProcessPreviewBtn() {
-    processPreviewBtn?.classList.toggle('is-active', _processPreviewActive);
-  }
-  processPreviewBtn?.addEventListener('click', async () => {
-    if (_processPreviewActive) {
-      _stopProcessPreview();
-      _paintProcessPreviewBtn();
-      playSfx?.('click');
-      return;
-    }
-    // Restart from frame 0 with whatever the current selection resolves
-    // to (folder selections expand to image children).
-    _setProcessStatus('Resolving images…');
-    const list = await _collectSelectedSnapsExpanded();
-    if (list.length < 2) {
-      _setProcessStatus('Need at least 2 images to preview.', true);
-      playSfx?.('error');
-      return;
-    }
-    _setProcessStatus('');
-    _startProcessPreview(list);
-    _paintProcessPreviewBtn();
-    playSfx?.('confirm');
-  });
-  // Poll the preview state every ~250ms while the picker is open so the
-  // button reflects auto-start/auto-stop too (preview can also stop on
-  // close / GO press). Cheap; runs only when picker is visible.
-  setInterval(() => {
-    if (!processPickerEl || processPickerEl.hidden) return;
-    _paintProcessPreviewBtn();
-  }, 250);
-
-  // Collect the selected snap entries IN ORIGINAL DISPLAY ORDER from
-  // the current _visualizerEntries list (so the video plays back in
-  // the order they appear in the captures view, not in click order).
-  function _collectSelectedSnaps() {
-    return _visualizerEntries.filter((e) => _visualizerSelected.has(e.path)
-      && !e.isDir && _IMG_KNOWN_RE.test(e.name));
-  }
-  // Expanding variant: any selected FOLDER gets recursively flattened
-  // (one level deep — the rec-room only stores one-level-deep snap
-  // session folders) into its image children. Returns an array of
-  // image entries with absolute paths, in render order: selected
-  // images first, then folder contents sorted by filename within
-  // each folder (snaps are timestamp-prefixed so name order ==
-  // capture order).
-  async function _collectSelectedSnapsExpanded() {
-    const out = [];
-    const seen = new Set();
-    const push = (entry) => {
-      if (!entry || seen.has(entry.path)) return;
-      seen.add(entry.path);
-      out.push(entry);
-    };
-    // Walk in render order so picks stay grouped sensibly.
-    for (const ent of _visualizerEntries) {
-      if (!_visualizerSelected.has(ent.path)) continue;
-      if (ent.isDir) {
-        try {
-          const result = await window.dash?.galleryList?.(ent.rel || '');
-          const kids = (result?.entries || [])
-            .filter((k) => !k.isDir && _IMG_KNOWN_RE.test(k.name))
-            .sort((a, b) => a.name.localeCompare(b.name));
-          for (const k of kids) push(k);
-        } catch {}
-      } else if (_IMG_KNOWN_RE.test(ent.name)) {
-        push(ent);
-      }
-    }
-    return out;
-  }
-  // Decode one image. Resolves with null on failure so a stray corrupt
-  // snap doesn't take down the whole batch.
-  function _decodeImage(entry) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload  = () => resolve(img);
-      img.onerror = () => resolve(null);
-      img.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-    });
-  }
-  // Pick the first supported MediaRecorder MIME for the chosen format.
-  // For MP4 in older Chromium that lacks the muxer we fall back to
-  // WebM and rename the output accordingly so the file extension never
-  // lies about its bytes.
-  function _pickProcessMime(format) {
-    const mp4Candidates = [
-      'video/mp4;codecs=avc1.640033,mp4a.40.2',
-      'video/mp4;codecs=avc1.4d002a,mp4a.40.2',
-      'video/mp4;codecs=avc1',
-      'video/mp4',
-    ];
-    const webmCandidates = [
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8',
-      'video/webm',
-    ];
-    const probe = (list) => list.find((m) => window.MediaRecorder?.isTypeSupported?.(m));
-    if (format === 'mp4') {
-      const m = probe(mp4Candidates);
-      if (m) return { mime: m, ext: '.mp4' };
-      // No MP4 support → fall back to WebM (and use .webm so the file
-      // isn't mislabelled).
-      const fall = probe(webmCandidates);
-      return fall ? { mime: fall, ext: '.webm', fellBack: true } : null;
-    }
-    const m = probe(webmCandidates);
-    return m ? { mime: m, ext: '.mkv' } : null;
-  }
-
-  async function _processSnapsRun() {
-    processGoBtn.disabled = true;
-    // Halt the live preview so it stops fighting the encoder for image
-    // decodes (and so the player wrap can hand off to the saved video
-    // when ffmpeg returns).
-    _stopProcessPreview();
-    _setProcessStatus('Resolving selection…');
-    const snaps = await _collectSelectedSnapsExpanded();
-    if (snaps.length < 2) {
-      _setProcessStatus(snaps.length === 0
-        ? 'Selection has no images — pick a folder of snaps or 2+ images.'
-        : 'Need at least 2 images to stitch.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    const percent = Math.max(100, Number(processSpeedEl?.value) || 100);
-    const holdMs = (100 / percent) * 1000;
-    const resKey = _processOpts.res;
-    const bitsPerSec = PROCESS_BITRATES[resKey]?.[_processOpts.quality]
-      ?? PROCESS_BITRATES.source.std;
-
-    // Make sure the ffmpeg probe has completed before we decide which
-    // path to use. The module-load probe is async and could race a
-    // very fast PROCESS click. Re-fetch synchronously if null/false so
-    // we don't accidentally fall through to MediaRecorder (which would
-    // produce a .webm output since Chromium typically lacks an MP4
-    // muxer in MediaRecorder).
-    let ffmpegIpcError = null;
-    if (!_ffmpegInfo?.available) {
-      try { _ffmpegInfo = await window.dash?.ffmpegInfo?.() || _ffmpegInfo; }
-      catch (err) { ffmpegIpcError = err?.message || String(err); }
-    }
-    console.log('[process] ffmpeg info:', _ffmpegInfo, 'format:', _processOpts.format, 'ipcErr:', ffmpegIpcError);
-    // If ffmpeg isn't usable, surface WHY in the status bar so the user
-    // can see what's going wrong without opening DevTools. Then continue
-    // (we still try MediaRecorder as a last resort — but the user now
-    // knows the file will be webm).
-    if (!_ffmpegInfo?.available) {
-      const why = ffmpegIpcError
-        ? `IPC error: ${ffmpegIpcError}`
-        : (!_ffmpegInfo ? 'ffmpegInfo() returned null'
-          : `path=${_ffmpegInfo.path || '(none)'} available=${_ffmpegInfo.available}`);
-      _setProcessStatus(`FFmpeg unavailable (${why}) — falling back to MediaRecorder (WebM only)`, true);
-    }
-
-    // Fast path: bundled ffmpeg. NVENC when present, libx264/x265
-    // otherwise — both run as fast as the encoder can chew through
-    // the frames (not real-time), so this is the path we want by
-    // default. MediaRecorder fallback only runs if ffmpeg failed to
-    // load (older builds, missing binary, etc).
-    if (_ffmpegInfo?.available) {
-      const outH = resKey === 'source' ? 0 : Number(resKey) || 0;
-      const useGpu = !!_ffmpegInfo.hasNvenc;
-      const encLabel = useGpu
-        ? (_processOpts.format === 'mp4' ? 'GPU · h264_nvenc' : 'GPU · libvpx-vp9 (no GPU VP9)')
-        : 'CPU · libx264';
-      _setProcessStatus(`Encoding ${snaps.length} snaps · ${encLabel}…`);
-      const t0 = performance.now();
-      const unsub = window.dash?.onProcessSnapsProgress?.((d) => {
-        _setProcessStatus(`Encoding ${d.frame}/${d.total || snaps.length} · ${d.encoder || encLabel}`);
-      });
-      const result = await window.dash?.processSnapsFfmpeg?.({
-        paths: snaps.map((e) => e.path),
-        format: _processOpts.format === 'webm' ? 'webm' : (_processOpts.format === 'mkv' ? 'mkv' : 'mp4'),
-        outH,
-        bitsPerSec,
-        holdMs,
-        useGpu,
-        codec: 'h264',
-        // Optional color/blur/denoise pass shared with the EDIT panel.
-        // _procFilterState is hung on window by the editor block so
-        // we don't have to thread it through every helper here.
-        filters: window._procFilterState || undefined,
-      });
-      try { unsub?.(); } catch {}
-      const dt = ((performance.now() - t0) / 1000).toFixed(1);
-      if (result?.ok) {
-        _setProcessStatus(`Saved ${result.name} (${(result.size/1024/1024).toFixed(1)} MB) · ${result.encoder || encLabel} · ${dt}s`);
-        _visualizerSubdir = 'recordings';
-        refreshVisualizer();
-      } else {
-        _setProcessStatus('ffmpeg failed: ' + (result?.error || 'unknown') + ' — falling back to MediaRecorder', true);
-        // fall through to legacy path below
-      }
-      if (result?.ok) { processGoBtn.disabled = false; return; }
-    }
-
-    // Legacy fallback: canvas + MediaRecorder (real-time, CPU).
-    _setProcessStatus(`Decoding ${snaps.length} snaps…`);
-    const images = [];
-    for (let i = 0; i < snaps.length; i++) {
-      const img = await _decodeImage(snaps[i]);
-      if (img) images.push(img);
-      _setProcessStatus(`Decoding ${i+1}/${snaps.length}…`);
-    }
-    const first = images.find((im) => im.naturalWidth) || images[0];
-    if (!first?.naturalWidth) {
-      _setProcessStatus('No snaps could be decoded.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    let outH = first.naturalHeight;
-    if (resKey !== 'source') {
-      const targetH = Number(resKey);
-      if (targetH && targetH < outH) outH = targetH;
-    }
-    const outW = Math.max(2, Math.round(first.naturalWidth * (outH / first.naturalHeight)));
-    const canvas = document.createElement('canvas');
-    canvas.width  = outW;
-    canvas.height = outH;
-    const ctx = canvas.getContext('2d');
-
-    const picked = _pickProcessMime(_processOpts.format);
-    if (!picked) {
-      _setProcessStatus('No supported MediaRecorder codec.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    const stream = canvas.captureStream(30);
-    let recorder;
-    try {
-      recorder = new MediaRecorder(stream, { mimeType: picked.mime, videoBitsPerSecond: bitsPerSec });
-    } catch (err) {
-      _setProcessStatus('Recorder init failed: ' + err.message, true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    const chunks = [];
-    recorder.ondataavailable = (ev) => { if (ev.data?.size) chunks.push(ev.data); };
-    const stopped = new Promise((res) => { recorder.onstop = res; });
-    recorder.start(500);
-
-    const fellBackNote = picked.fellBack ? ' (MP4 unsupported · saved as WebM)' : '';
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, outW, outH);
-      if (img?.naturalWidth) {
-        const ratio = Math.min(outW / img.naturalWidth, outH / img.naturalHeight);
-        const w = img.naturalWidth * ratio;
-        const h = img.naturalHeight * ratio;
-        ctx.drawImage(img, (outW - w) / 2, (outH - h) / 2, w, h);
-      }
-      _setProcessStatus(`Encoding ${i+1}/${images.length} · ${percent}%${fellBackNote}`);
-      await new Promise((res) => setTimeout(res, holdMs));
-    }
-    // Hold the final frame for a beat so MediaRecorder picks up the
-    // last drawn frame before stop.
-    await new Promise((res) => setTimeout(res, 300));
-    recorder.stop();
-    await stopped;
-    const blob = new Blob(chunks, { type: picked.mime });
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    _setProcessStatus('Saving…');
-    const result = await window.dash?.processSnapsSave?.(bytes, picked.ext);
-    if (result?.ok) {
-      _setProcessStatus(`Saved ${result.name} (${(result.size/1024/1024).toFixed(1)} MB)${fellBackNote}`);
-      // Pop the user into recordings/ so the new file is visible.
-      _visualizerSubdir = 'recordings';
-      refreshVisualizer();
-    } else {
-      _setProcessStatus('Save failed: ' + (result?.error || 'unknown'), true);
-    }
-    processGoBtn.disabled = false;
-  }
-  processGoBtn?.addEventListener('click', () => {
-    _processSnapsRun().catch((err) => {
-      console.warn('[process] failed', err);
-      _setProcessStatus('Failed: ' + err.message, true);
-      processGoBtn.disabled = false;
-    });
-    playSfx?.('confirm');
-  });
-
-  // ── Recording quality profiles ───────────────────────────────────
-  // Profile shape: { key, label, resolution: 'source'|number, bitsPerSec }
-  // Resolution is the target *height* in pixels — 'source' keeps the
-  // native size and skips the canvas downscale step entirely.
-  const REC_PROFILES = {
-    lite:  { key: 'lite',  label: 'LITE',  resolution: 720,      bitsPerSec:  1_500_000, fps: 30, hint: '720p · 1.5 Mbps · 30 fps' },
-    med:   { key: 'med',   label: 'MED',   resolution: 'source', bitsPerSec:  5_000_000, fps: 30, hint: 'Source · 5 Mbps · 30 fps' },
-    large: { key: 'large', label: 'LARGE', resolution: 'source', bitsPerSec: 12_000_000, fps: 60, hint: 'Source · 12 Mbps · 60 fps' },
-    max:   { key: 'max',   label: 'MAX',   resolution: 'source', bitsPerSec: 40_000_000, fps: 60, hint: 'Source · 40 Mbps · 60 fps' },
-  };
-  let _recProfile = { ...REC_PROFILES.med };
-  const qualityBtn        = document.getElementById('visualizer-quality-btn');
-  const qualityPickerEl   = document.getElementById('visualizer-quality-picker');
-  const qualityListEl     = document.getElementById('visualizer-quality-list');
-  const qualityCloseBtn   = document.getElementById('visualizer-quality-close');
-  const qualityResSel     = document.getElementById('visualizer-quality-res');
-  const qualityBitrateEl  = document.getElementById('visualizer-quality-bitrate');
-  const qualityBitrateVal = document.getElementById('visualizer-quality-bitrate-val');
-  const qualityFpsSel     = document.getElementById('visualizer-quality-fps');
-  const qualityApplyBtn   = document.getElementById('visualizer-quality-apply');
-  function _formatProfileButton() {
-    if (!qualityBtn) return;
-    const k = _recProfile.key || 'custom';
-    qualityBtn.textContent = `Q:${k.toUpperCase()}`;
-    qualityBtn.title = `Recording quality — ${_recProfile.hint || `${_recProfile.resolution} · ${(_recProfile.bitsPerSec/1_000_000).toFixed(1)} Mbps`}`;
-  }
-  function _paintQualityList() {
-    if (!qualityListEl) return;
-    for (const row of qualityListEl.querySelectorAll('.visualizer-quality-row')) {
-      row.classList.toggle('is-active', row.dataset.profile === _recProfile.key);
-    }
-  }
-  function _applyProfile(key) {
-    const p = REC_PROFILES[key];
-    if (!p) return;
-    _recProfile = { ...p };
-    _formatProfileButton();
-    _paintQualityList();
-    try { window.dash?.setConfig?.({ recQuality: { key, resolution: p.resolution, bitsPerSec: p.bitsPerSec, fps: p.fps } }); } catch {}
-  }
-  function _applyCustom() {
-    const res = qualityResSel?.value || 'source';
-    const kbps = Number(qualityBitrateEl?.value) || 5000;
-    const fps  = Math.max(15, Math.min(240, Number(qualityFpsSel?.value) || 30));
-    const resolution = res === 'source' ? 'source' : Number(res);
-    const bitsPerSec = Math.max(500_000, Math.min(50_000_000, kbps * 1000));
-    _recProfile = {
-      key: 'custom',
-      label: 'CUSTOM',
-      resolution,
-      bitsPerSec,
-      fps,
-      hint: `${res === 'source' ? 'Source' : res + 'p'} · ${(bitsPerSec/1_000_000).toFixed(1)} Mbps · ${fps} fps`,
-    };
-    _formatProfileButton();
-    _paintQualityList();
-    try { window.dash?.setConfig?.({ recQuality: { key: 'custom', resolution, bitsPerSec, fps } }); } catch {}
-  }
-  qualityBtn?.addEventListener('click', () => {
-    if (!qualityPickerEl) return;
-    if (qualityPickerEl.hidden) {
-      // Hide the source picker if it happens to be open so they don't stack.
-      sourcePickerEl && (sourcePickerEl.hidden = true);
-      sourceBtn?.classList.remove('is-active');
-      qualityPickerEl.hidden = false;
-      qualityBtn.classList.add('is-active');
-      _paintQualityList();
-    } else {
-      qualityPickerEl.hidden = true;
-      qualityBtn.classList.remove('is-active');
-    }
-    playSfx?.('click');
-  });
-  qualityCloseBtn?.addEventListener('click', () => {
-    qualityPickerEl.hidden = true;
-    qualityBtn?.classList.remove('is-active');
-    playSfx?.('click');
-  });
-  qualityListEl?.addEventListener('click', (e) => {
-    const row = e.target.closest('.visualizer-quality-row');
-    if (!row) return;
-    _applyProfile(row.dataset.profile);
-    playSfx?.('confirm');
-  });
-  qualityBitrateEl?.addEventListener('input', () => {
-    if (qualityBitrateVal) qualityBitrateVal.textContent = `${(Number(qualityBitrateEl.value)/1000).toFixed(1)} Mbps`;
-  });
-  qualityApplyBtn?.addEventListener('click', () => {
-    _applyCustom();
-    playSfx?.('confirm');
-  });
-  // Restore previous selection on load.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    const saved = cfg.recQuality;
-    if (saved?.key && REC_PROFILES[saved.key]) {
-      _applyProfile(saved.key);
-    } else if (saved?.key === 'custom' && typeof saved.bitsPerSec === 'number') {
-      const fps = Number(saved.fps) || 30;
-      _recProfile = {
-        key: 'custom', label: 'CUSTOM',
-        resolution: saved.resolution || 'source',
-        bitsPerSec: saved.bitsPerSec,
-        fps,
-        hint: `${saved.resolution === 'source' ? 'Source' : saved.resolution + 'p'} · ${(saved.bitsPerSec/1_000_000).toFixed(1)} Mbps · ${fps} fps`,
-      };
-      if (qualityResSel) qualityResSel.value = String(saved.resolution || 'source');
-      if (qualityBitrateEl) qualityBitrateEl.value = String(Math.round(saved.bitsPerSec / 1000));
-      if (qualityBitrateVal) qualityBitrateVal.textContent = `${(saved.bitsPerSec/1_000_000).toFixed(1)} Mbps`;
-      if (qualityFpsSel) qualityFpsSel.value = String(fps);
-      _formatProfileButton();
-      _paintQualityList();
-    } else {
-      _formatProfileButton();
-      _paintQualityList();
-    }
-  })();
-
-  // ── Free-capture crop region ─────────────────────────────────────
-  // Draggable + resizable rectangle inside the player wrap; when
-  // active, _buildRecorderStream below crops the recording to its
-  // bounds. Rect is stored in 0..1 fractions of the wrap so it stays
-  // valid across resize, and persisted under config.cropRect.
-  const cropBtn      = document.getElementById('visualizer-crop-btn');
-  const cropOverlay  = document.getElementById('visualizer-crop');
-  const cropRectEl   = document.getElementById('visualizer-crop-rect');
-  let _cropActive = false;
-  let _cropRect = { x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
-  const MIN_CROP_FRAC = 0.05;
-  function _paintCropRect() {
-    if (!cropRectEl) return;
-    cropRectEl.style.left   = `${_cropRect.x * 100}%`;
-    cropRectEl.style.top    = `${_cropRect.y * 100}%`;
-    cropRectEl.style.width  = `${_cropRect.w * 100}%`;
-    cropRectEl.style.height = `${_cropRect.h * 100}%`;
-  }
-  function _clampCropRect(r) {
-    let { x, y, w, h } = r;
-    w = Math.max(MIN_CROP_FRAC, Math.min(1, w));
-    h = Math.max(MIN_CROP_FRAC, Math.min(1, h));
-    x = Math.max(0, Math.min(1 - w, x));
-    y = Math.max(0, Math.min(1 - h, y));
-    return { x, y, w, h };
-  }
-  function _persistCropRect() {
-    try { window.dash?.setConfig?.({ cropRect: { ..._cropRect } }); } catch {}
-  }
-  cropRectEl?.addEventListener('mousedown', (ev) => {
-    if (ev.button !== 0) return;
-    ev.preventDefault();
-    const handle = ev.target?.dataset?.handle || 'move';
-    const wrapRect = visualizerWrapEl.getBoundingClientRect();
-    if (!wrapRect.width || !wrapRect.height) return;
-    const startX = ev.clientX;
-    const startY = ev.clientY;
-    const start = { ..._cropRect };
-    cropRectEl.classList.add('is-dragging');
-    function onMove(e) {
-      const dx = (e.clientX - startX) / wrapRect.width;
-      const dy = (e.clientY - startY) / wrapRect.height;
-      let { x, y, w, h } = start;
-      if (handle === 'move') { x += dx; y += dy; }
-      else {
-        if (handle.includes('w')) { x += dx; w -= dx; }
-        if (handle.includes('e')) {           w += dx; }
-        if (handle.includes('n')) { y += dy; h -= dy; }
-        if (handle.includes('s')) {           h += dy; }
-      }
-      _cropRect = _clampCropRect({ x, y, w, h });
-      _paintCropRect();
-      // If FIT-crop is active, the wrap's aspect tracks the crop's
-      // pixel aspect — keep them in sync as the rect resizes so the
-      // preview canvas reshapes live with the drag.
-      if (_cropFitActive) _refreshWrapShape();
-    }
-    function onUp() {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      cropRectEl.classList.remove('is-dragging');
-      _persistCropRect();
-    }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  });
-  cropBtn?.addEventListener('click', () => {
-    _cropActive = !_cropActive;
-    cropBtn.classList.toggle('is-active', _cropActive);
-    cropBtn.textContent = _cropActive ? 'CROP ●' : 'CROP';
-    if (_cropActive) _paintCropRect();
-    _refreshCropFitView();
-    playSfx?.(_cropActive ? 'confirm' : 'click');
-  });
-
-  // ── FIT: when CROP is on, show the cropped region filling the wrap
-  // (a live canvas preview of just sx,sy,sw,sh of the video element).
-  // Wrap aspect also reshapes to the crop region's pixel aspect so
-  // the cropped fill fills with no letterboxing.
-  const fitBtn = document.getElementById('visualizer-fit-btn');
-  const cropPreviewEl = document.getElementById('visualizer-crop-preview');
-  let _cropPreviewRaf = 0;
-  function _startCropPreviewLoop() {
-    if (_cropPreviewRaf || !cropPreviewEl) return;
-    const ctx = cropPreviewEl.getContext('2d');
-    cropPreviewEl.hidden = false;
-    const tick = () => {
-      if (!_cropFitActive || !_cropActive) {
-        cropPreviewEl.hidden = true;
-        _cropPreviewRaf = 0;
-        return;
-      }
-      const vw = visualizerVideoEl?.videoWidth || _lastSourceW;
-      const vh = visualizerVideoEl?.videoHeight || _lastSourceH;
-      if (vw && vh && visualizerVideoEl?.readyState >= 2) {
-        const sx = Math.max(0, _cropRect.x * vw);
-        const sy = Math.max(0, _cropRect.y * vh);
-        const sw = Math.max(1, _cropRect.w * vw);
-        const sh = Math.max(1, _cropRect.h * vh);
-        // Match canvas resolution to the wrap's CSS box at device pixels
-        // so the preview stays sharp on hidpi displays without ballooning
-        // CPU on plain 1× monitors.
-        const rect = visualizerWrapEl.getBoundingClientRect();
-        const dpr = Math.min(2, window.devicePixelRatio || 1);
-        const cw = Math.max(2, Math.round(rect.width  * dpr));
-        const ch = Math.max(2, Math.round(rect.height * dpr));
-        if (cropPreviewEl.width  !== cw) cropPreviewEl.width  = cw;
-        if (cropPreviewEl.height !== ch) cropPreviewEl.height = ch;
-        try { ctx.drawImage(visualizerVideoEl, sx, sy, sw, sh, 0, 0, cw, ch); } catch {}
-      }
-      _cropPreviewRaf = requestAnimationFrame(tick);
-    };
-    _cropPreviewRaf = requestAnimationFrame(tick);
-  }
-  function _stopCropPreviewLoop() {
-    if (_cropPreviewRaf) {
-      cancelAnimationFrame(_cropPreviewRaf);
-      _cropPreviewRaf = 0;
-    }
-    if (cropPreviewEl) cropPreviewEl.hidden = true;
-  }
-  function _refreshCropFitView() {
-    const fitOn = _cropFitActive && _cropActive;
-    // Hide the rect editor overlay while in fit mode — the wrap IS the
-    // crop now, so the rect overlay is redundant. To re-edit the rect
-    // the user clicks FIT again (toggles fit off) which restores the
-    // overlay + full-source view.
-    if (cropOverlay) cropOverlay.hidden = !_cropActive || fitOn;
-    if (visualizerWrapEl) visualizerWrapEl.classList.toggle('is-crop-fit', fitOn);
-    if (fitOn) _startCropPreviewLoop();
-    else _stopCropPreviewLoop();
-    _refreshWrapShape();
-  }
-  fitBtn?.addEventListener('click', async () => {
-    _cropFitActive = !_cropFitActive;
-    fitBtn.classList.toggle('is-active', _cropFitActive);
-    fitBtn.textContent = _cropFitActive ? 'FIT ●' : 'FIT';
-    _refreshCropFitView();
-    try { await window.dash?.setConfig?.({ recRoomCropFit: _cropFitActive }); } catch {}
-    playSfx?.(_cropFitActive ? 'confirm' : 'click');
-  });
-  // Restore preference on load.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    _cropFitActive = !!cfg.recRoomCropFit;
-    fitBtn?.classList.toggle('is-active', _cropFitActive);
-    if (fitBtn) fitBtn.textContent = _cropFitActive ? 'FIT ●' : 'FIT';
-    _refreshCropFitView();
-  })();
-  // Restore crop rect on load. The overlay stays hidden until CROP is
-  // toggled — we just preload the rect so the previous shape returns.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    if (cfg.cropRect && typeof cfg.cropRect.w === 'number' && typeof cfg.cropRect.h === 'number') {
-      _cropRect = _clampCropRect(cfg.cropRect);
-    }
-    _paintCropRect();
-  })();
-
-  // ── Auto key capture: render pressed keys onto the recording canvas
-  // (recording-only; never drawn on this screen). Main spawns a global
-  // GetAsyncKeyState poller in PowerShell and pushes each fresh key-
-  // down edge. We keep a rolling FIFO of the last ~12 events with 3-
-  // second fade — the overlay drawer below reads from this and paints
-  // each frame inside _buildRecorderStream's canvas loop.
-  const keysBtn = document.getElementById('visualizer-keys-btn');
-  let _keysOverlayOn = false;
-  let _keyEvents = []; // { key, ts (perf.now ms) }
-  let _keyUnsub = null;
-  const KEY_OVERLAY_FADE_MS = 3000;
-  const KEY_OVERLAY_MAX = 12;
-  function _onKeyEvent(ev) {
-    if (!ev || !ev.name) return;
-    _keyEvents.push({ key: ev.name, ts: performance.now() });
-    if (_keyEvents.length > KEY_OVERLAY_MAX * 2) {
-      _keyEvents = _keyEvents.slice(-KEY_OVERLAY_MAX * 2);
-    }
-  }
-  // Cached parsed accent color, refreshed on theme changes. Reading
-  // getComputedStyle every frame works but is wasteful — cache and let
-  // the theme observer invalidate.
-  let _accentRGB = null;
-  function _readAccentRGB() {
-    try {
-      const raw = getComputedStyle(document.body).getPropertyValue('--accent').trim();
-      let r = 92, g = 207, b = 255; // sensible fallback
-      if (raw.startsWith('#')) {
-        const hex = raw.length === 4
-          ? raw.slice(1).split('').map(c => c + c).join('')
-          : raw.slice(1);
-        r = parseInt(hex.slice(0, 2), 16);
-        g = parseInt(hex.slice(2, 4), 16);
-        b = parseInt(hex.slice(4, 6), 16);
-      } else {
-        const m = raw.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-        if (m) { r = +m[1]; g = +m[2]; b = +m[3]; }
-      }
-      _accentRGB = `${r}, ${g}, ${b}`;
-    } catch {
-      _accentRGB = '92, 207, 255';
-    }
-    return _accentRGB;
-  }
-  function _accentRgbCached() { return _accentRGB || _readAccentRGB(); }
-  // Cheap theme change invalidator — listen to the broad attribute
-  // changes on <html> (theme is usually toggled there). If theme isn't
-  // on <html> the cache just stays valid — fallback colour still works.
-  new MutationObserver(() => { _accentRGB = null; }).observe(document.documentElement, { attributes: true });
-
-  // Paint the keys overlay onto the recording canvas. Right-aligned
-  // column near the bottom-right, newest on top, fading by age.
-  function _drawKeysOverlay(ctx, w, h) {
-    const now = performance.now();
-    const cutoff = now - KEY_OVERLAY_FADE_MS;
-    while (_keyEvents.length && _keyEvents[0].ts < cutoff) _keyEvents.shift();
-    const recent = _keyEvents.slice(-KEY_OVERLAY_MAX);
-    if (!recent.length) return;
-    const fontSize = Math.max(16, Math.round(h * 0.032));
-    const padX = Math.round(w * 0.018);
-    const padY = Math.round(h * 0.018);
-    const cellPadX = Math.round(fontSize * 0.6);
-    const cellPadY = Math.round(fontSize * 0.35);
-    const gap = Math.round(fontSize * 0.35);
-    const accent = _accentRgbCached();
-    ctx.save();
-    ctx.font = `bold ${fontSize}px 'JetBrains Mono', 'Consolas', monospace`;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    let y = h - padY - fontSize / 2 - cellPadY;
-    for (let i = recent.length - 1; i >= 0; i--) {
-      const ev = recent[i];
-      const age = (now - ev.ts) / KEY_OVERLAY_FADE_MS;
-      const alpha = Math.max(0, Math.min(1, 1 - age));
-      if (alpha <= 0) continue;
-      const text = ev.key;
-      const tw = ctx.measureText(text).width;
-      const cellW = tw + cellPadX * 2;
-      const cellH = fontSize + cellPadY * 2;
-      const x = w - padX - cellW;
-      ctx.fillStyle = `rgba(0, 0, 0, ${0.6 * alpha})`;
-      ctx.fillRect(x, y - cellH / 2, cellW, cellH);
-      ctx.lineWidth = Math.max(1, fontSize * 0.08);
-      ctx.strokeStyle = `rgba(${accent}, ${alpha})`;
-      ctx.strokeRect(x + 0.5, y - cellH / 2 + 0.5, cellW - 1, cellH - 1);
-      ctx.shadowColor = `rgba(${accent}, ${alpha * 0.9})`;
-      ctx.shadowBlur = fontSize * 0.45;
-      ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
-      ctx.fillText(text, w - padX - cellPadX, y);
-      ctx.shadowBlur = 0;
-      y -= cellH + gap;
-      if (y - cellH / 2 < padY) break;
-    }
-    ctx.restore();
-  }
-
-  // ── On-screen display overlays (TIME / DATE / FPS) ───────────────
-  // Recording-only, drawn on the recording canvas — same approach as
-  // the keys overlay. Each toggle persists in config.osd.
-  const osdBtn         = document.getElementById('visualizer-osd-btn');
-  const osdPickerEl    = document.getElementById('visualizer-osd-picker');
-  const osdCloseBtn    = document.getElementById('visualizer-osd-close');
-  let _osdState = { time: false, date: false, fps: false };
-  function _osdAnyOn() { return _osdState.time || _osdState.date || _osdState.fps; }
-  function _paintOsdRows() {
-    osdPickerEl?.querySelectorAll('.visualizer-osd-row').forEach((row) => {
-      row.classList.toggle('is-active', !!_osdState[row.dataset.osd]);
-    });
-  }
-  function _updateOsdBtn() {
-    const on = _osdAnyOn();
-    osdBtn?.classList.toggle('is-active', on);
-    if (osdBtn) osdBtn.textContent = on ? 'OSD ●' : 'OSD';
-  }
-  // Rolling FPS tracker — pushes a perf.now() on each canvas draw and
-  // computes frames-per-second over the most recent ~1 s window. Reset
-  // when overlay is hidden so stale numbers don't linger.
-  const _fpsTimes = [];
-  let _fpsValue = 0;
-  function _trackFps() {
-    const now = performance.now();
-    _fpsTimes.push(now);
-    while (_fpsTimes.length && now - _fpsTimes[0] > 1000) _fpsTimes.shift();
-    _fpsValue = _fpsTimes.length;
-  }
-  // Paint TIME/DATE/FPS chips at top-left of the recording canvas.
-  function _drawOsdOverlay(ctx, w, h) {
-    if (!_osdAnyOn()) return;
-    const fontSize = Math.max(14, Math.round(h * 0.024));
-    const lineH = Math.round(fontSize * 1.35);
-    const padX = Math.round(w * 0.018);
-    const padY = Math.round(h * 0.018);
-    const cellPadX = Math.round(fontSize * 0.55);
-    const cellPadY = Math.round(fontSize * 0.3);
-    const accent = _accentRgbCached();
-    const lines = [];
-    const now = new Date();
-    if (_osdState.date) lines.push(`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`);
-    if (_osdState.time) lines.push(`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`);
-    if (_osdState.fps)  lines.push(`${_fpsValue} FPS`);
-    if (!lines.length) return;
-    ctx.save();
-    ctx.font = `bold ${fontSize}px 'JetBrains Mono', 'Consolas', monospace`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    let maxW = 0;
-    for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
-    const cellW = maxW + cellPadX * 2;
-    const cellH = lineH + cellPadY * 0.5;
-    let y = padY;
-    for (const line of lines) {
-      ctx.fillStyle = `rgba(0, 0, 0, 0.6)`;
-      ctx.fillRect(padX, y, cellW, cellH);
-      ctx.lineWidth = Math.max(1, fontSize * 0.08);
-      ctx.strokeStyle = `rgba(${accent}, 0.85)`;
-      ctx.strokeRect(padX + 0.5, y + 0.5, cellW - 1, cellH - 1);
-      ctx.shadowColor = `rgba(${accent}, 0.85)`;
-      ctx.shadowBlur = fontSize * 0.4;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
-      ctx.fillText(line, padX + cellPadX, y + cellH / 2);
-      ctx.shadowBlur = 0;
-      y += cellH + 3;
-    }
-    ctx.restore();
-  }
-  osdBtn?.addEventListener('click', () => {
-    if (!osdPickerEl) return;
-    if (osdPickerEl.hidden) {
-      // Close any other picker so they don't stack.
-      sourcePickerEl && (sourcePickerEl.hidden = true);
-      sourceBtn?.classList.remove('is-active');
-      qualityPickerEl && (qualityPickerEl.hidden = true);
-      qualityBtn?.classList.remove('is-active');
-      osdPickerEl.hidden = false;
-      _paintOsdRows();
-    } else {
-      osdPickerEl.hidden = true;
-    }
-    playSfx?.('click');
-  });
-  osdCloseBtn?.addEventListener('click', () => {
-    osdPickerEl.hidden = true;
-    playSfx?.('click');
-  });
-  osdPickerEl?.addEventListener('click', (ev) => {
-    const row = ev.target.closest('.visualizer-osd-row');
-    if (!row) return;
-    const k = row.dataset.osd;
-    _osdState[k] = !_osdState[k];
-    _paintOsdRows();
-    _updateOsdBtn();
-    try { window.dash?.setConfig?.({ osd: { ..._osdState } }); } catch {}
-    playSfx?.(_osdState[k] ? 'confirm' : 'click');
-  });
-  // Restore from config.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    const saved = cfg.osd;
-    if (saved && typeof saved === 'object') {
-      _osdState.time = !!saved.time;
-      _osdState.date = !!saved.date;
-      _osdState.fps  = !!saved.fps;
-      _paintOsdRows();
-      _updateOsdBtn();
-    }
-  })();
-
-  keysBtn?.addEventListener('click', async () => {
-    _keysOverlayOn = !_keysOverlayOn;
-    keysBtn.classList.toggle('is-active', _keysOverlayOn);
-    keysBtn.textContent = _keysOverlayOn ? 'KEYS ●' : 'KEYS';
-    if (_keysOverlayOn) {
-      _keyUnsub = window.dash?.onKeycapture?.(_onKeyEvent) || null;
-      try { await window.dash?.keycaptureStart?.(); } catch {}
-    } else {
-      try { await window.dash?.keycaptureStop?.(); } catch {}
-      if (_keyUnsub) { try { _keyUnsub(); } catch {} _keyUnsub = null; }
-      _keyEvents = [];
-    }
-    playSfx?.(_keysOverlayOn ? 'confirm' : 'click');
-  });
-
-  // ── Screen record: continuous video capture to gallery/recordings/ ─
-  // Uses MediaRecorder on the active mirror stream. Each 1-second
-  // chunk is streamed straight to main and appended to the .mkv file
-  // so we don't hold the whole recording in renderer memory. Stops
-  // automatically if the mirror is torn down.
-  const screenrecBtn = document.getElementById('visualizer-screenrec-btn');
-  let _screenrecState = null; // { id, recorder, pending: Promise[], cleanup }
-  // Build a recording-target MediaStream from the live mirror, applying
-  // (a) the free-capture crop region if active and (b) the active
-  // quality profile's resolution. With no crop and no downscale we
-  // hand back the mirror stream as-is. Otherwise we drawImage(source
-  // region → output canvas) every frame and captureStream() the canvas;
-  // audio tracks from the mirror are mixed in so recordings keep sound.
-  function _buildRecorderStream() {
-    if (!_mirrorStream) return null;
-    const vTrack = _mirrorStream.getVideoTracks()[0];
-    const settings = vTrack?.getSettings?.() || {};
-    const srcW = settings.width  || visualizerVideoEl?.videoWidth  || 1920;
-    const srcH = settings.height || visualizerVideoEl?.videoHeight || 1080;
-    const cropOn = _cropActive && _cropRect.w > 0 && _cropRect.h > 0;
-    const sx = cropOn ? Math.round(_cropRect.x * srcW) : 0;
-    const sy = cropOn ? Math.round(_cropRect.y * srcH) : 0;
-    const sw = cropOn ? Math.round(_cropRect.w * srcW) : srcW;
-    const sh = cropOn ? Math.round(_cropRect.h * srcH) : srcH;
-    const target = _recProfile.resolution;
-    let outH = sh;
-    if (target !== 'source' && typeof target === 'number' && target < sh) outH = target;
-    const outW = Math.max(2, Math.round(sw * (outH / sh)));
-    // Fast path: no crop, no downscale, no overlays → hand original
-    // through. Any overlay (keys / OSD) needs the canvas so the overlay
-    // is drawn into the recording without appearing in the preview.
-    const osdOn = _osdAnyOn();
-    if (!cropOn && outH === srcH && !_keysOverlayOn && !osdOn) {
-      return { stream: _mirrorStream, cleanup: () => {} };
-    }
-    const canvas = document.createElement('canvas');
-    canvas.width = outW; canvas.height = outH;
-    const ctx = canvas.getContext('2d');
-    let canceled = false;
-    let rafId = 0;
-    // Throttle the draw to the profile's fps. rAF runs at the display
-    // refresh (60/144/240 Hz), so without throttling the OSD counts
-    // monitor refresh — not what's being encoded. We sample one frame
-    // per `frameInterval` ms; the 0.5 ms fudge keeps frame intervals
-    // from drifting to the next rAF tick. Caps at display refresh: if
-    // you pick 120 fps on a 60 Hz monitor, the actual rate is 60.
-    const recFps = Math.max(1, Number(_recProfile.fps) || 30);
-    const frameInterval = 1000 / recFps;
-    let lastFrameTime = -Infinity;
-    const draw = (timestamp) => {
-      if (canceled) return;
-      const t = (typeof timestamp === 'number') ? timestamp : performance.now();
-      if (t - lastFrameTime >= frameInterval - 0.5) {
-        if (visualizerVideoEl && visualizerVideoEl.readyState >= 2) {
-          try { ctx.drawImage(visualizerVideoEl, sx, sy, sw, sh, 0, 0, outW, outH); } catch {}
-        }
-        if (_keysOverlayOn) _drawKeysOverlay(ctx, outW, outH);
-        if (_osdAnyOn()) _drawOsdOverlay(ctx, outW, outH);
-        _trackFps();
-        lastFrameTime = t;
-      }
-      rafId = requestAnimationFrame(draw);
-    };
-    draw();
-    const out = canvas.captureStream(recFps);
-    for (const t of _mirrorStream.getAudioTracks()) {
-      try { out.addTrack(t); } catch {}
-    }
-    return {
-      stream: out,
-      cleanup: () => {
-        canceled = true;
-        if (rafId) cancelAnimationFrame(rafId);
-      },
-    };
-  }
-  function _pickRecorderMime() {
-    // Prefer H.264 in MP4 — Chromium hardware-encodes that path on
-    // most systems (NVENC / QuickSync / AMF), which cuts the
-    // recording CPU cost roughly in half compared to VP9 software
-    // encode. Fall back to VP8 (cheaper than VP9) before VP9 since
-    // VP9 software encode is the heaviest combo on the renderer.
-    const candidates = [
-      'video/mp4;codecs=avc1.42E01F,mp4a.40.2', // H.264 Baseline + AAC
-      'video/mp4;codecs=avc1.4D401F,mp4a.40.2', // H.264 Main + AAC
-      'video/mp4;codecs=avc1.64001F,mp4a.40.2', // H.264 High + AAC
-      'video/mp4;codecs=avc1',
-      'video/mp4',
-      'video/webm;codecs=vp8,opus',  // VP8 next — lighter than VP9
-      'video/webm;codecs=vp8',
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp9',
-      'video/webm',
-    ];
-    for (const m of candidates) {
-      if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
-    }
-    return '';
-  }
-  // Reports whether the picked MediaRecorder mime is hardware-friendly
-  // (H.264 family). Used to skip the screenrec-stop transcode when the
-  // recorder already emits MP4 directly.
-  function _mimeIsMp4(mime) { return /^video\/mp4/.test(String(mime || '')); }
-  // Build a MediaStream audio track from the WASAPI loopback worker.
-  // The audify worker (already running for the audio visualizer) is
-  // pushed into PCM-forwarding mode for the duration of recording; each
-  // batched chunk is wrapped in an AudioBuffer and scheduled into a
-  // MediaStreamDestination, whose track we hand back. The destination
-  // node is NOT connected to the speakers — the user hears the source
-  // app directly through the OS, this path only exists to feed the
-  // MediaRecorder. Returns { track, teardown } or null on failure.
-  async function _buildLoopbackAudioTrack() {
-    let ctx;
-    try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
-    catch (err) {
-      console.warn('[screenrec] AudioContext failed:', err?.message || err);
-      return null;
-    }
-    const dest = ctx.createMediaStreamDestination();
-    // Scheduling-ahead margin so the first few chunks don't underrun
-    // before the AudioContext clock catches up. 60 ms is plenty for the
-    // ~43 ms batched chunks the worker emits.
-    const SCHED_AHEAD = 0.06;
-    let nextStart = 0;
-    let chunkCount = 0;
-    const handler = (data) => {
-      if (!data?.pcm) return;
-      const samples = data.pcm;
-      const ch = Math.max(1, data.channels | 0 || 2);
-      const sr = data.sampleRate | 0 || ctx.sampleRate;
-      const frames = (samples.length / ch) | 0;
-      if (frames < 1) return;
-      let buf;
-      try { buf = ctx.createBuffer(ch, frames, sr); }
-      catch { return; }
-      for (let c = 0; c < ch; c++) {
-        const cd = buf.getChannelData(c);
-        for (let i = 0; i < frames; i++) cd[i] = samples[i * ch + c];
-      }
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(dest);
-      const now = ctx.currentTime;
-      if (nextStart < now + SCHED_AHEAD) nextStart = now + SCHED_AHEAD;
-      try { src.start(nextStart); } catch {}
-      nextStart += buf.duration;
-      chunkCount++;
-    };
-    const unsub = window.dash?.onLoopbackPcm?.(handler) || (() => {});
-    try { await window.dash?.setLoopbackPcm?.(true); }
-    catch (err) {
-      console.warn('[screenrec] setLoopbackPcm(true) failed:', err?.message || err);
-      try { unsub(); } catch {}
-      try { await ctx.close(); } catch {}
-      return null;
-    }
-    const track = dest.stream.getAudioTracks()[0];
-    if (!track) {
-      try { unsub(); } catch {}
-      try { await window.dash?.setLoopbackPcm?.(false); } catch {}
-      try { await ctx.close(); } catch {}
-      return null;
-    }
-    return {
-      track,
-      teardown: async () => {
-        try { unsub(); } catch {}
-        try { await window.dash?.setLoopbackPcm?.(false); } catch {}
-        try { dest.disconnect(); } catch {}
-        try { track.stop(); } catch {}
-        try { await ctx.close(); } catch {}
-        console.log('[screenrec] loopback teardown — chunks:', chunkCount);
-      },
-    };
-  }
-
-  async function _startScreenrec() {
-    if (_screenrecState) return;
-    if (!_mirrorStream) {
-      // Auto-start the mirror so REC works in one click. If that fails,
-      // bail.
-      await _startVisualizerMirror();
-      if (!_mirrorStream) { playSfx?.('error'); return; }
-    }
-    const built = _buildRecorderStream();
-    if (!built?.stream) { playSfx?.('error'); return; }
-    // Always pull audio from the WASAPI loopback worker — it captures
-    // whatever is currently going to the OS default render endpoint,
-    // which means the user hears the source through their speakers as
-    // usual and the recording gets a copy. We replace any mirror-derived
-    // audio (some screen sources hand us an audio track that's already
-    // a duplicate of the loopback, so dropping it avoids double audio).
-    const loopback = await _buildLoopbackAudioTrack();
-    let recStream = built.stream;
-    if (loopback?.track) {
-      recStream = new MediaStream([
-        ...built.stream.getVideoTracks(),
-        loopback.track,
-      ]);
-    }
-    const audioCount = recStream.getAudioTracks().length;
-    const videoCount = recStream.getVideoTracks().length;
-    const srcKind = _mirrorSourceOverride?.id?.startsWith?.('window:') ? 'window'
-                  : _mirrorSourceOverride?.id?.startsWith?.('screen:') ? 'screen'
-                  : 'unknown';
-    console.log('[screenrec] recorder stream:', { audio: audioCount, video: videoCount, kind: srcKind, loopback: !!loopback?.track });
-    // Pick the mime FIRST so we can tell main whether to expect MP4
-    // bytes (hardware-encoded H.264 — skip the post-stop transcode)
-    // or WebM (software VP8/VP9 — re-encode to .mp4 on stop).
-    const mime = _pickRecorderMime();
-    let started;
-    try { started = await window.dash?.screenrecStart?.({ mime }); } catch { started = null; }
-    if (!started?.ok || !started.id) {
-      built.cleanup?.();
-      try { await loopback?.teardown?.(); } catch {}
-      playSfx?.('error');
-      return;
-    }
-    const opts = { videoBitsPerSecond: _recProfile.bitsPerSec || 5_000_000 };
-    if (mime) opts.mimeType = mime;
-    let recorder;
-    try {
-      recorder = new MediaRecorder(recStream, opts);
-    } catch (err) {
-      console.warn('[screenrec] MediaRecorder failed:', err?.message || err);
-      built.cleanup?.();
-      try { await loopback?.teardown?.(); } catch {}
-      try { await window.dash?.screenrecStop?.(started.id); } catch {}
-      playSfx?.('error');
-      return;
-    }
-    console.log('[screenrec] recording started:', { mime: recorder.mimeType, bps: opts.videoBitsPerSecond });
-    // Surface the chosen encoder path in the toolbar tooltip so the
-    // user can see at a glance whether they got the GPU path
-    // (H.264/MP4) or the software fallback (VP8/VP9/WebM).
-    if (screenrecBtn) {
-      const isGpu = _mimeIsMp4(recorder.mimeType);
-      screenrecBtn.title = isGpu
-        ? `REC · hardware H.264 (low CPU) · ${(opts.videoBitsPerSecond/1_000_000).toFixed(1)} Mbps`
-        : `REC · software VP8/VP9 (CPU-bound) · ${(opts.videoBitsPerSecond/1_000_000).toFixed(1)} Mbps`;
-    }
-    const pending = [];
-    recorder.ondataavailable = async (ev) => {
-      if (!ev.data || !ev.data.size) return;
-      try {
-        const buf = new Uint8Array(await ev.data.arrayBuffer());
-        // Track in flight so stop() can await them and we don't lose
-        // the trailing chunk.
-        const p = window.dash?.screenrecChunk?.(started.id, buf);
-        pending.push(p);
-      } catch (err) {
-        console.warn('[screenrec] chunk send failed:', err?.message || err);
-      }
-    };
-    recorder.onerror = (e) => console.warn('[screenrec] recorder error', e?.error || e);
-    recorder.start(1000); // 1-second chunks
-    _screenrecState = {
-      id: started.id,
-      recorder,
-      pending,
-      cleanup: async () => {
-        try { built.cleanup?.(); } catch {}
-        try { await loopback?.teardown?.(); } catch {}
-      },
-    };
-    screenrecBtn?.classList.add('is-active');
-    if (screenrecBtn) {
-      screenrecBtn.textContent = 'REC ●';
-      screenrecBtn.title = audioCount > 0
-        ? 'Recording with loopback audio (system audio)'
-        : 'Recording WITHOUT audio (loopback unavailable)';
-    }
-  }
-  async function _stopScreenrec() {
-    const st = _screenrecState;
-    if (!st) return;
-    _screenrecState = null;
-    screenrecBtn?.classList.remove('is-active');
-    if (screenrecBtn) screenrecBtn.textContent = 'REC';
-    try {
-      // Wait for the final ondataavailable to fire on stop, then for
-      // any in-flight chunks to land in main before closing the file.
-      await new Promise((resolve) => {
-        try { st.recorder.addEventListener('stop', () => resolve(), { once: true }); st.recorder.stop(); }
-        catch { resolve(); }
-      });
-      await Promise.allSettled(st.pending);
-      const res = await window.dash?.screenrecStop?.(st.id);
-      if (res?.ok && screenrecBtn) {
-        screenrecBtn.title = `Saved ${res.name} (${(res.size/1024/1024).toFixed(1)} MB) · click to record again`;
-      }
-      // Auto-navigate the gallery browser into recordings/ so the new
-      // file is immediately visible without the user having to dig.
-      try { _visualizerSubdir = 'recordings'; refreshVisualizer(); } catch {}
-    } catch (err) {
-      console.warn('[screenrec] stop failed:', err?.message || err);
-    } finally {
-      // cleanup is async (it awaits setLoopbackPcm(false) + ctx.close);
-      // fire-and-forget is fine — the audio worker only takes a few ms
-      // to flip flag, and we don't want to block the user from starting
-      // the next recording.
-      try { Promise.resolve(st.cleanup?.()).catch(() => {}); } catch {}
-    }
-  }
-  screenrecBtn?.addEventListener('click', () => {
-    if (_screenrecState) { _stopScreenrec(); playSfx?.('click'); }
-    else                 { _startScreenrec(); playSfx?.('confirm'); }
-  });
-  // Keep the play/pause icon in sync regardless of who initiated the
-  // state change (transport buttons, native video controls, ended-event
-  // auto-advance, etc.).
-  visualizerVideoEl?.addEventListener('play',     updatePlayPauseIcon);
-  visualizerVideoEl?.addEventListener('pause',    updatePlayPauseIcon);
-  visualizerVideoEl?.addEventListener('emptied',  updatePlayPauseIcon);
-  visualizerVideoEl?.addEventListener('loadeddata', updatePlayPauseIcon);
-  // Drive the wrap's aspect ratio off the actual video's intrinsic
-  // dimensions as soon as they're known. Covers both file playback
-  // (src URL) and the mirror case where getSettings() may not have
-  // returned dims yet at start time.
-  visualizerVideoEl?.addEventListener('loadedmetadata', () => {
-    if (visualizerVideoEl.videoWidth && visualizerVideoEl.videoHeight) {
-      _setSourceDims(visualizerVideoEl.videoWidth, visualizerVideoEl.videoHeight);
-    }
-  });
-  visualizerVideoEl?.addEventListener('emptied', () => {
-    // Source went away (e.g. mirror stop cleared srcObject) — drop the
-    // dynamic aspect so the next click against an empty wrap doesn't
-    // inherit a stale ratio.
-    _setSourceDims(0, 0);
-  });
-  // Match aspect to the still image when a snap is shown.
-  document.getElementById('visualizer-still')?.addEventListener('load', (ev) => {
-    const img = ev.currentTarget;
-    if (img.naturalWidth && img.naturalHeight) {
-      _setSourceDims(img.naturalWidth, img.naturalHeight);
-    }
-  });
-  // Auto-advance: when a video ends, cue the next one in the list.
-  visualizerVideoEl?.addEventListener('ended', () => {
-    const playable = _playableEntries();
-    const idx = playable.findIndex((e) => e.path === _visualizerCurrent);
-    const next = playable[idx + 1];
-    if (next) playVisualizerEntry(next);
-  });
-
-  // ── BROWSER pane ─────────────────────────────────────────────
-  // Lightweight private browser. Each tab is a BrowserView in main (so
-  // page rendering is reliable — the <webview> tag's shadow-DOM was
-  // leaking <style>/<script> source text into the page on certain sites).
-  // The renderer owns the chrome (tab strip, URL bar, splash, results)
-  // and IPCs to main for navigation. A tab can be in three "modes":
-  //   splash  → home screen with address + search inputs + stats
-  //   results → hybrid SERP (DDG + Bing + Brave + Yahoo + Google,
-  //             deduped + interleaved) as a web list, image grid, or
-  //             video grid depending on the kind picker
-  //   page    → the BrowserView is overlaying the stage with a real page
-  // The BrowserView is positioned each time the stage's bounding rect
-  // changes, and detached entirely when the user leaves the BROWSER tab.
-  const browserTabstripEl = document.getElementById('browser-tabstrip');
-  const browserNewTabBtn  = document.getElementById('browser-newtab-btn');
-  const browserBackBtn    = document.getElementById('browser-back-btn');
-  const browserForwardBtn = document.getElementById('browser-forward-btn');
-  const browserReloadBtn  = document.getElementById('browser-reload-btn');
-  const browserHomeBtn    = document.getElementById('browser-home-btn');
-  const browserUrlEl      = document.getElementById('browser-url');
-  const browserBookmarkBtn= document.getElementById('browser-bookmark-btn');
-  const browserReaderBtn  = document.getElementById('browser-reader-btn');
-  const browserDarkBtn    = document.getElementById('browser-dark-btn');
-  const browserBookmarksEl= document.getElementById('browser-bookmarks');
-  const browserBookmarksEmptyEl = document.getElementById('browser-bookmarks-empty');
-  const browserStageEl    = document.getElementById('browser-stage');
-  const browserStatusEl   = document.getElementById('browser-status');
-  const browserSplashEl   = document.getElementById('browser-splash');
-  const browserSplashAddrFormEl = document.getElementById('browser-splash-address-form');
-  const browserSplashAddrEl     = document.getElementById('browser-splash-address');
-  const browserSplashSearchFormEl = document.getElementById('browser-splash-search-form');
-  const browserSplashSearchEl     = document.getElementById('browser-splash-search');
-  const browserStatAdsEl    = document.getElementById('browser-stat-ads');
-  const browserStatPopupsEl = document.getElementById('browser-stat-popups');
-  const browserStatImagesEl = document.getElementById('browser-stat-images');
-  const browserResultsEl     = document.getElementById('browser-results');
-  const browserResultsListEl = document.getElementById('browser-results-list');
-  const browserResultsGridEl = document.getElementById('browser-results-grid');
-  const browserResultsLabel  = document.getElementById('browser-results-label');
-  const browserResultsCount  = document.getElementById('browser-results-count');
-  const browserResultsEmpty  = document.getElementById('browser-results-empty');
-  const browserResultsLoadMoreEl = document.getElementById('browser-results-loadmore');
-
-  const _browserState = { tabs: [], activeId: null, inited: false,
-                          adsBlocked: 0, popupsBlocked: 0, imagesBlocked: 0,
-                          bookmarks: [],
-                          searchKind: 'web', inBrowserMode: false,
-                          readerMode: false };
-  window._browserState = _browserState; // for paintComboHeader's tab count
-
-  function _browserNormalizeUrl(input) {
-    const s = (input || '').trim();
-    if (!s) return null;
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return s;
-    if (/^about:/i.test(s)) return s;
-    if (/^[^\s/]+\.[^\s/]+/.test(s) && !/\s/.test(s)) return `https://${s}`;
-    return null;
-  }
-
-  function _browserRenderSplashStats() {
-    if (browserStatAdsEl)    browserStatAdsEl.textContent    = String(_browserState.adsBlocked || 0);
-    if (browserStatPopupsEl) browserStatPopupsEl.textContent = String(_browserState.popupsBlocked || 0);
-    if (browserStatImagesEl) browserStatImagesEl.textContent = String(_browserState.imagesBlocked || 0);
-  }
-
-  function _browserActiveTab() {
-    return _browserState.tabs.find(t => t.id === _browserState.activeId) || null;
-  }
-
-  // Drive the stage's data-mode attribute. CSS uses it to show/hide the
-  // splash and the results panel. When mode === 'page' both are hidden
-  // and the native BrowserView shows through.
-  function _browserApplyStageMode() {
-    const t = _browserActiveTab();
-    const mode = t ? t.mode : 'splash';
-    browserStageEl.dataset.mode = mode;
-    const shouldShowBv = !!(t && t.mode === 'page' && _browserState.inBrowserMode);
-    // Send fresh bounds BEFORE activate, not after. Otherwise main
-    // attaches the BrowserView with no bounds and Electron defaults to
-    // "fill the BrowserWindow" — the embedded page paints over our
-    // chrome until the debounced bounds message catches up.
-    if (shouldShowBv) {
-      try { window.dash?.browserTabBounds?.(_browserStageRectFraction()); } catch {}
-    }
-    try { window.dash?.browserTabActivate?.(shouldShowBv ? t.id : null); } catch {}
-  }
-  // Express the stage rect as fractions (0..1) of the dashboard viewport.
-  // Wrinkle: an ancestor (.combo-body) has CSS `zoom: 1.2`, which scales
-  // the stage's visual size but Chromium's getBoundingClientRect returns
-  // the pre-zoom layout rect. Multiplying by the accumulated ancestor
-  // zoom recovers the actual on-screen rect — without it, the BV lands
-  // ~83% of the visible stage's size, leaving a black gap below/right.
-  function _browserStageRectFraction() {
-    let z = 1;
-    for (let el = browserStageEl.parentElement; el && el !== document.documentElement; el = el.parentElement) {
-      const zv = parseFloat(window.getComputedStyle(el).zoom);
-      if (zv && zv !== 1) z *= zv;
-    }
-    const r = browserStageEl.getBoundingClientRect();
-    const vw = Math.max(1, window.innerWidth);
-    const vh = Math.max(1, window.innerHeight);
-    return {
-      x: (r.left   * z) / vw,
-      y: (r.top    * z) / vh,
-      width:  (r.width  * z) / vw,
-      height: (r.height * z) / vh,
-    };
-  }
-
-  function _browserUpdateChrome() {
-    const t = _browserActiveTab();
-    if (!t) {
-      browserUrlEl.value = '';
-      browserBackBtn.disabled = true;
-      browserForwardBtn.disabled = true;
-      browserBookmarkBtn.classList.remove('is-bookmarked');
-      browserBookmarkBtn.disabled = true;
-      browserStatusEl.textContent = 'NEW TAB';
-      return;
-    }
-    const onPage = t.mode === 'page';
-    const onResults = t.mode === 'results';
-    // Keep the user's typed query visible when returning to a results
-    // page so they don't have to re-type to refine — falls back to the
-    // page URL on 'page' and empty on 'splash'.
-    if (document.activeElement !== browserUrlEl) {
-      browserUrlEl.value = onPage ? (t.url || '') : (onResults ? (t.query || '') : '');
-    }
-    // Back / forward are driven by our per-tab nav stack now. BV history
-    // is irrelevant because the stack already includes every milestone +
-    // every in-page link the user clicked.
-    browserBackBtn.disabled    = !_navCanBack(t);
-    browserForwardBtn.disabled = !_navCanFwd(t);
-    const bookmarked = onPage && (_browserState.bookmarks || []).some(b => b.url === t.url);
-    browserBookmarkBtn.classList.toggle('is-bookmarked', bookmarked);
-    browserBookmarkBtn.disabled = !onPage;
-    browserStatusEl.textContent = t.mode === 'splash' ? 'NEW TAB'
-      : t.mode === 'results' ? `RESULTS · ${t.query || ''}`
-      : (t.loading ? `LOADING · ${t.url}` : (t.url || 'READY'));
-    paintComboHeader();
-  }
-
-  function _browserRenderTabStrip() {
-    browserTabstripEl.querySelectorAll('.browser-tab').forEach(n => n.remove());
-    for (const t of _browserState.tabs) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'browser-tab' + (t.id === _browserState.activeId ? ' is-active' : '');
-      btn.dataset.tabId = String(t.id);
-      const titleSpan = document.createElement('span');
-      titleSpan.className = 'browser-tab-title';
-      titleSpan.textContent = t.title || 'NEW TAB';
-      const closeBtn = document.createElement('span');
-      closeBtn.className = 'browser-tab-close';
-      closeBtn.textContent = '×';
-      closeBtn.title = 'Close tab';
-      btn.appendChild(titleSpan);
-      btn.appendChild(closeBtn);
-      btn.addEventListener('click', (e) => {
-        if (e.target === closeBtn) { _browserCloseTab(t.id); return; }
-        _browserActivateTab(t.id);
-      });
-      browserTabstripEl.insertBefore(btn, browserNewTabBtn);
-    }
-  }
-
-  function _browserActivateTab(id) {
-    _browserState.activeId = id;
-    _browserRenderTabStrip();
-    _browserUpdateChrome();
-    _browserApplyStageMode();
-    _browserRenderResults();
-  }
-
-  async function _browserCloseTab(id) {
-    const idx = _browserState.tabs.findIndex(t => t.id === id);
-    if (idx < 0) return;
-    try { await window.dash?.browserTabClose?.(id); } catch {}
-    _browserState.tabs.splice(idx, 1);
-    if (_browserState.activeId === id) {
-      const next = _browserState.tabs[idx] || _browserState.tabs[idx - 1] || null;
-      _browserState.activeId = next ? next.id : null;
-    }
-    if (!_browserState.tabs.length) await _browserNewTab();
-    else _browserActivateTab(_browserState.activeId);
-  }
-
-  async function _browserNewTab(url) {
-    let backendId = null;
-    try {
-      const res = await window.dash?.browserTabCreate?.(url || null);
-      backendId = res?.id ?? null;
-    } catch {}
-    if (backendId == null) return null;
-    const tab = {
-      id: backendId,
-      url: url || '',
-      title: 'NEW TAB',
-      loading: !!url,
-      canBack: false,
-      canFwd: false,
-      mode: url ? 'page' : 'splash',
-      query: '',
-      results: null,
-      page: 1,
-      hasMore: true,
-      // Per-tab navigation stack: { type, url?, query?, kind?, results?, page?, hasMore? }
-      // Back/forward step through this — BV's own history is no longer
-      // consulted (it can't represent our app-level results/splash modes).
-      nav: { stack: [], idx: -1 },
-    };
-    _navPush(tab, url ? { type: 'page', url } : { type: 'splash' });
-    _browserState.tabs.push(tab);
-    _browserActivateTab(backendId);
-    return tab;
-  }
-
-  // ── Per-tab nav stack ──────────────────────────────────────────
-  // Entries are app-level milestones (splash / results / page). Every
-  // user-initiated state change pushes; every BV did-navigate event also
-  // pushes (covers in-page link clicks). Back/forward simply walk the
-  // stack and re-apply each entry's UI/BV state.
-  //
-  // _navRestoring is the dedupe guard: when we re-navigate the BV from a
-  // back/forward restore, the BV fires did-navigate; that one event must
-  // NOT push a duplicate entry. We mark the expected URL here and clear
-  // it once the matching event arrives.
-  const _navRestoring = new Map(); // tabId -> expected url
-
-  function _navEntryEq(a, b) {
-    if (!a || !b || a.type !== b.type) return false;
-    if (a.type === 'page')    return a.url === b.url;
-    if (a.type === 'results') return a.query === b.query && a.kind === b.kind;
-    if (a.type === 'splash')  return true;
-    return false;
-  }
-  function _navPush(t, entry) {
-    if (!t.nav) t.nav = { stack: [], idx: -1 };
-    t.nav.stack = t.nav.stack.slice(0, t.nav.idx + 1);
-    const last = t.nav.stack[t.nav.idx];
-    if (last && _navEntryEq(last, entry)) return;
-    t.nav.stack.push(entry);
-    t.nav.idx = t.nav.stack.length - 1;
-  }
-  function _navCanBack(t) { return !!(t?.nav && t.nav.idx > 0); }
-  function _navCanFwd(t)  { return !!(t?.nav && t.nav.idx < t.nav.stack.length - 1); }
-  async function _navBack(t) {
-    if (!_navCanBack(t)) return;
-    t.nav.idx--;
-    await _navApply(t, t.nav.stack[t.nav.idx]);
-  }
-  async function _navFwd(t) {
-    if (!_navCanFwd(t)) return;
-    t.nav.idx++;
-    await _navApply(t, t.nav.stack[t.nav.idx]);
-  }
-  async function _navApply(t, entry) {
-    if (!entry) return;
-    if (entry.type === 'splash') {
-      t.mode = 'splash';
-      t.url = '';
-      t.title = 'NEW TAB';
-      t.loading = false;
-      t.query = '';
-      t.results = null;
-    } else if (entry.type === 'results') {
-      t.mode = 'results';
-      t.query = entry.query || '';
-      t.title = `${entry.kind === 'images' ? 'IMG · ' : entry.kind === 'videos' ? 'VID · ' : ''}${entry.query || ''}`;
-      t.results = entry.results || null;
-      t.page = entry.page || 1;
-      t.hasMore = entry.hasMore !== false;
-    } else if (entry.type === 'page') {
-      t.mode = 'page';
-      t.url = entry.url || '';
-      t.title = entry.title || entry.url || '';
-      t.loading = true;
-      if (entry.url) {
-        _navRestoring.set(t.id, entry.url);
-        try { await window.dash?.browserTabNavigate?.(t.id, entry.url); } catch {}
-      }
-    }
-    _browserRenderTabStrip();
-    _browserUpdateChrome();
-    _browserApplyStageMode();
-    if (t.mode === 'results') _browserRenderResults();
-  }
-
-  async function _browserNavigateActive(url) {
-    if (!url) return;
-    let t = _browserActiveTab();
-    if (!t) { t = await _browserNewTab(url); return; }
-    t.mode = 'page';
-    t.url = url;
-    t.loading = true;
-    // Mark the BV navigation as ours so the did-navigate echo doesn't
-    // re-push, then push the milestone ourselves with proper metadata.
-    _navRestoring.set(t.id, url);
-    _navPush(t, { type: 'page', url });
-    try { await window.dash?.browserTabNavigate?.(t.id, url); } catch {}
-    _browserUpdateChrome();
-    _browserApplyStageMode();
-  }
-
-  async function _browserSearchActive(query, kind) {
-    const q = (query || '').trim();
-    if (!q) return;
-    let t = _browserActiveTab() || await _browserNewTab();
-    if (!t) return;
-    t.mode = 'results';
-    t.query = q;
-    t.title = `${kind === 'images' ? 'IMG · ' : kind === 'videos' ? 'VID · ' : ''}${q}`;
-    t.page = 1;
-    t.hasMore = true;
-    t.results = { kind, items: [], loading: true };
-    // Push milestone BEFORE the fetch so the back stack reflects intent
-    // even mid-load. We update the entry's results snapshot once items
-    // arrive below so a back-to-this-search restores the cached items.
-    _navPush(t, { type: 'results', query: q, kind, results: t.results, page: 1, hasMore: true });
-    _browserRenderTabStrip();
-    _browserUpdateChrome();
-    _browserApplyStageMode();
-    _browserRenderResults();
-
-    const res = await window.dash?.browserSearch?.(q, kind, 1);
-    if (!res || !res.ok) {
-      t.results = { kind, items: [], loading: false, error: res?.error || 'fetch failed' };
-      _browserRenderResults();
-      return;
-    }
-    // Web: main returns a { engine: rawHtml } map (DDG + Bing + Brave +
-    // Yahoo + Google fanned out in parallel). We parse each engine here,
-    // dedupe by canonical URL, then weave them by per-engine position
-    // rank. Images & Videos: main does the vqd handshake + JSON parsing
-    // and returns a ready items array.
-    const items = (kind === 'images' || kind === 'videos')
-      ? (Array.isArray(res.items) ? res.items : [])
-      : _browserParseWebHybrid(res.html || {});
-    t.results = { kind, items, loading: false, engineErrors: res.errors || {} };
-    // If a fresh page-1 search returned nothing, there's no point
-    // offering LOAD MORE.
-    t.hasMore = items.length > 0;
-    // Refresh the current milestone's snapshot so a future back-restore
-    // gets the loaded items, not the in-flight placeholder.
-    const cur = t.nav?.stack?.[t.nav.idx];
-    if (cur && cur.type === 'results' && cur.query === q) {
-      cur.results = t.results;
-      cur.hasMore = t.hasMore;
-    }
-    _browserRenderResults();
-  }
-
-  // LOAD MORE — fetch the next page from every engine, parse + dedupe
-  // against what's already shown, and append only the truly new entries.
-  // When a page returns zero new hits, mark the tab as exhausted and hide
-  // the button.
-  async function _browserLoadMoreActive() {
-    const t = _browserActiveTab();
-    if (!t || t.mode !== 'results' || !t.results || t.results.loading) return;
-    if (t.hasMore === false) return;
-    const nextPage = (t.page || 1) + 1;
-    t.results.loading = true;
-    _browserRenderResults();
-
-    const res = await window.dash?.browserSearch?.(t.query, t.results.kind, nextPage);
-    if (!res || !res.ok) {
-      t.results.loading = false;
-      _browserRenderResults();
-      return;
-    }
-    const incoming = (t.results.kind === 'images' || t.results.kind === 'videos')
-      ? (Array.isArray(res.items) ? res.items : [])
-      : _browserParseWebHybrid(res.html || {});
-    const seen = new Set(t.results.items.map((it) => _canonicalUrl(it.url) || it.image || it.thumb));
-    const fresh = [];
-    for (const it of incoming) {
-      const key = _canonicalUrl(it.url) || it.image || it.thumb;
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      fresh.push(it);
-    }
-    t.results.items = t.results.items.concat(fresh);
-    t.results.loading = false;
-    t.page = nextPage;
-    if (fresh.length === 0) t.hasMore = false;
-    _browserRenderResults();
-  }
-
-  // Hybrid web parser — main fans out to several engines in parallel
-  // and hands us back a { engineKey: rawHtml } map. We parse each with
-  // engine-specific selectors, then weave them together by per-engine
-  // position rank: each result's score is (idx + 0.5) / engineSize, so
-  // an engine that returned 30 results spreads them evenly across the
-  // 30 slots and an engine that returned 5 spreads them across the same
-  // visible range. Sort by score → real mix throughout the list, no
-  // "Brave block" at the bottom even when one engine returns way more
-  // results than the others. Final dedupe by canonical URL collapses
-  // overlap; sources chip shows every engine that surfaced it.
-  function _browserParseWebHybrid(htmlByEngine) {
-    const byEngine = {
-      ddg:    htmlByEngine?.ddg    ? _parseDDG(htmlByEngine.ddg)       : [],
-      bing:   htmlByEngine?.bing   ? _parseBing(htmlByEngine.bing)     : [],
-      brave:  htmlByEngine?.brave  ? _parseBrave(htmlByEngine.brave)   : [],
-      yahoo:  htmlByEngine?.yahoo  ? _parseYahoo(htmlByEngine.yahoo)   : [],
-      google: htmlByEngine?.google ? _parseGoogle(htmlByEngine.google) : [],
-    };
-    const keys = Object.keys(byEngine);
-    const annotated = [];
-    for (let ki = 0; ki < keys.length; ki++) {
-      const k = keys[ki];
-      const list = byEngine[k];
-      const len = list.length;
-      if (!len) continue;
-      for (let i = 0; i < len; i++) {
-        annotated.push({ item: list[i], score: (i + 0.5) / len, eng: ki });
-      }
-    }
-    // Stable score sort; ties break by engine declaration order so any
-    // run of equal-score results still alternates engines.
-    annotated.sort((a, b) => a.score - b.score || a.eng - b.eng);
-
-    const seen = new Map();
-    for (const { item: r } of annotated) {
-      const key = _canonicalUrl(r.url);
-      if (!key) continue;
-      const existing = seen.get(key);
-      if (existing) {
-        for (const s of r.sources) if (!existing.sources.includes(s)) existing.sources.push(s);
-        if ((r.snippet || '').length > (existing.snippet || '').length) existing.snippet = r.snippet;
-        if (!existing.title && r.title) existing.title = r.title;
-      } else {
-        seen.set(key, { ...r, sources: [...r.sources] });
-      }
-    }
-    return Array.from(seen.values());
-  }
-
-  function _canonicalUrl(url) {
-    try {
-      const u = new URL(url);
-      const host = u.hostname.toLowerCase().replace(/^www\./, '');
-      let path = u.pathname.replace(/\/+$/, '');
-      const params = new URLSearchParams(u.search);
-      for (const p of [...params.keys()]) {
-        if (/^(utm_|fbclid|gclid|msclkid|mc_eid|mc_cid|_ga|yclid|igshid|si)$/i.test(p)) params.delete(p);
-      }
-      const search = params.toString();
-      return `${host}${path}${search ? '?' + search : ''}`;
-    } catch { return null; }
-  }
-
-  function _parseDDG(html) {
-    try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const out = [];
-      for (const el of doc.querySelectorAll('.result')) {
-        const a = el.querySelector('.result__a');
-        if (!a) continue;
-        let href = a.getAttribute('href') || '';
-        if (href.startsWith('//')) href = 'https:' + href;
-        try {
-          const u = new URL(href);
-          const real = u.searchParams.get('uddg');
-          if (real) href = decodeURIComponent(real);
-        } catch {}
-        const title   = (a.textContent || '').trim();
-        const snippet = (el.querySelector('.result__snippet')?.textContent || '').trim();
-        const display = (el.querySelector('.result__url')?.textContent || '').trim();
-        if (title && href && /^https?:\/\//.test(href)) out.push({ title, url: href, snippet, display, sources: ['ddg'] });
-      }
-      return out;
-    } catch { return []; }
-  }
-
-  function _parseBing(html) {
-    try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const out = [];
-      for (const el of doc.querySelectorAll('li.b_algo')) {
-        const a = el.querySelector('h2 a');
-        if (!a) continue;
-        const href = a.getAttribute('href') || '';
-        if (!/^https?:\/\//.test(href)) continue;
-        const title = (a.textContent || '').trim();
-        const snippet = (el.querySelector('.b_caption p, p')?.textContent || '').trim();
-        const display = (el.querySelector('cite, .b_attribution')?.textContent || '').trim();
-        if (title) out.push({ title, url: href, snippet, display: display || href, sources: ['bing'] });
-      }
-      return out;
-    } catch { return []; }
-  }
-
-  function _parseBrave(html) {
-    try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const out = [];
-      // Brave's markup varies; cover a few generations of selectors.
-      const containers = doc.querySelectorAll('[data-type="web"], .snippet.fdb, .snippet[data-pos]');
-      for (const el of containers) {
-        const a = el.querySelector('a.h, a.heading-serpresult, a[data-testid="result-title-a"], a.title, a[href^="http"]');
-        if (!a) continue;
-        const href = a.getAttribute('href') || '';
-        if (!/^https?:\/\//.test(href)) continue;
-        const title = (
-          el.querySelector('.title, .heading, h3, h4')?.textContent ||
-          a.textContent ||
-          ''
-        ).trim();
-        const snippet = (el.querySelector('.snippet-description, .desc, .snippet-content')?.textContent || '').trim();
-        const display = (el.querySelector('.netloc, cite, .snippet-url')?.textContent || '').trim();
-        if (title) out.push({ title, url: href, snippet, display: display || href, sources: ['brave'] });
-      }
-      return out;
-    } catch { return []; }
-  }
-
-  function _parseYahoo(html) {
-    try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const out = [];
-      for (const el of doc.querySelectorAll('div.algo, li.algo, div.algo-sr')) {
-        const a = el.querySelector('h3 a, .compTitle a');
-        if (!a) continue;
-        let href = a.getAttribute('href') || '';
-        // Yahoo wraps in r.search.yahoo.com/_ylt=…/RU=encoded-url/…/RK=…
-        const ruMatch = href.match(/\/RU=([^/]+)\//);
-        if (ruMatch) {
-          try { href = decodeURIComponent(ruMatch[1]); } catch {}
-        }
-        if (!/^https?:\/\//.test(href)) continue;
-        const title = (a.textContent || '').trim();
-        const snippet = (el.querySelector('.compText p, .fz-ms, p')?.textContent || '').trim();
-        if (title) out.push({ title, url: href, snippet, display: href, sources: ['yahoo'] });
-      }
-      return out;
-    } catch { return []; }
-  }
-
-  function _parseGoogle(html) {
-    try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const out = [];
-      // Google's class names rotate every few months. Use structural
-      // shape — a heading + a link to an external URL — rather than
-      // brittle class hooks.
-      const seenHere = new Set();
-      for (const h3 of doc.querySelectorAll('h3')) {
-        const a = h3.closest('a') || h3.parentElement?.querySelector('a[href]');
-        if (!a) continue;
-        let href = a.getAttribute('href') || '';
-        if (href.startsWith('/url?')) {
-          try {
-            const u = new URL(href, 'https://www.google.com');
-            const real = u.searchParams.get('q') || u.searchParams.get('url');
-            if (real) href = real;
-          } catch {}
-        }
-        if (!/^https?:\/\//.test(href)) continue;
-        // Skip Google's own internal links.
-        if (/(?:^|\.)google\.[a-z.]+$/.test(new URL(href).hostname)) continue;
-        if (seenHere.has(href)) continue;
-        seenHere.add(href);
-        const title = (h3.textContent || '').trim();
-        const container = h3.closest('div[data-hveid], div.g, div.MjjYud') || h3.parentElement;
-        const snippet = (container?.querySelector('div.VwiC3b, span.aCOpRe, div[data-snc]')?.textContent || '').trim();
-        if (title) out.push({ title, url: href, snippet, display: href, sources: ['google'] });
-      }
-      return out;
-    } catch { return []; }
-  }
-
-  // (Image results are parsed in main: it does the DuckDuckGo vqd → i.js
-  // JSON handshake and returns a flat items array, so the renderer does
-  // not need its own image parser.)
-
-  function _browserRenderResults() {
-    const t = _browserActiveTab();
-    if (!t || t.mode !== 'results') return;
-    const r = t.results || { kind: 'web', items: [] };
-    const isImages = r.kind === 'images';
-    const isVideos = r.kind === 'videos';
-    const isGrid   = isImages || isVideos;
-    browserResultsEl.classList.toggle('is-images', isImages);
-    browserResultsEl.classList.toggle('is-videos', isVideos);
-    browserResultsListEl.hidden = isGrid;
-    browserResultsGridEl.hidden = !isGrid;
-    browserResultsLabel.textContent =
-      (isVideos ? 'VIDEOS · ' : isImages ? 'IMAGES · ' : 'RESULTS · ') + t.query;
-    // Sync the filter-chip row so the active kind reflects the result
-    // kind we're actually showing. Without this the chip can drift out
-    // of step with the data when results were loaded from a saved tab
-    // or via a kind-specific deep link.
-    for (const b of document.querySelectorAll('.browser-results-filter')) {
-      b.classList.toggle('is-active', b.dataset.kind === r.kind);
-    }
-    if (r.loading && r.items.length === 0) {
-      // Fresh search — show "SEARCHING…" while page 1 is in flight.
-      browserResultsCount.textContent = 'SEARCHING…';
-      browserResultsListEl.innerHTML = '';
-      browserResultsGridEl.innerHTML = '';
-      browserResultsEmpty.hidden = true;
-      browserResultsLoadMoreEl.hidden = true;
-      return;
-    }
-    if (r.error && r.items.length === 0) {
-      browserResultsCount.textContent = 'ERROR';
-      browserResultsEmpty.hidden = false;
-      browserResultsEmpty.textContent = r.error.toUpperCase();
-      browserResultsListEl.innerHTML = '';
-      browserResultsGridEl.innerHTML = '';
-      browserResultsLoadMoreEl.hidden = true;
-      return;
-    }
-    browserResultsCount.textContent = `${r.items.length} HIT${r.items.length === 1 ? '' : 'S'}`
-      + (t.page > 1 ? ` · PAGE ${t.page}` : '');
-    browserResultsEmpty.hidden = r.items.length > 0;
-    if (!r.items.length) browserResultsEmpty.textContent = 'NO RESULTS';
-    // LOAD MORE: hidden when empty, when last fetch returned no new
-    // unique results, or while a load-more request is in flight.
-    browserResultsLoadMoreEl.hidden = !r.items.length || t.hasMore === false;
-    browserResultsLoadMoreEl.disabled = !!r.loading;
-    browserResultsLoadMoreEl.textContent = r.loading ? 'LOADING…' : 'LOAD MORE';
-
-    if (isGrid) {
-      browserResultsGridEl.innerHTML = '';
-      for (const it of r.items) {
-        const cell = document.createElement('button');
-        cell.type = 'button';
-        cell.className = isVideos ? 'browser-result-img browser-result-vid' : 'browser-result-img';
-        cell.title = it.title ? `${it.title}\n${it.url}` : it.url;
-        const img = document.createElement('img');
-        img.loading = 'lazy';
-        img.src = it.thumb;
-        img.referrerPolicy = 'no-referrer';
-        cell.appendChild(img);
-        if (isVideos) {
-          // Play-triangle hint + duration in bottom-right; title gradient
-          // overlay along the bottom edge so the source is scannable
-          // without hovering.
-          const play = document.createElement('span');
-          play.className = 'browser-result-vid-play';
-          play.textContent = '▶';
-          cell.appendChild(play);
-          if (it.duration) {
-            const dur = document.createElement('span');
-            dur.className = 'browser-result-vid-duration';
-            dur.textContent = it.duration;
-            cell.appendChild(dur);
-          }
-          if (it.title) {
-            const titleEl = document.createElement('div');
-            titleEl.className = 'browser-result-vid-title';
-            titleEl.textContent = it.title;
-            cell.appendChild(titleEl);
-          }
-        }
-        cell.addEventListener('click', (e) => {
-          // Videos: always navigate to the source page.
-          // Images: left-click → source page, shift/middle → raw image.
-          let target = it.url;
-          if (isImages && (e.shiftKey || e.button === 1)) target = it.image || it.url;
-          _browserNavigateActive(target);
-        });
-        browserResultsGridEl.appendChild(cell);
-      }
-    } else {
-      browserResultsListEl.innerHTML = '';
-      for (const it of r.items) {
-        const li = document.createElement('li');
-        li.className = 'browser-result';
-        // Title row: optional source-count chip + clickable title.
-        const titleRow = document.createElement('div');
-        titleRow.className = 'browser-result-titlerow';
-        const sources = it.sources || [];
-        if (sources.length > 0) {
-          const chip = document.createElement('span');
-          chip.className = 'browser-result-chip';
-          chip.textContent = sources.length > 1 ? `${sources.length}×` : sources[0].toUpperCase();
-          chip.title = sources.join(' · ');
-          if (sources.length > 1) chip.classList.add('is-multi');
-          titleRow.appendChild(chip);
-        }
-        const a = document.createElement('a');
-        a.className = 'browser-result-title';
-        a.href = '#';
-        a.textContent = it.title;
-        a.addEventListener('click', (ev) => { ev.preventDefault(); _browserNavigateActive(it.url); });
-        titleRow.appendChild(a);
-        const url = document.createElement('div');
-        url.className = 'browser-result-url';
-        url.textContent = it.display || it.url;
-        const snip = document.createElement('div');
-        snip.className = 'browser-result-snippet';
-        snip.textContent = it.snippet || '';
-        li.appendChild(titleRow);
-        li.appendChild(url);
-        if (it.snippet) li.appendChild(snip);
-        browserResultsListEl.appendChild(li);
-      }
-    }
-  }
-
-  function _browserRenderBookmarks() {
-    const list = _browserState.bookmarks || [];
-    browserBookmarksEl.querySelectorAll('.browser-bookmark').forEach(n => n.remove());
-    browserBookmarksEmptyEl.hidden = list.length > 0;
-    for (const bm of list) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'browser-bookmark';
-      btn.textContent = bm.title || bm.url;
-      btn.title = bm.url;
-      btn.addEventListener('click', () => _browserNavigateActive(bm.url));
-      btn.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        _browserState.bookmarks = list.filter(b => b !== bm);
-        window.dash?.setConfig?.({ browserBookmarks: _browserState.bookmarks });
-        _browserRenderBookmarks();
-        _browserUpdateChrome();
-      });
-      browserBookmarksEl.appendChild(btn);
-    }
-  }
-
-  function _browserGoHome() {
-    const t = _browserActiveTab();
-    if (!t) { _browserNewTab(); return; }
-    _navPush(t, { type: 'splash' });
-    _navApply(t, { type: 'splash' });
-    setTimeout(() => browserSplashAddrEl?.focus(), 30);
-  }
-
-  // Geometry sync. The BrowserView lives in the main-process window
-  // layer; the renderer tells main where the stage is on screen each
-  // time the layout shifts. ResizeObserver covers panel-resize drags;
-  // window 'resize' covers viewport / DPI changes.
-  let _bvBoundsTimer = null;
-  let _bvLastSent = null;
-  function _browserSendBounds() {
-    if (_bvBoundsTimer) return;
-    _bvBoundsTimer = setTimeout(() => {
-      _bvBoundsTimer = null;
-      if (!_browserState.inBrowserMode) return;
-      const t = _browserActiveTab();
-      if (!t || t.mode !== 'page') return;
-      // Dedup: the 500 ms heartbeat fires whether or not anything moved.
-      // Comparing to the last-sent rect (with a half-pixel tolerance to
-      // ignore subpixel jitter from layout flushes) skips the IPC ping +
-      // native setBounds call when the page is just sitting still.
-      const r = _browserStageRectFraction();
-      if (_bvLastSent
-        && Math.abs(r.x      - _bvLastSent.x)      < 0.0005
-        && Math.abs(r.y      - _bvLastSent.y)      < 0.0005
-        && Math.abs(r.width  - _bvLastSent.width)  < 0.0005
-        && Math.abs(r.height - _bvLastSent.height) < 0.0005) {
-        return;
-      }
-      _bvLastSent = r;
-      try { window.dash?.browserTabBounds?.(r); } catch {}
-    }, 16);
-  }
-  try {
-    new ResizeObserver(_browserSendBounds).observe(browserStageEl);
-  } catch {}
-  // Catch the panel being dragged: drag updates panel.style.left/top
-  // directly, which fires no resize event, so ResizeObserver alone
-  // leaves the BrowserView stranded at its old screen coordinates.
-  // Watching attribute mutations on the panel + its parent stack covers
-  // drag, fold, layout-recall, and saved-layout restore.
-  try {
-    const mo = new MutationObserver(_browserSendBounds);
-    mo.observe(comboPanel, { attributes: true, attributeFilter: ['style', 'class'] });
-    if (comboPanel.parentElement) {
-      mo.observe(comboPanel.parentElement, { attributes: true, attributeFilter: ['style', 'class'] });
-    }
-  } catch {}
-  window.addEventListener('resize', _browserSendBounds);
-  window.addEventListener('scroll', _browserSendBounds, true);
-  // Also re-sync on mouseup as a belt-and-suspenders: ends a drag even if
-  // the final mousemove didn't tick a mutation observer.
-  window.addEventListener('mouseup', _browserSendBounds);
-  // Heartbeat: re-measure every 500 ms while a page tab is showing in
-  // the BROWSER pane. Cheap, and recovers from any layout shift our
-  // observers happened to miss (saved-layout restores, side-arrange
-  // recalcs, parent-style mutations on a non-watched ancestor, etc.).
-  setInterval(() => {
-    if (!_browserState.inBrowserMode) return;
-    const t = _browserActiveTab();
-    if (!t || t.mode !== 'page') return;
-    _browserSendBounds();
-  }, 500);
-
-  // setComboMode (declared above in this same block) handles the
-  // attach/detach signaling for the BrowserView by reading
-  // window._browserState.inBrowserMode and calling
-  // window._browserApplyStageMode / window.dash.browserTabActivate(null).
-  // Expose the apply helper so the wrapper can reach it.
-  window._browserApplyStageMode = _browserApplyStageMode;
-
-  async function initBrowserOnce() {
-    if (_browserState.inited) return;
-    _browserState.inited = true;
-    const cfg = await window.dash?.getConfig?.() || {};
-    _browserState.bookmarks = Array.isArray(cfg.browserBookmarks) ? cfg.browserBookmarks : [];
-    _browserState.readerMode = !!cfg.browserReaderMode;
-    _browserRenderBookmarks();
-    // Sync reader-mode to main so the webRequest handler matches the
-    // persisted state from the moment the user enters the BROWSER pane.
-    try { window.dash?.browserSetReaderMode?.(_browserState.readerMode); } catch {}
-    browserReaderBtn?.classList.toggle('is-active', _browserState.readerMode);
-    // Dark-mode default ON unless the user has explicitly turned it off.
-    _browserState.darkMode = cfg.browserDarkMode !== false;
-    try { window.dash?.browserSetDarkMode?.(_browserState.darkMode); } catch {}
-    browserDarkBtn?.classList.toggle('is-active', _browserState.darkMode);
-    try {
-      const stats = await window.dash?.browserGetStats?.();
-      if (stats && typeof stats.adsBlocked    === 'number') _browserState.adsBlocked    = stats.adsBlocked;
-      if (stats && typeof stats.imagesBlocked === 'number') _browserState.imagesBlocked = stats.imagesBlocked;
-    } catch {}
-    _browserRenderSplashStats();
-    // Lazy BrowserView allocation: we used to call _browserNewTab() here,
-    // which spawned a fresh Chromium renderer process (its own GPU
-    // context) at app launch even when the user was only looking at the
-    // splash. Combined with the 3D scene init, audio worker, LHM probes,
-    // and sensor-panel renders, that added up to the GPU spike on cold
-    // start that tripped the emergency-temperature panel red. The
-    // BrowserView is now created on first real navigation instead —
-    // _browserSearchActive / _browserNavigateActive / + new tab.
-    setTimeout(() => browserSplashAddrEl?.focus(), 50);
-  }
-
-  // Subscribe to BrowserView lifecycle events from main and reflect them
-  // into our local tab state. Each event carries the backend tab id.
-  try {
-    window.dash?.onBrowserTabEvent?.((data) => {
-      if (!data || data.id == null) return;
-      const t = _browserState.tabs.find(x => x.id === data.id);
-      if (!t) return;
-      if (data.type === 'navigate') {
-        t.url = data.url || t.url;
-        t.mode = 'page';
-        // Push to nav stack — unless this navigation is the BV echoing
-        // a load we already pushed (back/forward restore, or a fresh
-        // URL bar navigation we pushed eagerly above).
-        const expecting = _navRestoring.get(t.id);
-        if (expecting && (expecting === data.url || expecting === t.url)) {
-          _navRestoring.delete(t.id);
-        } else if (data.url) {
-          _navPush(t, { type: 'page', url: data.url });
-        }
-        _browserUpdateChrome();
-      } else if (data.type === 'title') {
-        t.title = data.title || t.title;
-        _browserRenderTabStrip();
-        _browserUpdateChrome();
-      } else if (data.type === 'loading') {
-        t.loading  = !!data.loading;
-        if (typeof data.canBack === 'boolean') t.canBack = data.canBack;
-        if (typeof data.canFwd  === 'boolean') t.canFwd  = data.canFwd;
-        _browserUpdateChrome();
-      } else if (data.type === 'newwindow') {
-        // Main already navigated the current view to the new URL — no
-        // tab spawning here. We still tally these as "popups blocked"
-        // since the page intended a separate window.
-        _browserState.popupsBlocked++;
-        _browserRenderSplashStats();
-      } else if (data.type === 'fail') {
-        // Silent; URL bar still shows last attempted address.
-      }
-    });
-  } catch {}
-
-  browserResultsLoadMoreEl?.addEventListener('click', () => _browserLoadMoreActive());
-  browserNewTabBtn?.addEventListener('click', () => _browserNewTab());
-  browserBackBtn?.addEventListener('click', () => {
-    const t = _browserActiveTab();
-    if (!t) return;
-    _navBack(t);
-  });
-  browserForwardBtn?.addEventListener('click', () => {
-    const t = _browserActiveTab();
-    if (!t) return;
-    _navFwd(t);
-  });
-  browserReloadBtn?.addEventListener('click',  () => {
-    const t = _browserActiveTab();
-    if (!t) return;
-    if (t.mode === 'page')    window.dash?.browserTabReload?.(t.id);
-    else if (t.mode === 'results' && t.query) _browserSearchActive(t.query, t.results?.kind || 'web');
-  });
-  browserHomeBtn?.addEventListener('click', _browserGoHome);
-  // Reader mode — image blocking on/off. We persist the choice and tell
-  // main to update its webRequest filter. Reload the current page so the
-  // new policy actually takes effect on this view (already-loaded images
-  // stay cached; blocking only applies to fresh requests).
-  browserReaderBtn?.addEventListener('click', () => {
-    _browserState.readerMode = !_browserState.readerMode;
-    browserReaderBtn.classList.toggle('is-active', _browserState.readerMode);
-    window.dash?.setConfig?.({ browserReaderMode: _browserState.readerMode });
-    window.dash?.browserSetReaderMode?.(_browserState.readerMode);
-    const t = _browserActiveTab();
-    if (t && t.mode === 'page') {
-      // Force a fresh load — plain reload() would happily serve the same
-      // images from the memory cache, which means the new image-block
-      // filter would never see those requests.
-      try { window.dash?.browserTabReloadFresh?.(t.id); } catch {}
-    }
-  });
-  // Dark mode — insert/remove an invert CSS overlay on every BrowserView.
-  // No reload needed; main does insertCSS/removeInsertedCSS at runtime so
-  // the toggle is instant.
-  browserDarkBtn?.addEventListener('click', async () => {
-    _browserState.darkMode = !_browserState.darkMode;
-    browserDarkBtn.classList.toggle('is-active', _browserState.darkMode);
-    try { await window.dash?.browserSetDarkMode?.(_browserState.darkMode); } catch {}
-    playSfx?.('click');
-  });
-  browserUrlEl?.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    const url = _browserNormalizeUrl(browserUrlEl.value);
-    if (url) { _browserNavigateActive(url); browserUrlEl.blur(); }
-    else if (browserUrlEl.value.trim()) {
-      _browserSearchActive(browserUrlEl.value.trim(), _browserState.searchKind);
-      browserUrlEl.blur();
-    }
-  });
-  browserUrlEl?.addEventListener('focus', () => { browserUrlEl.select(); });
-  browserBookmarkBtn?.addEventListener('click', () => {
-    const t = _browserActiveTab();
-    if (!t || t.mode !== 'page' || !t.url) return;
-    const list = _browserState.bookmarks || [];
-    const existing = list.findIndex(b => b.url === t.url);
-    if (existing >= 0) list.splice(existing, 1);
-    else list.push({ url: t.url, title: t.title || t.url });
-    _browserState.bookmarks = list;
-    window.dash?.setConfig?.({ browserBookmarks: list });
-    _browserRenderBookmarks();
-    _browserUpdateChrome();
-  });
-
-  // ── History overlay + clear-data ─────────────────────────────────
-  // History uses the same stage-overlay pattern as splash/results: set
-  // browserStageEl.dataset.mode = 'history', detach the BrowserView so
-  // the native paint surface clears, and the CSS reveals the HTML list.
-  // Close just re-runs _browserApplyStageMode which restores the
-  // active tab's actual mode + re-attaches the BV if appropriate.
-  const browserHistoryBtn        = document.getElementById('browser-history-btn');
-  const browserHistoryListEl     = document.getElementById('browser-history-list');
-  const browserHistoryEmptyEl    = document.getElementById('browser-history-empty');
-  const browserHistoryCloseBtn   = document.getElementById('browser-history-close-btn');
-  const browserHistoryClearBtn   = document.getElementById('browser-history-clear-btn');
-  const browserClearBtn          = document.getElementById('browser-clear-btn');
-
-  function _fmtHistoryTime(ts) {
-    if (!Number.isFinite(ts)) return '';
-    const d = new Date(ts);
-    const sameDay = d.toDateString() === new Date().toDateString();
-    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return sameDay
-      ? time
-      : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${time}`;
-  }
-
-  async function _browserRenderHistory() {
-    if (!browserHistoryListEl) return;
-    const entries = (await window.dash?.browserHistoryGet?.(200)) || [];
-    browserHistoryListEl.innerHTML = '';
-    if (browserHistoryEmptyEl) browserHistoryEmptyEl.hidden = entries.length > 0;
-    for (const e of entries) {
-      const li = document.createElement('li');
-      const ts    = document.createElement('div'); ts.className    = 'h-ts';    ts.textContent    = _fmtHistoryTime(e.ts);
-      const title = document.createElement('div'); title.className = 'h-title'; title.textContent = e.title || e.url;
-      const url   = document.createElement('div'); url.className   = 'h-url';   url.textContent   = e.url;
-      li.append(ts, title, url);
-      li.addEventListener('click', () => {
-        // Use the current tab if there is one, otherwise spawn a new one.
-        const t = _browserActiveTab() || null;
-        _browserCloseHistory();
-        if (t) {
-          window.dash?.browserTabNavigate?.(t.id, e.url);
-          t.mode = 'page'; t.url = e.url;
-          _browserApplyStageMode();
-        } else {
-          _browserNewTab(e.url);
-        }
-      });
-      browserHistoryListEl.appendChild(li);
-    }
-  }
-
-  function _browserOpenHistory() {
-    if (browserStageEl.dataset.mode === 'history') return;
-    browserStageEl.dataset.mode = 'history';
-    // Detach every BrowserView so the HTML overlay paints (BVs are
-    // native windows and otherwise render over our DOM).
-    try { window.dash?.browserTabActivate?.(null); } catch {}
-    _browserRenderHistory();
-  }
-  function _browserCloseHistory() {
-    if (browserStageEl.dataset.mode !== 'history') return;
-    _browserApplyStageMode();   // restores the active tab's real mode + BV
-  }
-
-  browserHistoryBtn?.addEventListener('click', _browserOpenHistory);
-  browserHistoryCloseBtn?.addEventListener('click', _browserCloseHistory);
-  browserHistoryClearBtn?.addEventListener('click', async () => {
-    try { await window.dash?.browserHistoryClear?.(); } catch {}
-    _browserRenderHistory();
-    playSfx?.('confirm');
-  });
-
-  // ── Bookmarks overlay ────────────────────────────────────────────
-  // The inline bookmarks bar (.browser-bookmarks below the navrow) is
-  // fine for quick clicks but cramped when you have many entries —
-  // overflow-x: auto means anything past the first few scrolls off
-  // horizontally. The Bookmarks button on the navrow opens this full
-  // overlay so every saved page is listed vertically with title, URL,
-  // and a × remove button per row. Same pattern as the history overlay.
-  const browserBookmarksBtn       = document.getElementById('browser-bookmarks-btn');
-  const browserBookmarksListEl    = document.getElementById('browser-bookmarks-list');
-  const browserBookmarksEmpty2El  = document.getElementById('browser-bookmarks-panel-empty');
-  const browserBookmarksCloseBtn  = document.getElementById('browser-bookmarks-close-btn');
-
-  function _browserRenderBookmarksOverlay() {
-    if (!browserBookmarksListEl) return;
-    const list = _browserState.bookmarks || [];
-    browserBookmarksListEl.innerHTML = '';
-    if (browserBookmarksEmpty2El) browserBookmarksEmpty2El.hidden = list.length > 0;
-    for (const bm of list) {
-      const li = document.createElement('li');
-      const title = document.createElement('div'); title.className = 'h-title'; title.textContent = bm.title || bm.url;
-      const url   = document.createElement('div'); url.className   = 'h-url';   url.textContent   = bm.url;
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.className = 'h-remove';
-      remove.textContent = '×';
-      remove.title = 'Remove bookmark';
-      remove.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const next = (_browserState.bookmarks || []).filter(b => b !== bm);
-        _browserState.bookmarks = next;
-        window.dash?.setConfig?.({ browserBookmarks: next });
-        _browserRenderBookmarks();
-        _browserRenderBookmarksOverlay();
-        _browserUpdateChrome();
-        playSfx?.('click');
-      });
-      li.append(title, url, remove);
-      li.addEventListener('click', () => {
-        const t = _browserActiveTab() || null;
-        _browserCloseBookmarksOverlay();
-        if (t) {
-          window.dash?.browserTabNavigate?.(t.id, bm.url);
-          t.mode = 'page'; t.url = bm.url;
-          _browserApplyStageMode();
-        } else {
-          _browserNewTab(bm.url);
-        }
-      });
-      browserBookmarksListEl.appendChild(li);
-    }
-  }
-
-  function _browserOpenBookmarksOverlay() {
-    if (browserStageEl.dataset.mode === 'bookmarks') return;
-    browserStageEl.dataset.mode = 'bookmarks';
-    try { window.dash?.browserTabActivate?.(null); } catch {}
-    _browserRenderBookmarksOverlay();
-  }
-  function _browserCloseBookmarksOverlay() {
-    if (browserStageEl.dataset.mode !== 'bookmarks') return;
-    _browserApplyStageMode();
-  }
-
-  browserBookmarksBtn?.addEventListener('click', _browserOpenBookmarksOverlay);
-  browserBookmarksCloseBtn?.addEventListener('click', _browserCloseBookmarksOverlay);
-
-  // ── Video scraper overlay (yt-dlp) ───────────────────────────────
-  // SCRAPE button → ask main to run yt-dlp on the active tab's URL,
-  // filter to videos ≥ 5 min, present a downloadable list. Same stage-
-  // overlay pattern as history/bookmarks: dataset.mode = 'scrape' +
-  // detach BVs so the HTML list paints over where the page was.
-  const browserScrapeBtn        = document.getElementById('browser-scrape-btn');
-  const browserScrapePanel      = document.getElementById('browser-scrape-panel');
-  const browserScrapeListEl     = document.getElementById('browser-scrape-list');
-  const browserScrapeStatusEl   = document.getElementById('browser-scrape-status');
-  const browserScrapeTitleEl    = document.getElementById('browser-scrape-title');
-  const browserScrapeCloseBtn   = document.getElementById('browser-scrape-close-btn');
-  const browserScrapeDlAllBtn   = document.getElementById('browser-scrape-dl-all-btn');
-  // downloadId → { row, fillEl, pctEl, doneEl } so onYtDownloadProgress
-  // can route each progress event to the right row's bar.
-  const _scrapeRowsByDl = new Map();
-  // Live unsubscribe — bound once on first scrape, kept for the session.
-  let _scrapeProgressUnsub = null;
-  function _ensureScrapeProgressSubscribed() {
-    if (_scrapeProgressUnsub || !window.dash?.onYtDownloadProgress) return;
-    _scrapeProgressUnsub = window.dash.onYtDownloadProgress((p) => {
-      const row = _scrapeRowsByDl.get(p?.downloadId);
-      if (!row) return;
-      const pct = Math.max(0, Math.min(100, p.percent || 0));
-      if (row.fillEl) row.fillEl.style.width = `${pct.toFixed(1)}%`;
-      if (row.pctEl)  row.pctEl.textContent  = `${pct.toFixed(0)}%`;
-      if (p.done && row.doneEl) {
-        row.doneEl.classList.add('is-done');
-        row.doneEl.textContent = '✓';
-      }
-    });
-  }
-  function _fmtDuration(sec) {
-    if (!Number.isFinite(sec) || sec < 0) return '—';
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = Math.floor(sec % 60);
-    return h > 0
-      ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
-      : `${m}:${String(s).padStart(2,'0')}`;
-  }
-  function _setScrapeStatus(text, kind) {
-    if (!browserScrapeStatusEl) return;
-    browserScrapeStatusEl.textContent = text || '';
-    browserScrapeStatusEl.hidden = !text;
-    browserScrapeStatusEl.className = `browser-history-empty${kind ? ` is-${kind}` : ''}`;
-  }
-  function _renderScrapeList(items, pageTitle) {
-    if (!browserScrapeListEl) return;
-    browserScrapeListEl.innerHTML = '';
-    _scrapeRowsByDl.clear();
-    if (browserScrapeTitleEl) {
-      browserScrapeTitleEl.textContent = pageTitle
-        ? `VIDEOS · ${items.length}`
-        : `VIDEOS FOUND · ${items.length}`;
-    }
-    if (browserScrapeDlAllBtn) browserScrapeDlAllBtn.hidden = items.length === 0;
-    for (const v of items) {
-      const li = document.createElement('li');
-      li.className = 'browser-scrape-row';
-      // Thumbnail (fallback to a placeholder block when missing).
-      const thumb = document.createElement('div');
-      thumb.className = 'browser-scrape-thumb';
-      if (v.thumbnail) {
-        const img = document.createElement('img');
-        img.src = v.thumbnail;
-        img.alt = '';
-        img.referrerPolicy = 'no-referrer';
-        img.loading = 'lazy';
-        thumb.appendChild(img);
-      }
-      const dur = document.createElement('span');
-      dur.className = 'browser-scrape-dur';
-      dur.textContent = _fmtDuration(v.duration);
-      thumb.appendChild(dur);
-
-      const body = document.createElement('div');
-      body.className = 'browser-scrape-body';
-      const title = document.createElement('div');
-      title.className = 'browser-scrape-title-row';
-      title.textContent = v.title || v.url;
-      const meta = document.createElement('div');
-      meta.className = 'browser-scrape-meta';
-      meta.textContent = v.channel || v.url;
-      const progWrap = document.createElement('div');
-      progWrap.className = 'browser-scrape-progress';
-      const progFill = document.createElement('div');
-      progFill.className = 'browser-scrape-progress-fill';
-      progWrap.appendChild(progFill);
-      body.append(title, meta, progWrap);
-
-      const right = document.createElement('div');
-      right.className = 'browser-scrape-actions';
-      const pct = document.createElement('span');
-      pct.className = 'browser-scrape-pct';
-      const dl = document.createElement('button');
-      dl.type = 'button';
-      dl.className = 'browser-scrape-dl';
-      dl.textContent = '⇩';
-      dl.title = 'Download to gallery/downloads';
-      const done = document.createElement('span');
-      done.className = 'browser-scrape-done';
-      right.append(pct, done, dl);
-
-      const rowRef = { fillEl: progFill, pctEl: pct, doneEl: done };
-      dl.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (dl.disabled) return;
-        dl.disabled = true;
-        const downloadId = `dl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        _scrapeRowsByDl.set(downloadId, rowRef);
-        _ensureScrapeProgressSubscribed();
-        pct.textContent = '0%';
-        try {
-          const r = await window.dash?.ytDownload?.({ url: v.url, downloadId });
-          if (r?.ok) {
-            done.classList.add('is-done');
-            done.textContent = '✓';
-            pct.textContent = '100%';
-            progFill.style.width = '100%';
-          } else {
-            done.classList.add('is-error');
-            done.textContent = '✕';
-            done.title = r?.error || 'download failed';
-          }
-        } catch (err) {
-          done.classList.add('is-error');
-          done.textContent = '✕';
-          done.title = err.message || 'download failed';
-        } finally {
-          dl.disabled = false;
-        }
-      });
-      li.append(thumb, body, right);
-      browserScrapeListEl.appendChild(li);
-    }
-  }
-  async function _runScrape() {
-    const tab = _browserActiveTab?.() || null;
-    const url = tab?.url || '';
-    if (!url || !/^https?:/i.test(url)) {
-      _setScrapeStatus('OPEN A WEB PAGE FIRST', 'error');
-      return;
-    }
-    _setScrapeStatus('SCANNING… (yt-dlp may take a minute on large channels)');
-    if (browserScrapeListEl) browserScrapeListEl.innerHTML = '';
-    if (browserScrapeDlAllBtn) browserScrapeDlAllBtn.hidden = true;
-    try {
-      const r = await window.dash?.ytScrapePage?.({ url, minDurationSec: 300 });
-      if (!r?.ok) {
-        _setScrapeStatus(`ERROR · ${r?.error || 'unknown'}`, 'error');
-        return;
-      }
-      if (!r.items?.length) {
-        _setScrapeStatus(r.note
-          ? `NO VIDEOS ≥ 5 MIN · ${r.note.slice(-160)}`
-          : 'NO VIDEOS ≥ 5 MIN FOUND ON THIS PAGE', 'warn');
-        return;
-      }
-      _setScrapeStatus('');
-      _renderScrapeList(r.items, true);
-    } catch (err) {
-      _setScrapeStatus(`ERROR · ${err.message || err}`, 'error');
-    }
-  }
-  function _browserOpenScrape() {
-    if (browserStageEl.dataset.mode === 'scrape') return;
-    browserStageEl.dataset.mode = 'scrape';
-    try { window.dash?.browserTabActivate?.(null); } catch {}
-    _runScrape();
-  }
-  function _browserCloseScrape() {
-    if (browserStageEl.dataset.mode !== 'scrape') return;
-    _browserApplyStageMode();
-  }
-  browserScrapeBtn?.addEventListener('click', _browserOpenScrape);
-  browserScrapeCloseBtn?.addEventListener('click', _browserCloseScrape);
-  browserScrapeDlAllBtn?.addEventListener('click', () => {
-    // Fire each row's download in sequence with a small stagger so yt-dlp
-    // doesn't get N parallel spawns racing for the same network.
-    const buttons = browserScrapeListEl?.querySelectorAll('.browser-scrape-dl:not(:disabled)');
-    if (!buttons || !buttons.length) return;
-    let i = 0;
-    const fire = () => {
-      if (i >= buttons.length) return;
-      buttons[i].click();
-      i += 1;
-      setTimeout(fire, 250);
-    };
-    fire();
-  });
-
-  // ── Browser opacity toggle (zen-mode see-through) ────────────────
-  // Mirrors the YT popout's OPAQUE / SEE THRU buttons. SEE THRU drops
-  // the active BV's page opacity to 0.4 + transparent BV background so
-  // the zen dashboard panels render through the dimmed page. OPAQUE
-  // restores the dark BV bg and pulls the injected CSS back out.
-  const browserOpaqueBtn   = document.getElementById('browser-opaque-btn');
-  const browserSeethruBtn  = document.getElementById('browser-seethru-btn');
-  function _browserSetOpacityState(opaque) {
-    browserOpaqueBtn?.classList.toggle('is-active',  opaque);
-    browserSeethruBtn?.classList.toggle('is-active', !opaque);
-  }
-  browserOpaqueBtn?.addEventListener('click', async () => {
-    try { await window.dash?.browserSetOpacity?.(1.0); } catch {}
-    _browserSetOpacityState(true);
-  });
-  browserSeethruBtn?.addEventListener('click', async () => {
-    try { await window.dash?.browserSetOpacity?.(0.4); } catch {}
-    _browserSetOpacityState(false);
-  });
-
-  // Clear-data — confirm, fire IPC, refresh history overlay if open.
-  // Keeps cookies + localStorage + IndexedDB on the main-side handler so
-  // active sign-ins survive the wipe. Cache + history + service workers
-  // + shader cache all go.
-  browserClearBtn?.addEventListener('click', async () => {
-    const ok = window.confirm('Clear cache and browsing history?\n\nSign-ins and saved logins will be kept.');
-    if (!ok) return;
-    try {
-      await window.dash?.browserClearData?.();
-      playSfx?.('confirm');
-    } catch (err) {
-      console.warn('[browser] clear-data failed:', err?.message || err);
-      playSfx?.('error');
-    }
-    if (browserStageEl.dataset.mode === 'history') _browserRenderHistory();
-  });
-
-  // Splash forms.
-  browserSplashAddrFormEl?.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const url = _browserNormalizeUrl(browserSplashAddrEl.value);
-    if (url) { _browserNavigateActive(url); browserSplashAddrEl.value = ''; }
-  });
-  browserSplashSearchFormEl?.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const q = browserSplashSearchEl.value.trim();
-    if (q) { _browserSearchActive(q, _browserState.searchKind); browserSplashSearchEl.value = ''; }
-  });
-  // Result-type filter chips (ALL · IMAGES · VIDEOS · LINKS · NEWS).
-  // Live on the results header — splash always starts as 'web'. Clicking
-  // a chip re-runs the active tab's query with the new kind so the user
-  // can pivot from a web search into image / video results without
-  // retyping. LINKS and NEWS currently fall back to 'web' on the
-  // backend but ship the kind through so a future provider can pick
-  // them up without renderer changes.
-  for (const btn of document.querySelectorAll('.browser-results-filter')) {
-    btn.addEventListener('click', () => {
-      const kind = btn.dataset.kind || 'web';
-      for (const b of document.querySelectorAll('.browser-results-filter')) {
-        b.classList.toggle('is-active', b === btn);
-      }
-      _browserState.searchKind = kind;
-      const t = _browserActiveTab?.();
-      if (t && t.query) {
-        _browserSearchActive(t.query, kind);
-      }
-    });
-  }
-
-  // Live ad-block + image-block counts from main process. Throttled to
-  // 4 Hz over IPC. The image counter exists so reader-mode users can
-  // verify the filter is actually firing — if the number goes up after
-  // toggling on, the block is working.
-  try {
-    window.dash?.onBrowserStats?.((data) => {
-      if (data && typeof data.adsBlocked    === 'number') _browserState.adsBlocked    = data.adsBlocked;
-      if (data && typeof data.imagesBlocked === 'number') _browserState.imagesBlocked = data.imagesBlocked;
-      if (data && typeof data.popupsBlocked === 'number') _browserState.popupsBlocked = data.popupsBlocked;
-      _browserRenderSplashStats();
-    });
-  } catch {}
-
-  // Popup → new tab. Main fires this whenever a page tries to open a
-  // separate window/popup (covers target=_blank, window.open, popups
-  // from iframes like Google sign-in). Spawn a fresh tab in our chrome
-  // and navigate it to the requested URL, so the user's current page
-  // stays where it was.
-  try {
-    window.dash?.onBrowserNewTabRequest?.((url) => {
-      if (url) _browserNewTab(url);
-    });
-  } catch {}
-
-
-  // Restore persisted mode + explore-tab.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    setExploreTab(cfg.exploreTab || 'gallery', false);
     setComboMode(cfg.comboMode || 'notes', false);
   })();
 }
@@ -10918,49 +5710,34 @@ staggerStrobeAll();
   }
   const cfg = await window.dash.getConfig();
 
-  // Startup layout: every panel drag/resize already writes to
-  // cfg.panelSizes via savePanelSize, so the last-session arrangement is
-  // already on disk by the time we get here. Restore each panel inline
-  // from that map. If cfg.panelSizes is empty (fresh install with a
-  // wiped config), fall through to applySideArrange — the grid-aligned
-  // baseline that seeds initial positions on first launch.
-  const _savedPanelSizes = (cfg?.panelSizes && typeof cfg.panelSizes === 'object') ? cfg.panelSizes : null;
-  const _hasSavedPanels = _savedPanelSizes && Object.keys(_savedPanelSizes).length > 0;
-  if (_hasSavedPanels) {
-    requestAnimationFrame(() => {
-      for (const panel of document.querySelectorAll('.panel')) {
-        const key = panelKey(panel);
-        if (key && _savedPanelSizes[key]) applyPanelSize(panel, _savedPanelSizes[key]);
-      }
-      // Panels are positioned — recompute the combo's collapsed-mode
-      // fold bounds from the live side-panel rects so a saved-collapsed
-      // combo doesn't sit at the CSS fallback (480/600), which overlapped
-      // the chrono panel by ~70 px on boot.
-      _updateComboFoldBoundsRef?.();
-      // Positions are now committed — release the boot-flicker gate so
-      // panels become visible at their final coords rather than at their
-      // CSS-grid positions.
-      _startBootFlicker();
-    });
-  } else {
-    requestAnimationFrame(async () => {
-      await applySideArrange();
-      _updateComboFoldBoundsRef?.();
-      _startBootFlicker();
-    });
-  }
+  // Startup layout: apply the canonical layout (STARTUP_LAYOUT) scaled to
+  // the CURRENT viewport, so the dashboard boots into the exact same
+  // arrangement, proportionally filled to whatever screen it is on. The
+  // auto-orient button re-runs the identical thing on demand.
+  requestAnimationFrame(async () => {
+    await applyStartupLayout();
+    // Panels are positioned — recompute the combo's collapsed-mode fold
+    // bounds from the live side-panel rects, then release the boot-flicker
+    // gate so panels appear at their final coords.
+    _updateComboFoldBoundsRef?.();
+    _startBootFlicker();
+  });
 
   // Theme: keep the saved slug only if it's still a known palette;
   // older configs that referenced deleted palette names fall back to
   // null and get cleared so the next launch starts clean.
   const savedTheme = cfg?.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : null;
   setUserTheme(savedTheme);
-  _themeSetPickerActive(savedTheme);
+  _themeUpdateCatButtons(savedTheme || '');
   if (cfg?.theme && !savedTheme) {
     try { window.dash?.setConfig?.({ theme: null }); } catch {}
   }
-  // Restore auto-cycle state. setThemeAuto starts the 20s interval.
-  if (cfg?.themeAuto) setThemeAuto(true);
+  // Auto-cycle was retired along with its topbar button — the category
+  // buttons are now the only theme control. Clear any stale themeAuto
+  // flag so an old config doesn't silently rotate themes.
+  if (cfg?.themeAuto) {
+    try { window.dash?.setConfig?.({ themeAuto: false }); } catch {}
+  }
   // Restore background pattern (defaults to 'grid' if missing/invalid).
   setBgPattern(cfg?.bgPattern || 'grid');
   const bgBtn = document.getElementById('bg-pattern-btn');
@@ -11139,13 +5916,80 @@ document.querySelector('#recall-panels-btn')?.addEventListener('click', async ()
 });
 
 // Auto-orient — re-runs applySideArrange against the current viewport.
-// Same layout the dashboard ships with on first launch (panels on the
-// left/right, productivity centered, audio at the bottom), recomputed
-// to fit whatever window/display size the user is on right now. By
-// design no panel can overlap because stackColumn floor-snaps each
-// slot height to fit the column with gaps between siblings.
+// ── CANONICAL LAYOUT ─────────────────────────────────────────────────────
+// applyStartupLayout tiles the panels GAPLESSLY across the whole viewport:
+// two side columns flush to the left/right screen edges, the PRODUCTIVITY
+// panel filling the middle, every panel flush against its neighbour (zero
+// gaps), and the audio visualizers as an equal-height strip flush at the
+// bottom of each column. It is fully computed, so it tiles perfectly at any
+// screen size / aspect ratio. Both startup and the auto-orient button run it.
+async function applyStartupLayout() {
+  const vpW = window.innerWidth;
+  const vpH = window.innerHeight;
+  // Panels start flush below the fixed topbar.
+  const topbar = document.querySelector('.topbar-controls');
+  const top = topbar ? Math.round(topbar.getBoundingClientRect().bottom) : 0;
+  const availH = vpH - top;
+
+  // Side columns: ~21% of the width each, flush to the screen edges;
+  // PRODUCTIVITY fills the middle. No outer margins, no column gaps.
+  const colW    = Math.round(vpW * 0.211);
+  const centerW = vpW - colW * 2;
+  const leftX   = 0;
+  const rightX  = vpW - colW;
+
+  // The audio visualizers share an equal-height strip reserved at the
+  // column bottoms. The rest of the height is split among the stacked
+  // panels by weight (keeps the designed look — clock taller, etc.) with
+  // zero gaps, so each column fills top-to-bottom exactly.
+  const audioH    = Math.round(availH * 0.11);
+  const panelArea = availH - audioH;
+  const audioY    = top + panelArea;
+
+  const leftPanels  = [['clock', 380], ['cpu', 260], ['network', 220], ['ram', 240]];
+  const rightPanels = [['weather', 240], ['thermal', 300], ['gpu', 250], ['storage', 240], ['driveio', 260]];
+
+  const placePanel = async (key, x, y, w, h) => {
+    const panel = document.querySelector(`.panel-${key}`);
+    if (!panel) return;
+    clearPanelSize(panel);
+    applyPanelSize(panel, { x, y, width: w, height: h });
+    await savePanelSize(key, { x, y, width: w, height: h });
+  };
+  const placeAudio = async (side, x, y, w, h) => {
+    const viz = side === 'in' ? audioInViz : audioOutViz;
+    viz?.applySavedGeom?.({ x, y }, { width: w, height: h });
+    if (window.dash?.setConfig) {
+      const posKey = side === 'in' ? 'audioInPos' : 'audioOutPos';
+      try { await window.dash.setConfig({ [posKey]: { x, y }, audioVizSize: { width: w, height: h } }); } catch {}
+    }
+  };
+  // Stack a column's panels flush, from the topbar down to the audio strip.
+  const stackPanels = async (panels, x) => {
+    const total = panels.reduce((s, [, wt]) => s + wt, 0);
+    let y = top;
+    for (let i = 0; i < panels.length; i++) {
+      const [key, wt] = panels[i];
+      // Last panel takes the exact remainder so the stack ends on audioY
+      // with no rounding drift.
+      const h = (i === panels.length - 1) ? (audioY - y) : Math.round((wt / total) * panelArea);
+      await placePanel(key, x, y, colW, h);
+      y += h;
+    }
+  };
+
+  await placePanel('combo', colW, top, centerW, availH);
+  await stackPanels(leftPanels,  leftX);
+  await stackPanels(rightPanels, rightX);
+  await placeAudio('in',  leftX,  audioY, colW, audioH);
+  await placeAudio('out', rightX, audioY, colW, audioH);
+}
+
+// Auto-orient / "organize" button — re-applies STARTUP_LAYOUT scaled to the
+// current viewport. Always restores the exact canonical arrangement, filled
+// to the screen, with no overlaps.
 document.querySelector('#auto-orient-btn')?.addEventListener('click', async () => {
-  try { await applySideArrange(); } catch (err) { console.warn('[auto-orient] failed:', err); }
+  try { await applyStartupLayout(); } catch (err) { console.warn('[auto-orient] failed:', err); }
   playSfx('confirm');
 });
 
@@ -11610,6 +6454,150 @@ document.querySelector('#sleep-btn')?.addEventListener('click', async () => {
     btn?.classList.remove('is-busy');
   }
 });
+
+// ── SYSTEM TRIM (service sweep) ──────────────────────────────────────────
+// Feature lives in features/trim.js — wired up here with the renderer
+// helpers it needs (playSfx). See that module for the modal logic.
+initTrim({ playSfx });
+
+// ── APP LAUNCHER + POWER MENU (appliance) ────────────────────────────────
+// Feature lives in features/launcher.js — the topbar #launcher-btn pins/
+// starts other programs, #power-btn does poweroff/restart/sleep. Built for
+// the appliance build where the dashboard is the shell.
+initLauncher({ playSfx });
+
+// ── POWER/THERMAL PROFILE (appliance fan control) ────────────────────────
+// Profile selector in the thermal panel. Clicks are handled by a single
+// capture-phase listener on the document — the per-button listeners used
+// before were dead on the appliance; a capture-phase document listener
+// fires before anything downstream can swallow the event.
+async function initThermalProfile() {
+  const wrap = document.getElementById('thermal-profile');
+  const btns = document.getElementById('thermal-profile-btns');
+  if (!wrap || !btns || !window.dash?.fansGetProfile) return;
+  let info = null;
+  try { info = await window.dash.fansGetProfile(); } catch {}
+  if (!info?.ok || !Array.isArray(info.choices) || !info.choices.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  let status = wrap.querySelector('.thermal-profile-status');
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'thermal-profile-status';
+    wrap.appendChild(status);
+  }
+  const render = (current) => {
+    btns.innerHTML = '';
+    for (const choice of info.choices) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'thermal-profile-btn' + (choice === current ? ' is-active' : '');
+      b.textContent = choice;
+      b.dataset.profile = choice;
+      btns.appendChild(b);
+    }
+  };
+  const applyProfile = async (choice) => {
+    playSfx?.('click');
+    status.textContent = `${choice} …`;
+    try {
+      const r = await window.dash.fansSetProfile(choice);
+      if (r?.ok) { render(r.current); playSfx?.('click'); }
+      else playSfx?.('error');
+      const parts = [`${choice} -> ${r?.current ?? '?'}`];
+      if (Array.isArray(r?.steps) && r.steps.length) parts.push(r.steps.join(' · '));
+      if (r?.error) parts.push(`ERR ${r.error}`);
+      status.textContent = parts.join('  |  ');
+    } catch (e) {
+      playSfx?.('error');
+      status.textContent = `${choice} -> exception ${e?.message || e}`;
+    }
+  };
+  document.addEventListener('click', (ev) => {
+    const b = ev.target?.closest?.('.thermal-profile-btn');
+    if (b && btns.contains(b)) applyProfile(b.dataset.profile);
+  }, true);
+  render(info.current);
+}
+initThermalProfile();
+
+// Hardware/thermal diagnostic — "HW DIAG" button in the thermal panel.
+// Click handled via capture-phase document delegation (see above).
+async function initHwDiag() {
+  const wrap = document.getElementById('thermal-hwdiag');
+  const btn = document.getElementById('hwdiag-btn');
+  const out = document.getElementById('hwdiag-out');
+  if (!wrap || !btn || !out || !window.dash?.hwDiag) return;
+  let probe = null;
+  try { probe = await window.dash.hwDiag(); } catch {}
+  if (!probe?.ok || /linux appliance only/.test(probe.report || '')) return;
+  wrap.hidden = false;
+  document.addEventListener('click', async (ev) => {
+    if (!ev.target?.closest?.('#hwdiag-btn')) return;
+    playSfx?.('click');
+    if (!out.hidden) { out.hidden = true; return; }
+    out.textContent = 'reading hardware …';
+    out.hidden = false;
+    try {
+      const r = await window.dash.hwDiag();
+      out.textContent = r?.ok ? r.report : ('hw-diag failed: ' + (r?.error || '?'));
+    } catch (e) {
+      out.textContent = 'hw-diag exception: ' + (e?.message || e);
+    }
+  }, true);
+}
+initHwDiag();
+
+// ── GAME MODE ────────────────────────────────────────────────────────────
+// Topbar button: quits the dashboard to a Steam Big Picture (gamescope)
+// session on the Linux appliance. The session script loops back to the
+// dashboard when Steam exits. Capture-phase delegation, like the thermal
+// buttons (direct listeners proved unreliable under gamescope).
+function initGameMode() {
+  const btn = document.getElementById('gamemode-btn');
+  if (!btn) return;
+  // Big unmissable status overlay so the hand-off is visible: if it never
+  // appears the click is not reaching #gamemode-btn; if it appears but the
+  // screen stays, the app failed to quit.
+  const showOverlay = (msg, dismissable) => {
+    let ov = document.getElementById('gamemode-overlay-msg');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'gamemode-overlay-msg';
+      ov.style.cssText =
+        'position:fixed;inset:0;z-index:2147483646;background:#000;' +
+        'color:#39ff14;font:bold 22px/1.6 monospace;white-space:pre-wrap;' +
+        'display:flex;align-items:center;justify-content:center;text-align:center;padding:6vw;';
+      document.body.appendChild(ov);
+    }
+    ov.textContent = msg;
+    ov.onclick = dismissable ? () => ov.remove() : null;
+  };
+  document.addEventListener('click', async (ev) => {
+    if (!ev.target?.closest?.('#gamemode-btn')) return;
+    showOverlay('ENTERING GAME MODE\nhanding off to Steam …', false);
+    playSfx?.('click');
+    if (!window.dash?.enterGameMode) {
+      showOverlay('Game Mode: the enterGameMode bridge is missing.\n\n(tap to dismiss)', true);
+      return;
+    }
+    try {
+      const r = await window.dash.enterGameMode();
+      if (r?.ok) {
+        showOverlay('GAME MODE ARMED\nquitting to Steam …\n\n(if this screen stays, the app could not quit)', false);
+      } else {
+        showOverlay('Game Mode failed:\n' + (r?.error || 'unknown') + '\n\n(tap to dismiss)', true);
+        playSfx?.('error');
+      }
+    } catch (e) {
+      showOverlay('Game Mode exception:\n' + (e?.message || e) + '\n\n(tap to dismiss)', true);
+      playSfx?.('error');
+    }
+  }, true);
+}
+initGameMode();
 
 // ── TASKS pane (process / service monitor) ───────────────────────────────
 // Combo-pane mode 'tasks' surfaces app.getAppMetrics() from main: every
@@ -12468,6 +7456,39 @@ profilePicEl?.addEventListener('click', () => {
   _picPickerOpen();
   playSfx?.('click');
 });
+// Camera ON/OFF toggle chip on the profile pic. Top-right corner,
+// visible on hover (camera off) or always (camera live). Toggles
+// the dashboard's webcam — the same helpers Discord camera-state
+// uses, so visual state stays consistent across both entry points.
+// stopPropagation so we don't fall through to the picker handler.
+const profilePicCamToggleBtn = document.getElementById('profile-pic-camera-toggle');
+profilePicCamToggleBtn?.addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  // _webcamStream is module-scope in this file; reads the truthy
+  // stream as "camera is live right now". Toggle accordingly.
+  if (_webcamStream) {
+    if (typeof stopWebcam === 'function') stopWebcam();
+    // If Discord drove the cam, clear that flag so when Discord
+    // turns off later we don't try to stop an already-stopped cam.
+    _discordDroveWebcam = false;
+  } else {
+    if (typeof startWebcam === 'function') startWebcam().catch?.(() => {});
+  }
+  playSfx?.('click');
+});
+
+// Cycle-cameras chip overlaid on the profile pic. Visible only when
+// the parent has .is-live (webcam stream is attached). Click swaps
+// to the next camera device via the existing cycleCamera() helper.
+// stopPropagation prevents the parent's picker handler from firing.
+const profilePicCycleBtn = document.getElementById('profile-pic-cycle');
+profilePicCycleBtn?.addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  if (typeof cycleCamera === 'function') {
+    cycleCamera().catch?.(() => {});
+  }
+  playSfx?.('click');
+});
 picPickerClose?.addEventListener('click', _picPickerClose);
 picPickerOverlay?.addEventListener('click', (e) => {
   // Click on the dim backdrop (not the card) to close.
@@ -12542,8 +7563,11 @@ document.querySelector('#sfx-btn')?.addEventListener('click', async () => {
 })();
 
 // ── Themes / display toggles ────────────────────────────────────────────────
-// Default palette + one Cyberpunk section (4 variants). Pretty labels for
-// the topbar chip — the slug (data-theme value) is what gets persisted.
+// Default palette plus the Cyberpunk · Pastel · Muted · Retro · E-Ink
+// sections. Pretty labels for the topbar chip — the slug (data-theme
+// value) is what gets persisted. Retro and E-Ink are structural themes
+// (a `body[data-theme^="..."]` block in styles.css adds/strips chrome),
+// the rest are pure palette swaps.
 const THEME_LABELS = {
   '':             'DEFAULT',
   'cyber-neon':     'CYBER · NEON',
@@ -12567,7 +7591,6 @@ const THEME_LABELS = {
   'earth-sand':    'MUTED · SAND',
   'earth-stone':   'MUTED · STONE',
   'earth-paper':   'MUTED · PAPER',
-  'earth-eink':    'MUTED · EINK',
   'earth-sepia':   'MUTED · SEPIA',
   'earth-charcoal':'MUTED · CHARCOAL',
   'retro':         'RETRO · AMBER',
@@ -12581,10 +7604,23 @@ const THEME_LABELS = {
   'retro-violet':  'RETRO · VIOLET',
   'retro-gold':    'RETRO · GOLD',
   'retro-ice':     'RETRO · ICE',
+  'matte-carbon':   'MATTE · CARBON',
+  'matte-tide':     'MATTE · TIDE',
+  'matte-clay':     'MATTE · CLAY',
+  'matte-orchid':   'MATTE · ORCHID',
+  'matte-ember':    'MATTE · EMBER',
+  'matte-denim':    'MATTE · DENIM',
+  'matte-fern':     'MATTE · FERN',
+  'matte-haze':     'MATTE · HAZE',
 };
 const THEME_SLUGS = new Set(Object.keys(THEME_LABELS).filter(Boolean));
-// Cycle order — default first, then walks every section in dropdown order.
-const THEME_CYCLE = ['', ...Object.keys(THEME_LABELS).filter(Boolean)];
+// Theme categories — every non-matte palette is "CYBER" (the default cyan
+// included), the matte-* palettes are "MATTE". The topbar exposes one button
+// per category plus a cycle button that steps colours within whichever
+// category is active. CYBER_THEMES keeps '' first so CYBER → default cyan.
+const CYBER_THEMES = Object.keys(THEME_LABELS).filter((k) => !k.startsWith('matte'));
+const MATTE_THEMES = Object.keys(THEME_LABELS).filter((k) => k.startsWith('matte'));
+const themeCategory = (slug) => ((slug || '').startsWith('matte') ? 'matte' : 'cyber');
 
 const themeNameEl = document.querySelector('#theme-name');
 function applyTheme(name) {
@@ -12623,53 +7659,64 @@ if (typeof navigator !== 'undefined' && navigator.onLine === false) {
 
 function applyInvert(on) {
   document.body.classList.toggle('theme-invert', !!on);
+  // The body filter can't reach the native BrowserView embeds (Discord /
+  // Facebook / browser tabs) — main mirrors the invert into each of them.
+  try { window.dash?.setEmbedInvert?.(!!on); } catch {}
 }
 
-// Theme picker — a small dropdown attached to the topbar #theme-btn. Each
-// .theme-menu-item carries the slug in data-theme-pick (empty string for
-// the default palette). Document-level click closes the menu when the
-// user clicks anywhere else.
-const themePickerEl  = document.getElementById('theme-picker');
-const themeTriggerEl = document.getElementById('theme-name');   // doubles as label + dropdown trigger
-const themeMenuEl    = document.getElementById('theme-menu');
-const themeAutoBtnEl = document.getElementById('theme-auto-btn');
+// Theme picker — two category buttons (CYBER · MATTE) plus a colour cycle
+// button. Clicking a category applies the variant last used in it; the
+// cycle button steps through that category's colours. The active slug
+// persists as cfg.theme; cfg.themeLastCyber / cfg.themeLastMatte remember
+// the per-category variant so switching back returns where you left off.
+const themeCyberBtn = document.getElementById('theme-cat-cyber');
+const themeMatteBtn = document.getElementById('theme-cat-matte');
 
-function _themeSetPickerActive(name) {
-  if (!themeMenuEl) return;
-  const slug = name || '';
-  themeMenuEl.querySelectorAll('.theme-menu-item').forEach((b) => {
-    b.classList.toggle('is-active', (b.dataset.themePick || '') === slug);
-  });
+function _themeUpdateCatButtons(slug) {
+  const cat = themeCategory(slug);
+  themeCyberBtn?.classList.toggle('is-active', cat === 'cyber');
+  themeMatteBtn?.classList.toggle('is-active', cat === 'matte');
 }
 
-function _themeOpenMenu(open) {
-  if (!themeMenuEl || !themeTriggerEl) return;
-  themeMenuEl.hidden = !open;
-  themeTriggerEl.setAttribute('aria-expanded', open ? 'true' : 'false');
-}
-
-themeTriggerEl?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  _themeOpenMenu(themeMenuEl?.hidden);
-  playSfx?.('click');
-});
-
-// Cycle button — next theme in THEME_CYCLE, persists. Wraps at end.
-async function advanceTheme(step = 1) {
-  const cfg = (await window.dash?.getConfig?.()) || {};
-  const cur = cfg.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : '';
-  const idx = THEME_CYCLE.indexOf(cur);
-  const len = THEME_CYCLE.length;
-  const next = THEME_CYCLE[((idx + step) % len + len) % len];
-  const slug = next || null;
-  setUserTheme(slug);
-  _themeSetPickerActive(slug);
+// Apply a theme slug, persist it, and remember it as the last-used
+// variant of its category. '' / null / unknown = the default palette.
+async function setTheme(slug) {
+  const norm    = THEME_SLUGS.has(slug) ? slug : '';
+  const useSlug = norm || null;
+  setUserTheme(useSlug);
+  _themeUpdateCatButtons(norm);
   if (window.dash?.setConfig) {
-    try { await window.dash.setConfig({ theme: slug }); } catch {}
+    const patch = { theme: useSlug };
+    patch[themeCategory(norm) === 'matte' ? 'themeLastMatte' : 'themeLastCyber'] = useSlug;
+    try { await window.dash.setConfig(patch); } catch {}
   }
+}
+
+// Category button — jump to the variant last used in that category
+// (its first colour if none has been used yet).
+async function selectThemeCategory(cat) {
+  const cfg  = (await window.dash?.getConfig?.()) || {};
+  const list = cat === 'matte' ? MATTE_THEMES : CYBER_THEMES;
+  let slug = cat === 'matte' ? cfg.themeLastMatte : cfg.themeLastCyber;
+  if (slug == null || !list.includes(slug)) slug = list[0];
+  await setTheme(slug);
+  playSfx?.('confirm');
+}
+themeCyberBtn?.addEventListener('click', () => selectThemeCategory('cyber'));
+themeMatteBtn?.addEventListener('click', () => selectThemeCategory('matte'));
+
+// Cycle button — next colour within the active category, wraps at the end.
+async function cycleThemeColor(step = 1) {
+  const cfg  = (await window.dash?.getConfig?.()) || {};
+  const cur  = cfg.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : '';
+  const list = themeCategory(cur) === 'matte' ? MATTE_THEMES : CYBER_THEMES;
+  let idx = list.indexOf(cur);
+  if (idx < 0) idx = 0;
+  const len = list.length;
+  await setTheme(list[((idx + step) % len + len) % len]);
   playSfx?.('click');
 }
-document.querySelector('#theme-cycle-btn')?.addEventListener('click', () => advanceTheme(1));
+document.querySelector('#theme-cycle-btn')?.addEventListener('click', () => cycleThemeColor(1));
 
 // Background pattern cycle — one button steps through the 8 variants.
 // Default is 'grid' (no data attribute needed but kept explicit so the
@@ -12706,45 +7753,6 @@ document.getElementById('bg-pattern-btn')?.addEventListener('click', () => cycle
 // Clamped to 10–200 Hz inside stepHz(). Persisted via cfg.audioFrameMs.
 document.querySelector('#hz-down')?.addEventListener('click', () => { stepHz(-5); playSfx?.('click'); });
 document.querySelector('#hz-up')?.addEventListener('click',   () => { stepHz(+5); playSfx?.('click'); });
-
-// Auto-cycle — flip to the next theme every 20s when active. Persisted
-// across launches as cfg.themeAuto so users opt in once.
-const THEME_AUTO_MS = 20000;
-let _themeAutoTimer = null;
-function setThemeAuto(on) {
-  themeAutoBtnEl?.classList.toggle('is-active', !!on);
-  if (_themeAutoTimer) { clearInterval(_themeAutoTimer); _themeAutoTimer = null; }
-  if (on) _themeAutoTimer = setInterval(() => advanceTheme(1), THEME_AUTO_MS);
-}
-themeAutoBtnEl?.addEventListener('click', async () => {
-  const cfg  = (await window.dash?.getConfig?.()) || {};
-  const next = !cfg.themeAuto;
-  setThemeAuto(next);
-  if (window.dash?.setConfig) {
-    try { await window.dash.setConfig({ themeAuto: next }); } catch {}
-  }
-  playSfx?.('click');
-});
-themeMenuEl?.addEventListener('click', async (e) => {
-  const btn = e.target.closest?.('.theme-menu-item');
-  if (!btn) return;
-  const slug = btn.dataset.themePick || '';
-  const next = slug || null;
-  setUserTheme(next);
-  _themeSetPickerActive(next);
-  _themeOpenMenu(false);
-  if (window.dash?.setConfig) {
-    try { await window.dash.setConfig({ theme: next }); } catch {}
-  }
-  playSfx?.('confirm');
-});
-// Click-outside-to-close. Single document handler; the button's own
-// click stops propagation above so it doesn't immediately re-close.
-document.addEventListener('click', (e) => {
-  if (!themeMenuEl || themeMenuEl.hidden) return;
-  if (themePickerEl?.contains(e.target)) return;
-  _themeOpenMenu(false);
-});
 
 // ── UI font cycle ───────────────────────────────────────────────
 // Each entry maps to a body class (or null = default Rajdhani+Tech-Mono)
@@ -12901,8 +7909,6 @@ if (topbarEl) {
     topbarEl.appendChild(frag);
   })();
 }
-
-// setThemeAuto is defined above with the rest of the theme-picker wiring.
 
 document.querySelector('#invert-btn')?.addEventListener('click', async () => {
   const cfg = (await window.dash?.getConfig?.()) || {};
@@ -13700,5777 +8706,485 @@ zenBtnEl?.addEventListener('click', (e) => {
   setTimeout(() => { _zenForceArming = false; }, 1000);
 });
 
-// ── §bgm ── BACKGROUND MUSIC ────────────────────────────────────────
-// Procedural Web Audio synthesis. Each genre is a small "patch" that
-// schedules notes on a shared step clock. Plunder-core is currently the
-// only genre — sampled-flavoured chopped hits over a low drone bass and
-// long pad swells. Loops forever (no fixed song length, no fade-out).
-// Audio is fully synthesized at runtime; no files shipped or streamed.
-{
-  const bgmPlayBtn   = document.getElementById('bgm-play-btn');
-  const bgmVolEl     = document.getElementById('bgm-volume');
-  const bgmVolValEl  = document.getElementById('bgm-volume-val');
-  const bgmNowEl     = document.getElementById('bgm-now');
-  const bgmGenresEl  = document.getElementById('bgm-genres');
-  const bgmTracksEl  = document.getElementById('bgm-tracks');
-  const bgmMeterEl   = document.getElementById('bgm-meter');
-  window._bgmState = window._bgmState || {
-    playing: false,
-    genre: 'plundercore',
-    trackId: null,        // resolved to first track of current genre when null
-    volume: 0.35,
-  };
-  let _bgmCtx = null;
-  let _bgmMaster = null;
-  let _bgmAnalyser = null;
-  let _bgmSchedTimer = null;
-  let _bgmStep = 0;
-  let _bgmNextStepTime = 0;
-  let _bgmMeterRaf = 0;
-  // Auto-cycle to the next track in the current genre every N ms while
-  // playback is active. Resets on manual prev/next/genre switch (since
-  // _bgmStart re-arms it). 5 minutes per track keeps long sessions
-  // varied without churning the catalog too fast.
-  let _bgmCycleTimer = null;
-  const BGM_AUTOCYCLE_MS = 5 * 60 * 1000;
+// ── §bgm ── BACKGROUND MUSIC ────────────────────────────────────────────
+// Lazy combo pane — code lives in features/music.js, loaded on first open
+// by activateLazyPane(). Exposes window._bgmState (for paintComboHeader)
+// and window._bgmMaybeStartMeter (for setComboMode).
 
-  // Lazily create the AudioContext on first play (browsers require a
-  // user gesture to unlock audio). Master gain → soft limiter → analyser
-  // (for the meter) → destination. The limiter catches transient spikes
-  // from overlapping chops so we don't clip.
-  function _bgmEnsureCtx() {
-    if (_bgmCtx) return _bgmCtx;
-    _bgmCtx = new (window.AudioContext || window.webkitAudioContext)();
-    _bgmMaster = _bgmCtx.createGain();
-    _bgmMaster.gain.value = window._bgmState.volume;
-    const limiter = _bgmCtx.createDynamicsCompressor();
-    limiter.threshold.value = -6;
-    limiter.knee.value = 6;
-    limiter.ratio.value = 12;
-    limiter.attack.value = 0.003;
-    limiter.release.value = 0.25;
-    _bgmAnalyser = _bgmCtx.createAnalyser();
-    // 1024 fftSize → 512 frequency bins. Plenty of headroom for the
-    // dynamic bar count to subdivide without each bar reading a single
-    // bin (which causes "comb" artifacts where adjacent bars carry
-    // wildly different values).
-    _bgmAnalyser.fftSize = 1024;
-    _bgmAnalyser.smoothingTimeConstant = 0.6;
-    _bgmMaster.connect(limiter).connect(_bgmAnalyser).connect(_bgmCtx.destination);
-    return _bgmCtx;
-  }
-
-  // ADSR-shaped oscillator one-shot. Optional biquad filter and stereo
-  // pan in the chain. Used by every track patch.
-  function _bgmPlayTone(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const osc = ctx.createOscillator();
-    osc.type = opts.type || 'triangle';
-    osc.frequency.value = freq;
-    if (opts.detune) osc.detune.value = opts.detune;
-    const env = ctx.createGain();
-    const peak = opts.peak ?? 0.4;
-    const attack = opts.attack ?? 0.005;
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + attack);
-    env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-    let tail = osc;
-    if (opts.filter) {
-      const f = ctx.createBiquadFilter();
-      f.type = opts.filter.type || 'lowpass';
-      f.frequency.value = opts.filter.freq || 1200;
-      f.Q.value = opts.filter.q || 0.7;
-      osc.connect(f);
-      tail = f;
-    }
-    tail.connect(env);
-    let outNode = env;
-    if (typeof opts.pan === 'number' && opts.pan !== 0) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = Math.max(-1, Math.min(1, opts.pan));
-      env.connect(p);
-      outNode = p;
-    }
-    outNode.connect(_bgmMaster);
-    osc.start(at);
-    osc.stop(at + dur + 0.05);
-  }
-
-  // Filtered short noise burst — used for hi-hats, plastic snaps, and
-  // chop bodies. opts.type = 'highpass' | 'bandpass' | 'lowpass'.
-  function _bgmPlayNoise(at, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const bufSize = Math.max(1, Math.floor(ctx.sampleRate * dur));
-    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-    const cd = buf.getChannelData(0);
-    for (let i = 0; i < bufSize; i++) cd[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const f = ctx.createBiquadFilter();
-    f.type = opts.filterType || 'bandpass';
-    f.frequency.value = opts.freq || 4000;
-    f.Q.value = opts.q || 2;
-    const env = ctx.createGain();
-    const peak = opts.peak ?? 0.3;
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + 0.005);
-    env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-    src.connect(f).connect(env);
-    let outNode = env;
-    if (typeof opts.pan === 'number' && opts.pan !== 0) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = Math.max(-1, Math.min(1, opts.pan));
-      env.connect(p);
-      outNode = p;
-    }
-    outNode.connect(_bgmMaster);
-    src.start(at);
-  }
-
-  // Kick — short pitched sine sweep from "start" Hz down to "end" Hz,
-  // very fast attack. Used by synthwave and lo-fi rhythmic patches.
-  function _bgmPlayKick(at, opts = {}) {
-    const ctx = _bgmCtx;
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(opts.start ?? 130, at);
-    osc.frequency.exponentialRampToValueAtTime(opts.end ?? 38, at + (opts.sweep ?? 0.09));
-    const env = ctx.createGain();
-    const peak = opts.peak ?? 0.55;
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + 0.004);
-    env.gain.exponentialRampToValueAtTime(0.001, at + (opts.dur ?? 0.32));
-    osc.connect(env).connect(_bgmMaster);
-    osc.start(at);
-    osc.stop(at + (opts.dur ?? 0.35));
-  }
-  // Snare — bandpassed noise + short pitched body. Brushed variant uses
-  // a longer dur for the swept "brush" feel.
-  function _bgmPlaySnare(at, opts = {}) {
-    _bgmPlayNoise(at, opts.dur ?? 0.13, {
-      filterType: 'bandpass', freq: opts.freq ?? 1800, q: 1.4,
-      peak: opts.peak ?? 0.22, pan: opts.pan ?? 0,
-    });
-    _bgmPlayTone(at, 200, 0.07, {
-      type: 'triangle', peak: 0.12,
-      filter: { type: 'lowpass', freq: 900, q: 0.8 },
-    });
-  }
-  // FM "bell" — sine carrier modulated by a sine modulator. Gives the
-  // glassy / chime-like timbre central to several vaporwave patches.
-  function _bgmPlayFmBell(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const carrier = ctx.createOscillator();
-    carrier.type = 'sine';
-    carrier.frequency.value = freq;
-    const modulator = ctx.createOscillator();
-    modulator.type = 'sine';
-    modulator.frequency.value = freq * (opts.ratio ?? 2.01);
-    const modGain = ctx.createGain();
-    modGain.gain.value = (opts.modDepth ?? 200);
-    modulator.connect(modGain).connect(carrier.frequency);
-    const env = ctx.createGain();
-    const peak = opts.peak ?? 0.2;
-    const attack = opts.attack ?? 0.005;
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + attack);
-    env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-    carrier.connect(env);
-    let outNode = env;
-    if (typeof opts.pan === 'number' && opts.pan !== 0) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = opts.pan;
-      env.connect(p);
-      outNode = p;
-    }
-    outNode.connect(_bgmMaster);
-    carrier.start(at);
-    modulator.start(at);
-    carrier.stop(at + dur + 0.05);
-    modulator.stop(at + dur + 0.05);
-  }
-
-  // ── §plunder-core ── single track: "CORE LOOP" ────────────────────
-  // Sampled-flavoured chopped hits over wandering bass + pad swells.
-  const PLUNDERCORE_BASS_NOTES  = [55, 55, 73.42, 65.41, 55, 49, 61.74, 55];
-  const PLUNDERCORE_PAD_NOTES   = [220, 261.63, 329.63, 392];
-  const PLUNDERCORE_CHOP_NOTES  = [440, 523.25, 659.25, 783.99, 880];
-  function _bgmSchedulePlunderCoreLoop(step, at) {
-    if (step % 4 === 0) {
-      _bgmPlayTone(at, PLUNDERCORE_BASS_NOTES[(step / 4) % PLUNDERCORE_BASS_NOTES.length], 0.45, {
-        type: 'sawtooth', peak: 0.32,
-        filter: { type: 'lowpass', freq: 300, q: 4 },
-      });
-    }
-    if (step % 8 === 0) {
-      const offset = (Math.floor(step / 8) % 2) * 2;
-      for (let i = 0; i < 3; i++) {
-        _bgmPlayTone(at, PLUNDERCORE_PAD_NOTES[(i + offset) % PLUNDERCORE_PAD_NOTES.length], 3.5, {
-          type: 'triangle', peak: 0.08, attack: 0.4,
-          filter: { type: 'lowpass', freq: 1800, q: 0.6 },
-          pan: i === 0 ? -0.3 : i === 2 ? 0.3 : 0,
-        });
-      }
-    }
-    if (step % 2 === 1 && Math.random() < 0.7) {
-      const f = PLUNDERCORE_CHOP_NOTES[(step + (Math.random() * 3) | 0) % PLUNDERCORE_CHOP_NOTES.length];
-      // Plunder chop = noise burst + pitched square body.
-      _bgmPlayNoise(at, 0.13, { filterType: 'bandpass', freq: f * 2, q: 4, peak: 0.32 });
-      _bgmPlayTone(at, f, 0.18, {
-        type: 'square', peak: 0.25,
-        filter: { type: 'lowpass', freq: f * 4 },
-      });
-    }
-    if (Math.random() < 0.25) {
-      _bgmPlayTone(at, 2000 + Math.random() * 1500, 0.06, {
-        type: 'square', peak: 0.04,
-        filter: { type: 'highpass', freq: 1600 },
-      });
-    }
-  }
-
-  // 2) CRATE DIG — jazzy 7th progression, heavy chops, kick on 1.
-  function _bgmSchedulePlunderCrateDig(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    // jazzy ii-V-I-vi (Dm7-G7-Cmaj7-Am7) borrowed from the lo-fi set.
-    const ch = [
-      [146.83, 174.61, 220.00, 261.63],
-      [196.00, 246.94, 293.66, 349.23],
-      [130.81, 164.81, 196.00, 246.94],
-      [220.00, 261.63, 329.63, 415.30],
-    ][bar];
-    if (beat % 4 === 0) {
-      _bgmPlayKick(at, { peak: 0.42 });
-      _bgmPlayTone(at, ch[0] / 2, 0.55, {
-        type: 'sawtooth', peak: 0.3,
-        filter: { type: 'lowpass', freq: 320, q: 4 },
-      });
-    }
-    if (beat % 2 === 0) {
-      const f = ch[(beat / 2) % ch.length];
-      _bgmPlayNoise(at, 0.11, { filterType: 'bandpass', freq: f * 2, q: 5, peak: 0.26 });
-      _bgmPlayTone(at, f, 0.14, {
-        type: 'square', peak: 0.18,
-        filter: { type: 'lowpass', freq: f * 3 },
-      });
-    }
-    if (beat === 7 || beat === 13) {
-      _bgmPlayTone(at, ch[3], 0.35, {
-        type: 'sawtooth', peak: 0.1, detune: 6,
-        filter: { type: 'lowpass', freq: 2200 },
-      });
-    }
-  }
-
-  // 3) FRAGMENT — minimal, sparse glitchy hits with occasional bass drops.
-  const PLUNDER_FRAG_NOTES = [330, 440, 523, 587, 659, 880];
-  function _bgmSchedulePlunderFragment(step, at) {
-    const beat = step % 16;
-    if (Math.random() < 0.28) {
-      const f = PLUNDER_FRAG_NOTES[(Math.random() * PLUNDER_FRAG_NOTES.length) | 0];
-      _bgmPlayNoise(at, 0.09, { filterType: 'bandpass', freq: f * 1.5, q: 6, peak: 0.22 });
-      _bgmPlayTone(at, f, 0.11, {
-        type: 'square', peak: 0.13,
-        filter: { type: 'lowpass', freq: f * 3 },
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    if (beat === 0 || (beat === 8 && Math.random() < 0.55)) {
-      _bgmPlayTone(at, 55, 0.7, {
-        type: 'sawtooth', peak: 0.3,
-        filter: { type: 'lowpass', freq: 220, q: 3 },
-      });
-    }
-    if (Math.random() < 0.12) {
-      _bgmPlayTone(at, 2200 + Math.random() * 1500, 0.05, {
-        type: 'square', peak: 0.05,
-        filter: { type: 'highpass', freq: 1800 },
-      });
-    }
-  }
-
-  // 4) TAPE SPLICE — pitch wobble on bass + gated chord stabs.
-  function _bgmSchedulePlunderTapeSplice(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = [
-      [55.00, 65.41, 82.41, 110.00],
-      [49.00, 61.74, 73.42, 98.00],
-      [43.65, 55.00, 65.41, 87.31],
-      [49.00, 61.74, 73.42, 98.00],
-    ][bar];
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, ch[0], 0.55, {
-        type: 'sawtooth', peak: 0.28,
-        detune: Math.sin(step * 0.3) * 14, // wobble
-        filter: { type: 'lowpass', freq: 320 },
-      });
-    }
-    if (beat % 2 === 1) {
-      const det = (Math.random() - 0.5) * 28;
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 4, 0.12, {
-          type: 'square', peak: 0.06, detune: det,
-          filter: { type: 'lowpass', freq: 1900 },
-          pan: (i - 2) * 0.4,
-        });
-      }
-    }
-  }
-
-  // 5) STUTTER STEP — fixed rhythmic stutter pattern.
-  const PLUNDER_STUTTER_BEATS = [1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0];
-  const PLUNDER_STUTTER_NOTES = [220, 261.63, 329.63, 392, 440];
-  function _bgmSchedulePlunderStutterStep(step, at) {
-    const beat = step % 16;
-    if (PLUNDER_STUTTER_BEATS[beat]) {
-      const f = PLUNDER_STUTTER_NOTES[beat % PLUNDER_STUTTER_NOTES.length];
-      _bgmPlayNoise(at, 0.06, { filterType: 'bandpass', freq: f * 2, q: 4, peak: 0.18 });
-      _bgmPlayTone(at, f, 0.08, {
-        type: 'square', peak: 0.16,
-        pan: ((beat % 4) - 1.5) * 0.4,
-      });
-    }
-    if (beat === 0) {
-      _bgmPlayKick(at, { peak: 0.38 });
-      _bgmPlayTone(at, 55, 0.4, {
-        type: 'sawtooth', peak: 0.26,
-        filter: { type: 'lowpass', freq: 280, q: 4 },
-      });
-    }
-  }
-
-  // 6) PHANTOM ROOM — dub-ish atmosphere with delay-style echo chops.
-  function _bgmSchedulePlunderPhantomRoom(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 5.0, {
-          type: 'triangle', peak: 0.06, attack: 0.7,
-          filter: { type: 'lowpass', freq: 1400 },
-          pan: (i - 1.5) * 0.4,
-        });
-      }
-    }
-    if (beat === 0 || beat === 10) {
-      _bgmPlayTone(at, ch[0] / 2, 0.6, {
-        type: 'sine', peak: 0.3,
-        filter: { type: 'lowpass', freq: 200 },
-      });
-    }
-    // Echo-trail chops — same hit at 3 decaying offsets, mimicking
-    // dub-style tape delay.
-    if (beat === 6 && Math.random() < 0.7) {
-      const f = ch[2] * 2;
-      for (let k = 0; k < 3; k++) {
-        const o = k * 0.3;
-        _bgmPlayNoise(at + o, 0.08, {
-          filterType: 'bandpass', freq: f * 2, q: 5,
-          peak: 0.22 * Math.pow(0.5, k),
-          pan: -0.4 + k * 0.4,
-        });
-      }
-    }
-  }
-
-  // 7) HOOK CYCLE — repeating melodic hook over chops.
-  const PLUNDER_HOOK_NOTES = [392, 523.25, 587.33, 440, 523.25, 392, 349.23, 440];
-  function _bgmSchedulePlunderHookCycle(step, at) {
-    const beat = step % 16;
-    if (beat % 2 === 0) {
-      const note = PLUNDER_HOOK_NOTES[(beat / 2) % PLUNDER_HOOK_NOTES.length];
-      _bgmPlayTone(at, note, 0.18, {
-        type: 'square', peak: 0.11,
-        filter: { type: 'lowpass', freq: 1900 },
-        pan: ((beat / 2) % 4 - 1.5) * 0.3,
-      });
-    }
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, 110, 0.4, {
-        type: 'sawtooth', peak: 0.24,
-        filter: { type: 'lowpass', freq: 300, q: 3 },
-      });
-    }
-    if (beat % 2 === 1 && Math.random() < 0.45) {
-      _bgmPlayNoise(at, 0.05, { filterType: 'highpass', freq: 4500, peak: 0.09 });
-    }
-  }
-
-  // 8) GHOST CRACKLE — vinyl crackle bed + detuned chops.
-  function _bgmSchedulePlunderGhostCrackle(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    // Always-on crackle particles.
-    if (Math.random() < 0.5) _bgmPlayNoise(at + Math.random() * 0.15, 0.012, {
-      filterType: 'bandpass', freq: 4000 + Math.random() * 3000,
-      q: 8, peak: 0.035,
-    });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.5, {
-      type: 'sawtooth', peak: 0.26,
-      filter: { type: 'lowpass', freq: 320 },
-    });
-    if (beat % 2 === 1) {
-      const f = ch[(beat / 2 | 0) % ch.length] * 2;
-      _bgmPlayNoise(at, 0.1, { filterType: 'bandpass', freq: f * 1.8, q: 5, peak: 0.16 });
-      _bgmPlayTone(at, f, 0.14, {
-        type: 'square', peak: 0.09, detune: ((step * 7) % 30) - 15,
-      });
-    }
-  }
-
-  // 9) SLOW BURN — sub bass + smoky pad + sparse chops.
-  function _bgmSchedulePlunderSlowBurn(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, ch[0] / 2, 0.7, {
-        type: 'sine', peak: 0.35,
-        filter: { type: 'lowpass', freq: 150 },
-      });
-      _bgmPlayTone(at, ch[0], 0.6, {
-        type: 'sawtooth', peak: 0.22,
-        filter: { type: 'lowpass', freq: 280, q: 4 },
-      });
-    }
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 4.5, {
-          type: 'triangle', peak: 0.07, attack: 0.6,
-          filter: { type: 'lowpass', freq: 1100 },
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-    if (beat === 6 || beat === 11) {
-      const f = ch[2] * 2;
-      _bgmPlayNoise(at, 0.14, { filterType: 'bandpass', freq: f * 1.5, q: 4, peak: 0.2 });
-      _bgmPlayTone(at, f, 0.18, { type: 'square', peak: 0.12 });
-    }
-  }
-
-  // 10) MOSAIC — busy pattern, many short hits across the spectrum.
-  const PLUNDER_MOSAIC_NOTES = [220, 261.63, 293.66, 329.63, 392, 440, 523.25, 659.25];
-  function _bgmSchedulePlunderMosaic(step, at) {
-    const beat = step % 16;
-    if (Math.random() < 0.62) {
-      const f = PLUNDER_MOSAIC_NOTES[(step * 3) % PLUNDER_MOSAIC_NOTES.length];
-      _bgmPlayNoise(at, 0.05, { filterType: 'bandpass', freq: f * 2, q: 6, peak: 0.14 });
-      _bgmPlayTone(at, f, 0.08, {
-        type: 'square', peak: 0.08,
-        filter: { type: 'lowpass', freq: f * 3 },
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, 73.42, 0.4, {
-        type: 'sawtooth', peak: 0.25,
-        filter: { type: 'lowpass', freq: 280, q: 4 },
-      });
-    }
-    if (beat === 0) {
-      _bgmPlayTone(at, 220, 3.0, {
-        type: 'triangle', peak: 0.05, attack: 0.5,
-        filter: { type: 'lowpass', freq: 1400 },
-      });
-    }
-  }
-
-  // ── §vaporwave ── shared chord progressions ───────────────────────
-  // Most patches share a I-V-vi-IV style progression rooted at C,
-  // because that's the vaporwave home turf. 64-step pattern = 4 bars
-  // of 16ths, one chord per bar.
-  const VAPOR_CHORDS_C = [
-    // [root, third, fifth, seventh] — Cmaj7, G, Am, Fmaj7
-    [130.81, 164.81, 196.00, 246.94], // Cmaj7
-    [196.00, 246.94, 293.66, 369.99], // G — using maj feel
-    [220.00, 261.63, 329.63, 415.30], // Am7
-    [174.61, 220.00, 261.63, 329.63], // Fmaj7
+// ── FANS: read-only Stage 1 (monitor + curve designer) ─────────────
+// LibreHardwareMonitor exposes sensor data over HTTP when its "Remote
+// Web Server" option is enabled (default port 8085). The main process
+// polls /data.json and flattens the tree into fans/temps/pwm arrays.
+// This block renders the HUD panel + the curve-editor overlay. No
+// writes — Stage 1 is purely a designer + monitor.
+(() => {
+  const POLL_MS = 2000;
+  // viewBox of the plot SVG. Width = temp axis (0 → 100 °C), height =
+  // pct axis (100 → 0 %, since SVG y grows downward).
+  const PLOT_W = 400, PLOT_H = 240;
+  const DEFAULT_POINTS = [
+    { temp: 30, pct: 30 },
+    { temp: 50, pct: 50 },
+    { temp: 70, pct: 75 },
+    { temp: 85, pct: 90 },
+    { temp: 100, pct: 100 },
   ];
 
-  // 1) MALL AIR — long pad chords + soft sine bells, no perc.
-  function _bgmScheduleVaporMallAir(step, at) {
-    const beat = step % 16;
-    const bar = Math.floor(step / 16) % 4;
-    const chord = VAPOR_CHORDS_C[bar];
-    // Pad swell at the top of each bar — every note in the chord, long.
-    if (beat === 0) {
-      for (let i = 0; i < chord.length; i++) {
-        _bgmPlayTone(at, chord[i], 4.5, {
-          type: 'sine', peak: 0.09, attack: 0.6,
-          filter: { type: 'lowpass', freq: 2200, q: 0.5 },
-          pan: (i - 1.5) * 0.25,
-        });
-        // Octave above, even quieter, for shimmer.
-        _bgmPlayTone(at, chord[i] * 2, 4.5, {
-          type: 'sine', peak: 0.04, attack: 0.8, detune: 8,
-          pan: (i - 1.5) * 0.4,
-        });
+  const listEl       = document.getElementById('fans-list');
+  const emptyEl      = document.getElementById('fans-empty');
+  const statusTagEl  = document.getElementById('fans-status-tag');
+  const editBtn      = document.getElementById('fans-edit-btn');
+  const curvesCntEl  = document.getElementById('fans-curves-count');
+  if (!listEl || !editBtn) return;
+
+  // Curve editor refs.
+  const overlay      = document.getElementById('fans-editor-overlay');
+  const closeBtn     = document.getElementById('fans-editor-close-btn');
+  const fanSelect    = document.getElementById('fans-editor-fan');
+  const tempSelect   = document.getElementById('fans-editor-temp');
+  const curTempEl    = document.getElementById('fans-editor-cur-temp');
+  const curRpmEl     = document.getElementById('fans-editor-cur-rpm');
+  const targetPctEl  = document.getElementById('fans-editor-target-pct');
+  const plotEl       = document.getElementById('fans-editor-plot');
+  const gridEl       = document.getElementById('fans-editor-grid');
+  const tempLineEl   = document.getElementById('fans-editor-temp-line');
+  const fillEl       = document.getElementById('fans-editor-fill');
+  const strokeEl     = document.getElementById('fans-editor-stroke');
+  const pointsEl     = document.getElementById('fans-editor-points');
+  const statusEl     = document.getElementById('fans-editor-status');
+  const saveBtn      = document.getElementById('fans-editor-save-btn');
+  const resetBtn     = document.getElementById('fans-editor-reset-btn');
+  const deleteBtn    = document.getElementById('fans-editor-delete-btn');
+
+  // In-memory state. Curves are now keyed by GROUP, not by individual
+  // fan id. Two groups:
+  //   cpu — CPU socket fan + AIO pump + every chassis/case fan on the
+  //         motherboard super-I/O chip. They share a curve driven by
+  //         CPU package temperature.
+  //   gpu — every fan whose parent device is a GPU (NVIDIA/AMD/Intel
+  //         Arc / GeForce / RTX / Radeon). Curve driven by GPU temp.
+  // Case fans get lumped into the CPU group because case airflow on a
+  // typical desktop tracks CPU heat load; the GPU has its own loop.
+  // Stage 1 is read-only — curves are designed and saved but not yet
+  // applied to the hardware.
+  const GPU_DEVICE_RE = /(nvidia|geforce|gtx|rtx|radeon|amd\s|intel\s+arc|\bgpu\b)/i;
+  function classifyFan(f) {
+    return GPU_DEVICE_RE.test(f?.device || '') ? 'gpu' : 'cpu';
+  }
+  const GROUPS = ['cpu', 'gpu'];
+  const GROUP_LABELS = { cpu: 'CPU + CASE', gpu: 'GPU' };
+
+  let _curves = { cpu: null, gpu: null };  // { cpu: {sourceTempId, sourceTempName, points} | null, gpu: same }
+  let _last = null;             // last fans:poll result
+  let _editorGroup = 'cpu';     // group currently being edited ('cpu' | 'gpu')
+  let _editorPoints = [];       // working copy of points (committed on SAVE)
+
+  const tempToX = (t) => Math.max(0, Math.min(PLOT_W, (t / 100) * PLOT_W));
+  const pctToY  = (p) => Math.max(0, Math.min(PLOT_H, ((100 - p) / 100) * PLOT_H));
+  const xToTemp = (x) => Math.max(0, Math.min(100, (x / PLOT_W) * 100));
+  const yToPct  = (y) => Math.max(0, Math.min(100, ((PLOT_H - y) / PLOT_H) * 100));
+
+  // Linear interpolation of pct at a given temp across the sorted points
+  // array. Below the lowest point clamps to that point's pct; above the
+  // highest does the same. Returns null if no points.
+  function interpPct(points, t) {
+    if (!points.length) return null;
+    const sorted = points.slice().sort((a, b) => a.temp - b.temp);
+    if (t <= sorted[0].temp) return sorted[0].pct;
+    if (t >= sorted[sorted.length - 1].temp) return sorted[sorted.length - 1].pct;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const a = sorted[i], b = sorted[i + 1];
+      if (t >= a.temp && t <= b.temp) {
+        const r = (t - a.temp) / (b.temp - a.temp || 1);
+        return a.pct + (b.pct - a.pct) * r;
       }
     }
-    // Soft bell on beat 5 of every bar.
-    if (beat === 4) {
-      _bgmPlayFmBell(at, chord[2] * 2, 1.2, { peak: 0.07, modDepth: 80, ratio: 2.01, pan: 0.2 });
+    return sorted[sorted.length - 1].pct;
+  }
+
+  // Build the static gridlines + axis labels once; the curve path,
+  // points, and live temp line update every paint.
+  function buildGrid() {
+    if (!gridEl) return;
+    const frag = [];
+    for (let pct = 0; pct <= 100; pct += 25) {
+      const y = pctToY(pct);
+      frag.push(`<line x1="0" y1="${y}" x2="${PLOT_W}" y2="${y}"></line>`);
+    }
+    for (let t = 0; t <= 100; t += 20) {
+      const x = tempToX(t);
+      frag.push(`<line x1="${x}" y1="0" x2="${x}" y2="${PLOT_H}"></line>`);
+    }
+    gridEl.innerHTML = frag.join('');
+  }
+
+  function paintCurve() {
+    if (!plotEl) return;
+    const pts = _editorPoints.slice().sort((a, b) => a.temp - b.temp);
+    // Stroke + fill path. Fill closes the polygon along the bottom edge
+    // so the area under the curve reads as filled.
+    const coords = pts.map((p) => `${tempToX(p.temp).toFixed(1)},${pctToY(p.pct).toFixed(1)}`);
+    const strokeD = coords.length ? 'M ' + coords.join(' L ') : '';
+    const fillD = coords.length
+      ? `M ${tempToX(pts[0].temp).toFixed(1)},${PLOT_H} L ` + coords.join(' L ') + ` L ${tempToX(pts[pts.length - 1].temp).toFixed(1)},${PLOT_H} Z`
+      : '';
+    strokeEl.setAttribute('d', strokeD);
+    fillEl.setAttribute('d', fillD);
+    // Re-render handles. Each <circle> stores its index in data-idx so
+    // the pointer handlers know which point to mutate.
+    pointsEl.innerHTML = pts.map((p, i) =>
+      `<circle class="fans-editor-point" data-idx="${i}" cx="${tempToX(p.temp).toFixed(1)}" cy="${pctToY(p.pct).toFixed(1)}" r="6"></circle>`
+    ).join('');
+    // Live temp marker + target readout.
+    paintLiveOverlay();
+  }
+  function paintLiveOverlay() {
+    if (!_last || _last.status !== 'connected') {
+      tempLineEl.setAttribute('visibility', 'hidden');
+      if (targetPctEl) targetPctEl.textContent = '—';
+      return;
+    }
+    // Average RPM of every fan in the current group — gives a single
+    // readout that summarizes "what the group is doing right now".
+    const groupFans = (_last.fans || []).filter((f) => Number(f.value) > 0 && classifyFan(f) === _editorGroup);
+    const avgRpm = groupFans.length
+      ? groupFans.reduce((sum, f) => sum + Number(f.value), 0) / groupFans.length
+      : null;
+    const tempId = tempSelect?.value || null;
+    const temp = (_last.temps || []).find((t) => t.id === tempId);
+    if (curRpmEl)  curRpmEl.textContent  = avgRpm != null ? `${Math.round(avgRpm)} RPM` : '—';
+    if (curTempEl) curTempEl.textContent = temp ? `${temp.value.toFixed(1)}°C` : '—';
+    if (temp) {
+      const x = tempToX(temp.value);
+      tempLineEl.setAttribute('x1', x);
+      tempLineEl.setAttribute('x2', x);
+      tempLineEl.setAttribute('y1', 0);
+      tempLineEl.setAttribute('y2', PLOT_H);
+      tempLineEl.removeAttribute('visibility');
+      const tgt = interpPct(_editorPoints, temp.value);
+      if (targetPctEl) targetPctEl.textContent = tgt == null ? '—' : `${tgt.toFixed(0)}%`;
+    } else {
+      tempLineEl.setAttribute('visibility', 'hidden');
+      if (targetPctEl) targetPctEl.textContent = '—';
     }
   }
 
-  // 2) PLAZA BATH — FM bells + slow chord wash, water-y feel.
-  function _bgmScheduleVaporPlazaBath(step, at) {
-    const beat = step % 16;
-    const bar = Math.floor(step / 16) % 4;
-    const chord = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < chord.length; i++) {
-        _bgmPlayTone(at, chord[i], 5.5, {
-          type: 'triangle', peak: 0.07, attack: 0.9,
-          filter: { type: 'lowpass', freq: 1600, q: 0.5 },
-          pan: (i % 2 === 0 ? -0.35 : 0.35),
-        });
-      }
-    }
-    // Wandering FM bells on a 5-step cycle so they drift out of phase
-    // with the chord bar — that's the "water" feel.
-    if (step % 5 === 0) {
-      const noteIdx = (step / 5) | 0;
-      const note = chord[noteIdx % chord.length] * 2;
-      _bgmPlayFmBell(at, note, 1.6, {
-        peak: 0.08,
-        modDepth: 100 + (step % 7) * 20,
-        ratio: 2.01 + (step % 3) * 0.03,
-        pan: ((step * 0.37) % 2) - 1,
-      });
-    }
+  // Pointer drag handling — single delegated listener on the SVG so
+  // dynamic points work without re-binding.
+  let _drag = null; // { idx, pointerId }
+  function clientToPlot(ev) {
+    const r = plotEl.getBoundingClientRect();
+    const x = ((ev.clientX - r.left) / r.width)  * PLOT_W;
+    const y = ((ev.clientY - r.top)  / r.height) * PLOT_H;
+    return { x, y };
   }
+  plotEl?.addEventListener('pointerdown', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof SVGCircleElement)) return;
+    const idx = Number(target.dataset.idx);
+    if (!Number.isFinite(idx)) return;
+    _drag = { idx, pointerId: ev.pointerId };
+    target.classList.add('is-dragging');
+    plotEl.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+  plotEl?.addEventListener('pointermove', (ev) => {
+    if (!_drag || ev.pointerId !== _drag.pointerId) return;
+    const { x, y } = clientToPlot(ev);
+    const pts = _editorPoints.slice().sort((a, b) => a.temp - b.temp);
+    const p = pts[_drag.idx];
+    if (!p) return;
+    // Constrain temp between neighbors so the curve stays monotonic in x.
+    const minT = _drag.idx > 0              ? pts[_drag.idx - 1].temp + 0.5 : 0;
+    const maxT = _drag.idx < pts.length - 1 ? pts[_drag.idx + 1].temp - 0.5 : 100;
+    p.temp = Math.max(minT, Math.min(maxT, xToTemp(x)));
+    p.pct  = yToPct(y);
+    _editorPoints = pts;
+    paintCurve();
+  });
+  function endDrag(ev) {
+    if (!_drag) return;
+    if (ev.pointerId !== _drag.pointerId) return;
+    try { plotEl.releasePointerCapture(ev.pointerId); } catch {}
+    pointsEl.querySelectorAll('.is-dragging').forEach((n) => n.classList.remove('is-dragging'));
+    _drag = null;
+  }
+  plotEl?.addEventListener('pointerup', endDrag);
+  plotEl?.addEventListener('pointercancel', endDrag);
+  // Double-click empty space → insert a new control point at the
+  // cursor position, sorted into the points array.
+  plotEl?.addEventListener('dblclick', (ev) => {
+    if (ev.target instanceof SVGCircleElement) return; // ignore dblclick on existing point
+    const { x, y } = clientToPlot(ev);
+    _editorPoints.push({ temp: xToTemp(x), pct: yToPct(y) });
+    _editorPoints.sort((a, b) => a.temp - b.temp);
+    paintCurve();
+  });
+  // Right-click point → remove (min 2 points so the curve has a slope).
+  plotEl?.addEventListener('contextmenu', (ev) => {
+    if (!(ev.target instanceof SVGCircleElement)) return;
+    ev.preventDefault();
+    if (_editorPoints.length <= 2) return;
+    const idx = Number(ev.target.dataset.idx);
+    const sorted = _editorPoints.slice().sort((a, b) => a.temp - b.temp);
+    sorted.splice(idx, 1);
+    _editorPoints = sorted;
+    paintCurve();
+  });
 
-  // 3) SUNSET CASSETTE — wobble bass + detuned saw lead + plastic snaps.
-  const VAPOR_CASSETTE_LEAD = [392, 440, 523.25, 587.33, 659.25, 587.33, 523.25, 440];
-  function _bgmScheduleVaporSunsetCassette(step, at) {
-    const beat = step % 16;
-    const bar = Math.floor(step / 16) % 4;
-    const chord = VAPOR_CHORDS_C[bar];
-    // Wobble bass: root + filter cutoff moves with step.
-    if (beat % 4 === 0) {
-      const cutoff = 280 + (beat / 4) * 90;
-      _bgmPlayTone(at, chord[0] / 2, 0.7, {
-        type: 'sawtooth', peak: 0.28,
-        filter: { type: 'lowpass', freq: cutoff, q: 5 },
-      });
+  // ── HUD panel render ──────────────────────────────────────────────
+  function renderFanList() {
+    if (!listEl) return;
+    if (!_last) {
+      // First poll hasn't returned yet — keep the boot-empty hint.
+      return;
     }
-    // Detuned saw lead, slow melody.
-    if (beat % 2 === 0) {
-      const note = VAPOR_CASSETTE_LEAD[(beat / 2 + bar * 2) % VAPOR_CASSETTE_LEAD.length];
-      _bgmPlayTone(at, note, 0.65, {
-        type: 'sawtooth', peak: 0.07, detune: -8,
-        filter: { type: 'lowpass', freq: 1500, q: 1.2 },
-        pan: -0.2,
-      });
-      _bgmPlayTone(at, note, 0.65, {
-        type: 'sawtooth', peak: 0.07, detune: 8,
-        filter: { type: 'lowpass', freq: 1500, q: 1.2 },
-        pan: 0.2,
-      });
-    }
-    // Plastic snap on off-beats.
-    if (beat % 2 === 1) {
-      _bgmPlayNoise(at, 0.05, { filterType: 'highpass', freq: 4000, peak: 0.08 });
-    }
-  }
-
-  // 4) STATIC LOBBY — soft hat tick + dreamy chord wash, no bass.
-  function _bgmScheduleVaporStaticLobby(step, at) {
-    const beat = step % 16;
-    const bar = Math.floor(step / 16) % 4;
-    const chord = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < chord.length; i++) {
-        _bgmPlayTone(at, chord[i] * 2, 5.0, {
-          type: 'triangle', peak: 0.06, attack: 1.0,
-          filter: { type: 'lowpass', freq: 2400, q: 0.5 },
-          pan: (i - 1.5) * 0.35,
-        });
+    if (_last.status !== 'connected') {
+      listEl.innerHTML = '';
+      listEl.appendChild(emptyEl);
+      emptyEl.hidden = false;
+      if (statusTagEl) {
+        statusTagEl.textContent = 'OFFLINE';
+        statusTagEl.classList.add('is-offline');
+        statusTagEl.classList.remove('is-connected');
       }
+      if (curvesCntEl) curvesCntEl.textContent = `${Object.keys(_curves).length} SAVED`;
+      return;
     }
-    // Soft hi-hat tick on every other step.
-    if (beat % 2 === 0) {
-      _bgmPlayNoise(at, 0.035, {
-        filterType: 'highpass', freq: 7000,
-        peak: 0.05, pan: 0.4,
-      });
+    // Hide fans reporting 0 RPM — those are empty fan headers or
+    // fans not currently spinning. LHM reports every header the
+    // super-I/O chip exposes, including unconnected ones, which
+    // clutters the panel with rows that never move.
+    const fansAll = _last.fans || [];
+    const fans = fansAll.filter((f) => Number(f.value) > 0);
+    const savedCount = GROUPS.filter((g) => _curves[g]).length;
+    if (statusTagEl) {
+      statusTagEl.textContent = 'LHM · ' + fans.length;
+      statusTagEl.classList.add('is-connected');
+      statusTagEl.classList.remove('is-offline');
     }
-    // Pitched bell drifting over the wash, sparse.
-    if (Math.random() < 0.12) {
-      const note = chord[(Math.random() * 4) | 0] * 4;
-      _bgmPlayFmBell(at, note, 0.9, {
-        peak: 0.05, modDepth: 60, ratio: 3.01,
-        pan: (Math.random() * 2) - 1,
-      });
+    if (curvesCntEl) curvesCntEl.textContent = `${savedCount}/${GROUPS.length} SAVED`;
+    if (!fans.length) {
+      listEl.innerHTML = '';
+      emptyEl.textContent = fansAll.length
+        ? 'ALL FANS REPORTING 0 RPM · NOTHING SPINNING'
+        : 'NO FANS REPORTED · CHECK LHM SENSOR PERMISSIONS';
+      emptyEl.hidden = false;
+      listEl.appendChild(emptyEl);
+      return;
     }
-  }
-
-  // 5) PIXEL HIGHWAY — slow synth bass + retro arp + chip lead.
-  const VAPOR_ARP_C = [261.63, 329.63, 392, 523.25];
-  function _bgmScheduleVaporPixelHighway(step, at) {
-    const beat = step % 16;
-    const bar = Math.floor(step / 16) % 4;
-    const chord = VAPOR_CHORDS_C[bar];
-    // Driving synth bass on downbeats.
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, chord[0] / 2, 0.5, {
-        type: 'square', peak: 0.18,
-        filter: { type: 'lowpass', freq: 500, q: 3 },
-      });
-    }
-    // Ascending arp — 16ths, root/third/fifth/octave from current chord.
-    const arpNotes = [chord[0], chord[1], chord[2], chord[3] || chord[0] * 2];
-    _bgmPlayTone(at, arpNotes[beat % 4] * 2, 0.18, {
-      type: 'square', peak: 0.06,
-      filter: { type: 'lowpass', freq: 2400, q: 1.5 },
-      pan: ((beat % 4) - 1.5) * 0.4,
-    });
-    // Occasional chip lead.
-    if (beat === 8 || beat === 14) {
-      _bgmPlayTone(at, chord[2] * 2, 0.5, {
-        type: 'square', peak: 0.08,
-        filter: { type: 'lowpass', freq: 2800, q: 1.5 },
-      });
-    }
-  }
-
-  // 6) DEAD MALL — empty echo, distant chords, footstep-noise hits.
-  function _bgmScheduleVaporDeadMall(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 5.5, {
-          type: 'triangle', peak: 0.05, attack: 1.0,
-          filter: { type: 'lowpass', freq: 1400 },
-          pan: (i - 1.5) * 0.45,
-        });
-      }
-    }
-    if (beat === 8) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 1.2, {
-          type: 'sine', peak: 0.04, attack: 0.2,
-          pan: (i - 1.5) * 0.5,
-        });
-      }
-    }
-    if (Math.random() < 0.14) {
-      _bgmPlayNoise(at, 0.15, {
-        filterType: 'lowpass', freq: 200, peak: 0.06,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-  // 7) PINK FLAMINGO — bright bells + dreamy lead + slow swell.
-  function _bgmScheduleVaporPinkFlamingo(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.5, {
-          type: 'sine', peak: 0.08, attack: 0.5,
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (step % 3 === 0) {
-      _bgmPlayFmBell(at, ch[((step / 3) | 0) % ch.length] * 4, 1.5, {
-        peak: 0.07, modDepth: 60, ratio: 2.01,
-        pan: ((step * 0.21) % 2) - 1,
-      });
-    }
-    if (beat === 6 || beat === 14) {
-      _bgmPlayTone(at, ch[2] * 2, 0.9, {
-        type: 'sine', peak: 0.1, attack: 0.1,
-      });
-    }
-  }
-  // 8) BEACH HAZE — water-y bells over slow swells, no perc.
-  function _bgmScheduleVaporBeachHaze(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 5.0, {
-          type: 'sine', peak: 0.07, attack: 1.0,
-          pan: (i - 1.5) * 0.5,
-        });
-      }
-    }
-    if (step % 7 === 0) {
-      _bgmPlayFmBell(at, ch[((step / 7) | 0) % ch.length] * 3, 1.8, {
-        peak: 0.07,
-        modDepth: 80 + (step % 5) * 30,
-        ratio: 2.01 + Math.sin(step * 0.1) * 0.5,
-        pan: ((step * 0.31) % 2) - 1,
-      });
-    }
-  }
-  // 9) FAX MODEM — chopped modem-like glitches over chord bed.
-  function _bgmScheduleVaporFaxModem(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.0, {
-          type: 'triangle', peak: 0.06, attack: 0.5,
-          filter: { type: 'lowpass', freq: 1500 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (beat % 2 === 0) {
-      const f = 400 + Math.random() * 800;
-      _bgmPlayTone(at, f, 0.06, {
-        type: 'square', peak: 0.08,
-        filter: { type: 'bandpass', freq: f * 1.5, q: 8 },
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'sawtooth', peak: 0.18,
-      filter: { type: 'lowpass', freq: 300 },
-    });
-  }
-  // 10) TROPIC DUSK — warm pad + tropical bell melody + smooth sub.
-  function _bgmScheduleVaporTropicDusk(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = VAPOR_CHORDS_C[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.5, {
-          type: 'triangle', peak: 0.08, attack: 0.6,
-          filter: { type: 'lowpass', freq: 1600 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.7, {
-      type: 'sine', peak: 0.26,
-      filter: { type: 'lowpass', freq: 200 },
-    });
-    if (beat % 2 === 0) {
-      const melody = [ch[2], ch[3], ch[2], ch[1], ch[2], ch[3]];
-      _bgmPlayFmBell(at, melody[(beat / 2) % melody.length] * 2, 0.8, {
-        peak: 0.06, modDepth: 50, ratio: 2.01, pan: 0.2,
-      });
-    }
-  }
-
-  // ── §synthwave ── classic outrun-flavoured 80s synth ─────────────
-  // All five share the i-VII-VI-VII / Am-G-F-G minor progression, which
-  // is the synthwave home key. Each track varies arrangement: arp
-  // density, drum hits, lead style, etc.
-  const SYNTH_CHORDS_AM = [
-    [110.00, 130.81, 164.81, 196.00], // Am
-    [98.00,  123.47, 146.83, 196.00], // G
-    [87.31,  110.00, 130.81, 174.61], // F
-    [98.00,  123.47, 146.83, 196.00], // G
-  ];
-  // 1) NEON DRIVE — driving 16th arp, fat bass, kick/hat groove.
-  function _bgmScheduleSynthNeonDrive(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    // Kick — every 4 steps.
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.5 });
-    // Off-beat hat.
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.04, {
-      filterType: 'highpass', freq: 8000, peak: 0.06, pan: 0.3,
-    });
-    // 16th-note ascending arp through chord tones, one octave up.
-    const arp = [ch[0], ch[1], ch[2], ch[3]];
-    _bgmPlayTone(at, arp[beat % 4] * 2, 0.16, {
-      type: 'square', peak: 0.07,
-      filter: { type: 'lowpass', freq: 2400, q: 1.2 },
-      pan: ((beat % 4) - 1.5) * 0.4,
-    });
-    // Bass square root every downbeat.
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'sawtooth', peak: 0.28,
-      filter: { type: 'lowpass', freq: 440, q: 3 },
-    });
-    // Lead stab on beat 9.
-    if (beat === 8) _bgmPlayTone(at, ch[2] * 2, 0.8, {
-      type: 'sawtooth', peak: 0.1, detune: 8,
-      filter: { type: 'lowpass', freq: 2000 },
-    });
-  }
-  // 2) MIDNIGHT CRUISE — slower, atmospheric, gated chord stabs.
-  function _bgmScheduleSynthMidnightCruise(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 3.2, {
-          type: 'sawtooth', peak: 0.06, attack: 0.5, detune: i * 4,
-          filter: { type: 'lowpass', freq: 2200 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.7, {
-      type: 'sawtooth', peak: 0.22,
-      filter: { type: 'lowpass', freq: 380, q: 2.5 },
-    });
-    // Gated chord stab every 8 steps.
-    if (beat % 8 === 4) {
-      for (const n of ch) _bgmPlayTone(at, n, 0.18, {
-        type: 'square', peak: 0.06,
-        filter: { type: 'lowpass', freq: 1600 },
-      });
-    }
-  }
-  // 3) OUTRUN — aggressive, fast, full kit.
-  function _bgmScheduleSynthOutrun(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    // 16th-note alternating bass — root then octave.
-    _bgmPlayTone(at, (beat % 2 === 0 ? ch[0] / 2 : ch[0]), 0.14, {
-      type: 'sawtooth', peak: 0.22,
-      filter: { type: 'lowpass', freq: 500, q: 3 },
-    });
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.55 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.22 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 9000, peak: 0.04,
-    });
-    // Lead riff every 4 bars at end of phrase.
-    if (beat === 14) _bgmPlayTone(at, ch[2] * 2, 0.3, {
-      type: 'sawtooth', peak: 0.12, detune: -6,
-      filter: { type: 'lowpass', freq: 2400 },
-    });
-  }
-  // 4) GHOST GRID — minor, eerie, sparse hats, low filter sweep feel.
-  function _bgmScheduleSynthGhostGrid(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    // Long pad, gently filter-swept (re-trigger every 16 with rising cutoff).
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 2.8, {
-          type: 'sawtooth', peak: 0.05, attack: 0.7, detune: -4,
-          filter: { type: 'lowpass', freq: 800 + bar * 250, q: 4 },
-          pan: (i - 1.5) * 0.35,
-        });
-      }
-    }
-    // Sparse pulse bass on downbeats.
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.6, {
-      type: 'square', peak: 0.18,
-      filter: { type: 'lowpass', freq: 320, q: 5 },
-    });
-    // Eerie sparse FM bell on offbeats.
-    if (beat === 6 || beat === 11) _bgmPlayFmBell(at, ch[3] * 2, 1.0, {
-      peak: 0.06, modDepth: 140, ratio: 3.01,
-      pan: (Math.random() * 2) - 1,
-    });
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 9500, peak: 0.04,
-    });
-  }
-  // 5) VHS GLOW — washy chorus pad, slow arp, tape hiss bed.
-  function _bgmScheduleSynthVhsGlow(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      // Three detuned sawtooth layers for the "chorus" feel.
-      for (let i = 0; i < ch.length; i++) {
-        for (const det of [-8, 0, 8]) {
-          _bgmPlayTone(at, ch[i] * 2, 3.6, {
-            type: 'sawtooth', peak: 0.04, attack: 0.8, detune: det,
-            filter: { type: 'lowpass', freq: 2000 },
-            pan: det / 30,
-          });
+    emptyEl.hidden = true;
+    // Group fans by classifyFan(). Each group is rendered as a single
+    // "linked" row — one curve target, one seg-bar, with the member
+    // fans listed underneath. CPU fans are linked: a single CPU curve
+    // commands all of them at the same PWM, so showing per-fan bars
+    // would mis-imply they can diverge.
+    const parts = [];
+    for (const group of GROUPS) {
+      const groupFans = fans.filter((f) => classifyFan(f) === group);
+      if (!groupFans.length) continue;
+      const curve = _curves[group];
+      // Resolve curve → current target % (and the temp driving it).
+      let targetPct = null;
+      let tempLabel = null;
+      if (curve) {
+        const tempSensor = (_last.temps || []).find((t) => t.id === curve.sourceTempId);
+        if (tempSensor) {
+          targetPct = interpPct(curve.points, Number(tempSensor.value));
+          tempLabel = `${tempSensor.name} ${tempSensor.value.toFixed(1)}°C`;
         }
       }
-    }
-    // Slow arp — 8th notes through chord tones.
-    if (beat % 2 === 0) {
-      const arp = [ch[0], ch[2], ch[1], ch[3]];
-      _bgmPlayTone(at, arp[(beat / 2) % 4] * 2, 0.42, {
-        type: 'sine', peak: 0.08, attack: 0.05,
-        pan: ((beat / 2) % 4 - 1.5) * 0.3,
-      });
-    }
-    // Tape hiss — quiet noise particles.
-    if (Math.random() < 0.4) _bgmPlayNoise(at, 0.02, {
-      filterType: 'highpass', freq: 6000, peak: 0.02,
-    });
-  }
-
-  // 6) CHROME HIGHWAY — driving 16th bass arp + chord stabs every 8.
-  function _bgmScheduleSynthChromeHighway(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    _bgmPlayTone(at, ch[beat % ch.length] / 2, 0.13, {
-      type: 'sawtooth', peak: 0.18,
-      filter: { type: 'lowpass', freq: 500, q: 3 },
-    });
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.5 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.2 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 9000, peak: 0.05,
-    });
-    if (beat % 8 === 4) {
-      for (const n of ch) _bgmPlayTone(at, n * 2, 0.15, {
-        type: 'square', peak: 0.06,
-        filter: { type: 'lowpass', freq: 2000 },
-      });
-    }
-  }
-  // 7) STARLIGHT — atmospheric, slow lead, ethereal.
-  function _bgmScheduleSynthStarlight(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 5.0, {
-          type: 'sine', peak: 0.07, attack: 1.0,
-          pan: (i - 1.5) * 0.4,
-        });
-      }
-    }
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.6, {
-      type: 'sine', peak: 0.2,
-      filter: { type: 'lowpass', freq: 200 },
-    });
-    if (beat === 6 || beat === 12) {
-      _bgmPlayTone(at, ch[2] * 4, 1.2, {
-        type: 'sine', peak: 0.08, attack: 0.2,
-        pan: ((beat / 6) - 1) * 0.4,
-      });
-    }
-    if (Math.random() < 0.1) {
-      _bgmPlayFmBell(at, 2000 + Math.random() * 1500, 0.8, {
-        peak: 0.03, modDepth: 100, ratio: 3.01,
-      });
-    }
-  }
-  // 8) CITY GLITTER — high arp shimmer + mid pad.
-  function _bgmScheduleSynthCityGlitter(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 3.5, {
-          type: 'sawtooth', peak: 0.05, attack: 0.4, detune: i * 3,
-          filter: { type: 'lowpass', freq: 1800 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    // High arp — every step.
-    _bgmPlayTone(at, ch[beat % ch.length] * 4, 0.1, {
-      type: 'sine', peak: 0.05,
-      pan: ((beat % 4) - 1.5) * 0.5,
-    });
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.32 });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'sawtooth', peak: 0.2,
-      filter: { type: 'lowpass', freq: 400 },
-    });
-  }
-  // 9) DARK MATTER — minor ominous, low sub, sparse.
-  function _bgmScheduleSynthDarkMatter(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 4, 0.7, {
-      type: 'sine', peak: 0.32,
-      filter: { type: 'lowpass', freq: 120 },
-    });
-    if (beat === 0) _bgmPlayTone(at, ch[0], 4.0, {
-      type: 'sawtooth', peak: 0.07, attack: 0.8,
-      filter: { type: 'lowpass', freq: 800, q: 3 },
-    });
-    if (beat === 8) _bgmPlayTone(at, ch[2], 3.5, {
-      type: 'sawtooth', peak: 0.06, attack: 0.6,
-      filter: { type: 'lowpass', freq: 700 },
-    });
-    if (beat === 14 && Math.random() < 0.5) {
-      _bgmPlayFmBell(at, ch[3] * 2, 1.5, {
-        peak: 0.05, modDepth: 200, ratio: 4.01,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-  // 10) HORIZON RUSH — fast aggressive, full kit, big lead.
-  function _bgmScheduleSynthHorizonRush(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 2 === 0) {
-      _bgmPlayTone(at, (beat % 4 < 2 ? ch[0] : ch[2]) / 2, 0.18, {
-        type: 'sawtooth', peak: 0.24,
-        filter: { type: 'lowpass', freq: 500, q: 3 },
-      });
-    }
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.55 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.25 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 8500, peak: 0.06,
-    });
-    if (beat === 6) {
-      _bgmPlayTone(at, ch[2] * 2, 0.5, {
-        type: 'sawtooth', peak: 0.12, detune: 6,
-        filter: { type: 'lowpass', freq: 2400 },
-      });
-    }
-    if (beat === 10) {
-      _bgmPlayTone(at, ch[3] * 2, 0.5, {
-        type: 'sawtooth', peak: 0.12, detune: -6,
-        filter: { type: 'lowpass', freq: 2400 },
-      });
-    }
-  }
-
-  // ── §lofi ── chill hip-hop, jazzy 7ths, soft drums ──────────────
-  // ii-V-I-vi progression in C (Dm7 - G7 - Cmaj7 - Am7) — the lo-fi
-  // home turf.
-  const LOFI_CHORDS = [
-    [146.83, 174.61, 220.00, 261.63], // Dm7
-    [196.00, 246.94, 293.66, 349.23], // G7
-    [130.81, 164.81, 196.00, 246.94], // Cmaj7
-    [220.00, 261.63, 329.63, 415.30], // Am7
-  ];
-  // 1) STUDY DESK — soft kick + hat + 7th chord stabs.
-  function _bgmScheduleLofiStudyDesk(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.3, end: 50, dur: 0.22 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 7500, peak: 0.05, pan: 0.25,
-    });
-    if (beat % 8 === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 1.2, {
-          type: 'triangle', peak: 0.09, attack: 0.05,
-          filter: { type: 'lowpass', freq: 1400 },
-          pan: (i - 1.5) * 0.25,
-        });
-      }
-    }
-    // Mellow lead, sparse.
-    if (beat === 10 && Math.random() < 0.7) {
-      _bgmPlayTone(at, ch[2] * 2, 0.6, {
-        type: 'sine', peak: 0.1, attack: 0.04, pan: 0.15,
-      });
-    }
-  }
-  // 2) COFFEE STEAM — brushed snare + walking bass + warm pad.
-  function _bgmScheduleLofiCoffeeSteam(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    // Brushed snare on beats 2 and 4 (steps 4 + 12).
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, {
-      dur: 0.18, peak: 0.16, freq: 1400,
-    });
-    // Walking bass — root on 1, fifth on 3, chord-passing notes on
-    // off-beats. Comes from a small table per bar.
-    const walk = [ch[0], ch[0], ch[2], ch[2]];
-    if (beat % 4 === 0) _bgmPlayTone(at, walk[bar] / 2, 0.55, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 380, q: 1.5 },
-    });
-    // Warm pad on bar starts.
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 3.2, {
-          type: 'triangle', peak: 0.06, attack: 0.4,
-          filter: { type: 'lowpass', freq: 1200 },
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-  }
-  // 3) RAIN WINDOW — sparse droplets + chord washes, no drums.
-  function _bgmScheduleLofiRainWindow(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    // Constant patter of rain "droplets" — high noise particles.
-    if (Math.random() < 0.7) {
-      _bgmPlayNoise(at, 0.02, {
-        filterType: 'highpass', freq: 6000 + Math.random() * 4000,
-        peak: 0.05 + Math.random() * 0.04,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    // Long chord wash on bar starts.
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.2, {
-          type: 'triangle', peak: 0.07, attack: 0.6,
-          filter: { type: 'lowpass', freq: 1500 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    // Occasional bell drop.
-    if (beat % 7 === 0 && Math.random() < 0.5) {
-      _bgmPlayFmBell(at, ch[(beat / 7) % ch.length] * 2, 0.7, {
-        peak: 0.06, modDepth: 80, ratio: 2.01,
-      });
-    }
-  }
-  // 4) VINYL CRACKLE — gritty crackle layer + chord stabs.
-  function _bgmScheduleLofiVinylCrackle(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    // Always-on crackle — random tiny noise bursts on every step.
-    if (Math.random() < 0.55) _bgmPlayNoise(at + Math.random() * 0.1, 0.015, {
-      filterType: 'bandpass', freq: 3000 + Math.random() * 2000,
-      q: 6, peak: 0.04,
-    });
-    if (beat === 0) _bgmPlayKick(at, { peak: 0.32, end: 45 });
-    // Chord stabs on each downbeat.
-    if (beat % 4 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 0.4, {
-          type: 'triangle', peak: 0.07, attack: 0.02,
-          filter: { type: 'lowpass', freq: 1300 },
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.15 });
-  }
-  // 5) NIGHT BUS — moving bass + soft hat + dreamy lead.
-  const LOFI_NIGHTBUS_LEAD = [261.63, 329.63, 392, 440, 392, 329.63, 293.66, 261.63];
-  function _bgmScheduleLofiNightBus(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    // Hat every step quietly.
-    if (beat % 2 === 0) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8000, peak: 0.04, pan: 0.2,
-    });
-    // Walking bass — moves through chord root and approach tones.
-    const bassPattern = [ch[0], ch[0], ch[1], ch[0]];
-    if (beat % 4 === 0) _bgmPlayTone(at, bassPattern[bar] / 2, 0.5, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 360 },
-    });
-    if (beat === 0) _bgmPlayKick(at, { peak: 0.32 });
-    // Dreamy lead — slow melody, sine.
-    if (beat % 2 === 0) {
-      const noteIdx = ((beat / 2) + bar * 2) % LOFI_NIGHTBUS_LEAD.length;
-      _bgmPlayTone(at, LOFI_NIGHTBUS_LEAD[noteIdx], 0.4, {
-        type: 'sine', peak: 0.09, attack: 0.06, pan: 0.1,
-      });
-    }
-  }
-
-  // 6) VINYL POP — warm noise pops + chord stabs + mellow lead.
-  function _bgmScheduleLofiVinylPop(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.28, end: 48 });
-    if (Math.random() < 0.3) {
-      _bgmPlayNoise(at + Math.random() * 0.1, 0.02, {
-        filterType: 'lowpass', freq: 1500, peak: 0.06,
-      });
-    }
-    if (beat % 4 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 0.4, {
-          type: 'triangle', peak: 0.07, attack: 0.04,
-          filter: { type: 'lowpass', freq: 1300 },
-        });
-      }
-    }
-    if (beat === 6) {
-      _bgmPlayTone(at, ch[2] * 2, 0.7, {
-        type: 'sine', peak: 0.08, attack: 0.1,
-      });
-    }
-  }
-  // 7) AFTER HOURS — piano-like notes + soft kit + late-night feel.
-  function _bgmScheduleLofiAfterHours(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, ch[0], 0.6, {
-        type: 'triangle', peak: 0.12, attack: 0.005,
-        filter: { type: 'lowpass', freq: 1200 },
-      });
-    }
-    if (beat === 4 || beat === 12) {
-      _bgmPlayTone(at, ch[2], 0.5, {
-        type: 'triangle', peak: 0.1, attack: 0.005,
-        filter: { type: 'lowpass', freq: 1500 },
-      });
-    }
-    if (beat === 0) _bgmPlayKick(at, { peak: 0.24, end: 42 });
-    if (beat === 8 && Math.random() < 0.5) _bgmPlaySnare(at, { peak: 0.11 });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.5, {
-      type: 'sine', peak: 0.18,
-    });
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.0, {
-          type: 'triangle', peak: 0.05, attack: 0.5,
-          filter: { type: 'lowpass', freq: 1000 },
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-  }
-  // 8) OPEN WINDOW — breezy, soft hat, gentle melody.
-  function _bgmScheduleLofiOpenWindow(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat % 2 === 0) _bgmPlayNoise(at, 0.02, {
-      filterType: 'highpass', freq: 8500, peak: 0.04, pan: 0.3,
-    });
-    if (beat % 8 === 0) {
-      _bgmPlayNoise(at, 1.5, {
-        filterType: 'highpass', freq: 4000, peak: 0.03,
-        pan: ((step * 0.11) % 2) - 1,
-      });
-    }
-    const gentle = [ch[0] * 2, ch[1] * 2, ch[2] * 2, ch[1] * 2];
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, gentle[bar], 0.7, {
-        type: 'triangle', peak: 0.08, attack: 0.1,
-      });
-    }
-    if (beat === 0) _bgmPlayKick(at, { peak: 0.26 });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'triangle', peak: 0.17,
-    });
-  }
-  // 9) SCHOOL HALL — bell chimes + soft kit + nostalgic pad.
-  function _bgmScheduleLofiSchoolHall(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat % 4 === 0) {
-      _bgmPlayFmBell(at, ch[bar % ch.length] * 2, 1.0, {
-        peak: 0.09, modDepth: 50, ratio: 2.01,
-        pan: (bar - 1.5) * 0.4,
-      });
-    }
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.26 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.13 });
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.0, {
-          type: 'triangle', peak: 0.06, attack: 0.5,
-          filter: { type: 'lowpass', freq: 1300 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-  }
-  // 10) DUSK STROLL — walking bass + soft hat + mellow lead.
-  function _bgmScheduleLofiDuskStroll(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    const walk = [ch[0], ch[0], ch[1], ch[0], ch[2], ch[2], ch[1], ch[0]];
-    if (beat % 2 === 0) {
-      _bgmPlayTone(at, walk[((beat / 2) + bar * 2) % walk.length] / 2, 0.4, {
-        type: 'triangle', peak: 0.18,
-        filter: { type: 'lowpass', freq: 380 },
-      });
-    }
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8000, peak: 0.04, pan: 0.3,
-    });
-    if (beat === 0) _bgmPlayKick(at, { peak: 0.28 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.13 });
-    if (beat === 8 || beat === 14) {
-      _bgmPlayTone(at, ch[2] * 2, 0.5, {
-        type: 'sine', peak: 0.09, attack: 0.05,
-      });
-    }
-  }
-
-  // ── §darkambient ── slow drones, no rhythm, atmospheric ───────────
-  // Bass roots for each track's root drone. Tracks have NO drum
-  // patterns; the "beat" grid is just a slow scheduler tick.
-  // 1) ABYSS — sub bass drone + occasional shimmer.
-  function _bgmScheduleDarkAbyss(step, at) {
-    const beat = step % 16;
-    // Re-trigger sub drone every 8 steps so the loop never decays.
-    if (beat % 8 === 0) {
-      _bgmPlayTone(at, 41.20, 6.5, {
-        type: 'sine', peak: 0.32, attack: 1.5,
-        filter: { type: 'lowpass', freq: 180 },
-      });
-      _bgmPlayTone(at, 82.41, 6.5, {
-        type: 'triangle', peak: 0.06, attack: 2.0,
-      });
-    }
-    // Random high shimmer.
-    if (Math.random() < 0.08) {
-      _bgmPlayFmBell(at, 1500 + Math.random() * 1500, 2.5, {
-        peak: 0.03, modDepth: 200, ratio: 4.01,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-  // 2) CATHEDRAL — long pad chords + bell drops, very reverberant feel.
-  const DARK_CATHEDRAL_CHORDS = [
-    [73.42,  87.31, 110.00],  // D minor triad low
-    [65.41,  82.41, 98.00],   // C low triad
-    [98.00, 123.47, 146.83],  // G triad
-    [87.31, 110.00, 130.81],  // F-A-C triad
-  ];
-  function _bgmScheduleDarkCathedral(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = DARK_CATHEDRAL_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 7.0, {
-          type: 'triangle', peak: 0.08, attack: 1.8,
-          filter: { type: 'lowpass', freq: 1400 },
-          pan: (i - 1) * 0.4,
-        });
-        _bgmPlayTone(at, ch[i] * 4, 7.0, {
-          type: 'sine', peak: 0.04, attack: 2.2,
-          pan: (i - 1) * 0.5,
-        });
-      }
-    }
-    // Sparse bell drops.
-    if (beat === 6 && Math.random() < 0.5) {
-      _bgmPlayFmBell(at, ch[2] * 4, 2.0, {
-        peak: 0.06, modDepth: 60, ratio: 2.01,
-      });
-    }
-  }
-  // 3) STATIC RIFT — filtered noise washes + pitched sub.
-  function _bgmScheduleDarkStaticRift(step, at) {
-    const beat = step % 16;
-    // Sub drone, retriggered slowly.
-    if (beat === 0) _bgmPlayTone(at, 49.00 * (1 + 0.06 * Math.sin(step / 32)), 5.5, {
-      type: 'sine', peak: 0.28, attack: 1.2,
-    });
-    // Long, filtered noise wash.
-    if (beat % 4 === 0) _bgmPlayNoise(at, 2.0, {
-      filterType: 'bandpass', freq: 600 + (step % 32) * 30,
-      q: 3, peak: 0.05,
-      pan: ((step * 0.13) % 2) - 1,
-    });
-    // Occasional shimmer.
-    if (Math.random() < 0.07) {
-      _bgmPlayFmBell(at, 1800 + Math.random() * 800, 1.5, {
-        peak: 0.03, modDepth: 240, ratio: 5.01,
-      });
-    }
-  }
-  // 4) DEEP SIGNAL — slowly panning FM bells + pad bed.
-  function _bgmScheduleDarkDeepSignal(step, at) {
-    const beat = step % 16;
-    if (beat === 0) {
-      // Pad bed
-      _bgmPlayTone(at, 110, 6.0, {
-        type: 'triangle', peak: 0.1, attack: 2.0,
-        filter: { type: 'lowpass', freq: 800 },
-      });
-      _bgmPlayTone(at, 164.81, 6.0, {
-        type: 'sine', peak: 0.06, attack: 2.5, pan: -0.4,
-      });
-      _bgmPlayTone(at, 220, 6.0, {
-        type: 'sine', peak: 0.06, attack: 2.5, pan: 0.4,
-      });
-    }
-    // Bell traversing the stereo field.
-    if (beat % 5 === 0) {
-      const pan = Math.sin(step / 6) * 0.8;
-      _bgmPlayFmBell(at, 330 + (step % 7) * 30, 2.2, {
-        peak: 0.05, modDepth: 100, ratio: 2.51, pan,
-      });
-    }
-  }
-  // 5) SUBLAYER — pulsing low drone + breath-like swells.
-  function _bgmScheduleDarkSublayer(step, at) {
-    const beat = step % 16;
-    // Pulsing sub — short bursts on every 2 steps.
-    if (beat % 2 === 0) _bgmPlayTone(at, 43.65, 0.45, {
-      type: 'sine', peak: 0.22, attack: 0.08,
-    });
-    // Breath swell every 16 steps.
-    if (beat === 0) {
-      _bgmPlayNoise(at, 3.5, {
-        filterType: 'bandpass', freq: 700, q: 1.8,
-        peak: 0.06,
-      });
-    }
-    // Occasional mid drone re-trigger.
-    if (beat === 0) _bgmPlayTone(at, 130.81, 5.0, {
-      type: 'triangle', peak: 0.05, attack: 1.5,
-      filter: { type: 'lowpass', freq: 700 },
-    });
-  }
-
-  // 6) EVENT HORIZON — sub drone + rising-tension FM bells.
-  function _bgmScheduleDarkEventHorizon(step, at) {
-    const beat = step % 16;
-    if (beat % 8 === 0) {
-      _bgmPlayTone(at, 36.71, 7.0, {
-        type: 'sine', peak: 0.3, attack: 1.8,
-        filter: { type: 'lowpass', freq: 160 },
-      });
-    }
-    if (beat === 0) {
-      _bgmPlayFmBell(at, 220 + (step % 80) * 5, 3.5, {
-        peak: 0.05, modDepth: 100 + (step % 100), ratio: 3.01,
-        pan: ((step * 0.07) % 2) - 1,
-      });
-    }
-    if (Math.random() < 0.06) {
-      _bgmPlayFmBell(at, 800 + Math.random() * 600, 0.8, {
-        peak: 0.04, modDepth: 300, ratio: 5.01,
-      });
-    }
-  }
-  // 7) MIDNIGHT VEIL — slow chord swell + sub + whisper-noise.
-  const DARK_VEIL_TRIAD = [110, 130.81, 164.81]; // Am
-  function _bgmScheduleDarkMidnightVeil(step, at) {
-    const beat = step % 16;
-    if (beat === 0) {
-      for (let i = 0; i < DARK_VEIL_TRIAD.length; i++) {
-        _bgmPlayTone(at, DARK_VEIL_TRIAD[i], 7.0, {
-          type: 'triangle', peak: 0.07, attack: 2.0,
-          filter: { type: 'lowpass', freq: 1200 },
-          pan: (i - 1) * 0.4,
-        });
-      }
-    }
-    if (beat === 0) _bgmPlayTone(at, 55, 6.5, {
-      type: 'sine', peak: 0.28, attack: 1.5,
-    });
-    if (Math.random() < 0.1) {
-      _bgmPlayNoise(at, 0.8, {
-        filterType: 'bandpass', freq: 800 + Math.random() * 800,
-        q: 5, peak: 0.04,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-  // 8) THE WELL — deep drone + decaying bell echo + sparse thumps.
-  function _bgmScheduleDarkTheWell(step, at) {
-    const beat = step % 16;
-    if (beat % 8 === 0) {
-      _bgmPlayTone(at, 41.20, 6.0, {
-        type: 'sine', peak: 0.3, attack: 1.5,
-        filter: { type: 'lowpass', freq: 150 },
-      });
-    }
-    if (beat === 0 || beat === 9) {
-      const f = 440 + (beat % 4) * 50;
-      for (let k = 0; k < 4; k++) {
-        const o = k * 0.5;
-        _bgmPlayFmBell(at + o, f, 1.2, {
-          peak: 0.06 * Math.pow(0.55, k),
-          modDepth: 80, ratio: 2.01,
-          pan: ((k % 2) - 0.5) * 0.8,
-        });
-      }
-    }
-    if (Math.random() < 0.04) {
-      _bgmPlayKick(at, { peak: 0.16, start: 80, end: 30, dur: 0.5 });
-    }
-  }
-  // 9) STARFIELD — distant scattered bells + sub drone + warm pad.
-  function _bgmScheduleDarkStarfield(step, at) {
-    const beat = step % 16;
-    if (beat % 8 === 0) {
-      _bgmPlayTone(at, 43.65, 7.0, {
-        type: 'sine', peak: 0.26, attack: 2.0,
-      });
-    }
-    if (Math.random() < 0.18) {
-      _bgmPlayFmBell(at, 1200 + Math.random() * 2000, 1.8, {
-        peak: 0.04, modDepth: 80, ratio: 3.01,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    if (beat === 0) {
-      _bgmPlayTone(at, 174.61, 6.0, {
-        type: 'triangle', peak: 0.06, attack: 1.5,
-        filter: { type: 'lowpass', freq: 800 },
-      });
-    }
-  }
-  // 10) VOID HUM — pure low drone with subtle pitch/timbre modulation.
-  function _bgmScheduleDarkVoidHum(step, at) {
-    const beat = step % 16;
-    if (beat % 4 === 0) {
-      _bgmPlayTone(at, 38.89, 4.5, {
-        type: 'sine', peak: 0.3, attack: 0.8,
-        detune: Math.sin(step * 0.1) * 12,
-      });
-    }
-    if (beat % 8 === 0) {
-      _bgmPlayTone(at, 77.78, 5.0, {
-        type: 'triangle', peak: 0.08, attack: 1.5,
-        filter: { type: 'lowpass', freq: 400 },
-      });
-    }
-    if (beat === 0 || beat === 6) {
-      _bgmPlayTone(at, 233.08, 3.5, {
-        type: 'sine', peak: 0.04, attack: 1.0,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-
-  // ── §8bit ── chiptune (NES-flavoured: 2 squares + triangle bass + noise)
-  // Each track uses raw waveforms (no filters on lead/arp) to keep the
-  // crunchy chip character. Triangle = bass voice (NES "VRC6" style),
-  // square = melody + counter-melody, noise = percussion.
-
-  // 1) HYRULE FIELD — heroic Zelda-style sweeping melody.
-  const _8BIT_HYRULE_CH = [
-    [261.63, 329.63, 392.00],  // C
-    [196.00, 246.94, 293.66],  // G
-    [220.00, 261.63, 329.63],  // Am
-    [174.61, 220.00, 261.63],  // F
-  ];
-  const _8BIT_HYRULE_LEAD = [
-    523, 587, 659, 783, 880, 783, 659, 587,
-    523, 659, 587, 659, 783, 880, 659, 523,
-    659, 783, 880, 659, 523, 587, 659, 587,
-    523, 440, 392, 440, 523, 587, 523, 392,
-  ];
-  function _bgmSchedule8BitHyruleField(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_HYRULE_CH[bar];
-    // Triangle bass — root + fifth on alternating downbeats.
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.38, {
-      type: 'triangle', peak: 0.3,
-    });
-    else if (beat % 4 === 2) _bgmPlayTone(at, ch[2] / 2, 0.32, {
-      type: 'triangle', peak: 0.26,
-    });
-    // Square lead — 8th notes.
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 8) % _8BIT_HYRULE_LEAD.length;
-      _bgmPlayTone(at, _8BIT_HYRULE_LEAD[idx], 0.22, {
-        type: 'square', peak: 0.16,
-      });
-    }
-    // Counter-melody arp on offbeats.
-    if (beat % 2 === 1) {
-      _bgmPlayTone(at, ch[((beat - 1) / 2) % 3], 0.1, {
-        type: 'square', peak: 0.08, pan: -0.35,
-      });
-    }
-    // Hat-like noise on 5 + 13.
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.04, {
-      filterType: 'highpass', freq: 5000, peak: 0.11,
-    });
-  }
-
-  // 2) STAR ROAD — bouncy major-key Mario-flavour.
-  const _8BIT_STAR_CH = [
-    [261.63, 329.63, 392.00],  // C
-    [349.23, 440.00, 523.25],  // F
-    [392.00, 493.88, 587.33],  // G
-    [261.63, 329.63, 392.00],  // C
-  ];
-  function _bgmSchedule8BitStarRoad(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_STAR_CH[bar];
-    // Bouncy bass: every 2 steps alternating root / fifth.
-    if (beat % 2 === 0) _bgmPlayTone(at, (beat % 4 < 2 ? ch[0] : ch[2]) / 2, 0.14, {
-      type: 'triangle', peak: 0.26,
-    });
-    // Ascending arpeggio — square voice, 16ths.
-    _bgmPlayTone(at, ch[beat % 3] * 2, 0.09, {
-      type: 'square', peak: 0.09, pan: 0.25,
-    });
-    // Staccato lead on beats 1, 5, 9, 13.
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[1] * 2, 0.18, {
-      type: 'square', peak: 0.14,
-    });
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.05, {
-      filterType: 'highpass', freq: 4000, peak: 0.14,
-    });
-  }
-
-  // 3) DUNGEON CRAWL — slow, dark, minor — Zelda dungeon dread.
-  const _8BIT_DUNGEON_CH = [
-    [220.00, 261.63, 329.63],  // Am
-    [146.83, 174.61, 220.00],  // Dm
-    [164.81, 207.65, 246.94],  // E
-    [220.00, 261.63, 329.63],  // Am
-  ];
-  function _bgmSchedule8BitDungeonCrawl(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_DUNGEON_CH[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.6, {
-      type: 'triangle', peak: 0.32,
-    });
-    // Sparse minor lead.
-    if (beat === 0 || beat === 8) _bgmPlayTone(at, ch[2], 0.4, {
-      type: 'square', peak: 0.12,
-    });
-    if (beat === 4 || beat === 12) _bgmPlayTone(at, ch[1], 0.4, {
-      type: 'square', peak: 0.11,
-    });
-    // Low square pad bed.
-    if (beat === 0) _bgmPlayTone(at, ch[0], 2.0, {
-      type: 'square', peak: 0.04,
-    });
-    // Sparse drip / footstep.
-    if (Math.random() < 0.08) _bgmPlayNoise(at, 0.05, {
-      filterType: 'lowpass', freq: 600, peak: 0.06,
-      pan: (Math.random() * 2) - 1,
-    });
-  }
-
-  // 4) BOSS BATTLE — fast aggressive minor, 16th-note bass + lead.
-  const _8BIT_BOSS_CH = [
-    [220.00, 261.63, 329.63],
-    [174.61, 220.00, 261.63],
-    [196.00, 246.94, 293.66],
-    [220.00, 261.63, 329.63],
-  ];
-  const _8BIT_BOSS_LEAD_OFFSETS = [2, 1, 2, 0, 1, 2, 0, 2];
-  function _bgmSchedule8BitBossBattle(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_BOSS_CH[bar];
-    // Driving 16th-note bass alternating root / octave.
-    _bgmPlayTone(at, beat % 2 === 0 ? ch[0] / 2 : ch[0], 0.08, {
-      type: 'triangle', peak: 0.26,
-    });
-    // Aggressive lead — 8th note pattern.
-    if (beat % 2 === 0) {
-      const ofs = _8BIT_BOSS_LEAD_OFFSETS[(beat / 2) % _8BIT_BOSS_LEAD_OFFSETS.length];
-      _bgmPlayTone(at, ch[ofs] * 2, 0.1, {
-        type: 'square', peak: 0.16,
-      });
-    }
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.42 });
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.06, {
-      filterType: 'highpass', freq: 4500, peak: 0.18,
-    });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.02, {
-      filterType: 'highpass', freq: 9000, peak: 0.05,
-    });
-  }
-
-  // 5) PIXEL QUEST — balanced overworld theme, walking bass + lead.
-  const _8BIT_QUEST_CH = [
-    [261.63, 329.63, 392.00],  // C
-    [220.00, 261.63, 329.63],  // Am
-    [174.61, 220.00, 261.63],  // F
-    [196.00, 246.94, 293.66],  // G
-  ];
-  const _8BIT_QUEST_LEAD = [
-    523, 587, 659, 523, 392, 440, 523, 392,
-    440, 523, 587, 523, 392, 349, 392, 440,
-  ];
-  function _bgmSchedule8BitPixelQuest(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_QUEST_CH[bar];
-    if (beat % 2 === 0) _bgmPlayTone(at, ((beat / 2) % 2 === 0 ? ch[0] : ch[2]) / 2, 0.12, {
-      type: 'triangle', peak: 0.24,
-    });
-    const idx = (beat + bar * 4) % _8BIT_QUEST_LEAD.length;
-    _bgmPlayTone(at, _8BIT_QUEST_LEAD[idx], 0.15, {
-      type: 'square', peak: 0.13,
-    });
-    if (beat % 2 === 1) _bgmPlayTone(at, ch[((beat - 1) / 2) % 3] * 2, 0.1, {
-      type: 'square', peak: 0.07, pan: 0.3,
-    });
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.04, {
-      filterType: 'highpass', freq: 5000, peak: 0.1,
-    });
-  }
-
-  // 6) CASTLE FANFARE — regal triumphant march (I-IV-V-I in C).
-  const _8BIT_CASTLE_CH = [
-    [261.63, 329.63, 392.00],  // C
-    [349.23, 440.00, 523.25],  // F
-    [392.00, 493.88, 587.33],  // G
-    [261.63, 329.63, 392.00],  // C
-  ];
-  const _8BIT_CASTLE_LEAD = [
-    523, 523, 587, 659, 783, 659, 523, 587,
-    659, 659, 783, 880, 1046, 880, 783, 659,
-    523, 587, 659, 587, 659, 783, 880, 1046,
-    783, 659, 587, 523, 587, 659, 523, 523,
-  ];
-  function _bgmSchedule8BitCastleFanfare(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_CASTLE_CH[bar];
-    // March bass — root/fifth alternation on 8ths.
-    if (beat % 2 === 0) _bgmPlayTone(at, ((beat % 4) < 2 ? ch[0] : ch[2]) / 2, 0.13, {
-      type: 'triangle', peak: 0.3,
-    });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 8) % _8BIT_CASTLE_LEAD.length;
-      _bgmPlayTone(at, _8BIT_CASTLE_LEAD[idx], 0.2, {
-        type: 'square', peak: 0.17,
-      });
-    }
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.42 });
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.04, {
-      filterType: 'highpass', freq: 4500, peak: 0.18,
-    });
-  }
-
-  // 7) WATER TEMPLE — mystical, slower, descending arp, water drops.
-  const _8BIT_WATER_CH = [
-    [261.63, 311.13, 392.00],  // Cm-ish (C-Eb-G)
-    [220.00, 261.63, 329.63],  // Am
-    [196.00, 233.08, 293.66],  // Gm (G-Bb-D)
-    [220.00, 261.63, 329.63],  // Am
-  ];
-  function _bgmSchedule8BitWaterTemple(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_WATER_CH[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.5, {
-      type: 'triangle', peak: 0.28,
-    });
-    // Descending arp through chord — high to low.
-    if (beat % 2 === 0) {
-      const arpNotes = [ch[2] * 2, ch[1] * 2, ch[0] * 2, ch[1] * 2];
-      _bgmPlayTone(at, arpNotes[(beat / 2) % 4], 0.18, {
-        type: 'square', peak: 0.1,
-      });
-    }
-    if (beat === 0 || beat === 6 || beat === 11) {
-      _bgmPlayTone(at, ch[2] * 2, 0.4, {
-        type: 'square', peak: 0.13,
-      });
-    }
-    if (Math.random() < 0.12) {
-      _bgmPlayNoise(at, 0.03, {
-        filterType: 'highpass', freq: 6500, peak: 0.07,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-
-  // 8) SKY ISLAND — high ethereal, dreamy lead + bell shimmer.
-  const _8BIT_SKY_CH = [
-    [392.00, 493.88, 587.33],  // G
-    [440.00, 523.25, 659.25],  // A
-    [349.23, 440.00, 523.25],  // F
-    [392.00, 493.88, 587.33],  // G
-  ];
-  function _bgmSchedule8BitSkyIsland(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_SKY_CH[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'triangle', peak: 0.22,
-    });
-    // Dreamy lead on every 8th.
-    if (beat % 2 === 0) {
-      const leadNotes = [ch[2] * 2, ch[1] * 2, ch[2] * 2, ch[0] * 2];
-      _bgmPlayTone(at, leadNotes[(beat / 2) % 4], 0.3, {
-        type: 'square', peak: 0.12,
-      });
-    }
-    if (beat % 2 === 1) _bgmPlayTone(at, ch[((beat - 1) / 2) % 3] * 2, 0.1, {
-      type: 'square', peak: 0.08, pan: 0.3,
-    });
-    if (Math.random() < 0.14) _bgmPlayFmBell(at, ch[2] * 4, 0.4, {
-      peak: 0.05, modDepth: 40, ratio: 2.01,
-      pan: (Math.random() * 2) - 1,
-    });
-  }
-
-  // 9) FINAL BOSS — epic dramatic, dense bass + driving lead + full kit.
-  const _8BIT_FINAL_CH = [
-    [196.00, 233.08, 293.66],  // Gm
-    [174.61, 207.65, 261.63],  // F-ish
-    [164.81, 207.65, 246.94],  // E
-    [196.00, 233.08, 293.66],  // Gm
-  ];
-  const _8BIT_FINAL_LEAD = [
-    587, 659, 783, 880, 1046, 880, 783, 659,
-    587, 523, 659, 783, 880, 1046, 880, 783,
-    659, 783, 880, 1046, 1175, 1046, 880, 783,
-    659, 587, 523, 440, 523, 587, 659, 587,
-  ];
-  function _bgmSchedule8BitFinalBoss(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_FINAL_CH[bar];
-    // Relentless 16th-note bass on the root.
-    _bgmPlayTone(at, ch[0] / 2, 0.07, {
-      type: 'triangle', peak: 0.28,
-    });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 8) % _8BIT_FINAL_LEAD.length;
-      _bgmPlayTone(at, _8BIT_FINAL_LEAD[idx], 0.12, {
-        type: 'square', peak: 0.18,
-      });
-    }
-    if (beat % 2 === 1) _bgmPlayTone(at, ch[((beat - 1) / 2) % 3], 0.1, {
-      type: 'square', peak: 0.09, pan: -0.3,
-    });
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.48 });
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.07, {
-      filterType: 'highpass', freq: 4500, peak: 0.2,
-    });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.02, {
-      filterType: 'highpass', freq: 9000, peak: 0.06,
-    });
-  }
-
-  // 10) MINIGAME — fast playful, victory-flavoured.
-  const _8BIT_MINI_CH = [
-    [261.63, 329.63, 392.00],  // C
-    [261.63, 329.63, 392.00],  // C
-    [349.23, 440.00, 523.25],  // F
-    [392.00, 493.88, 587.33],  // G
-  ];
-  const _8BIT_MINI_LEAD = [
-    523, 659, 783, 1046, 783, 659, 523, 659,
-    523, 659, 587, 659, 783, 1046, 880, 783,
-    880, 1046, 880, 783, 659, 587, 523, 587,
-    659, 587, 523, 440, 523, 587, 659, 783,
-  ];
-  function _bgmSchedule8BitMinigame(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _8BIT_MINI_CH[bar];
-    // Every-step bouncy bass.
-    _bgmPlayTone(at, ((beat % 4) < 2 ? ch[0] : ch[2]) / 2, 0.08, {
-      type: 'triangle', peak: 0.24,
-    });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 8) % _8BIT_MINI_LEAD.length;
-      _bgmPlayTone(at, _8BIT_MINI_LEAD[idx], 0.1, {
-        type: 'square', peak: 0.15,
-      });
-    }
-    if (beat % 2 === 1) _bgmPlayTone(at, ch[((beat - 1) / 2) % 3] * 2, 0.08, {
-      type: 'square', peak: 0.08, pan: 0.3,
-    });
-    if (beat === 4 || beat === 12) _bgmPlayNoise(at, 0.04, {
-      filterType: 'highpass', freq: 5000, peak: 0.14,
-    });
-  }
-
-  // ── §smoothjazz ── lush 7th chords, walking bass, sax leads ───────
-  // Two new helpers shared by every smooth-jazz track. Both compose
-  // existing primitives so the timbre matches the rest of the engine.
-  // _bgmPlayJazzSax: two detuned sawtooths (octave-doubled) through a
-  // softening lowpass — reads as a smooth tenor saxophone.
-  // _bgmPlayJazzRhodes: sine fundamental + brief FM overtone — reads
-  // as an electric-piano Rhodes chord voice.
-  function _bgmPlayJazzSax(at, freq, dur, opts = {}) {
-    const peak = opts.peak ?? 0.1;
-    _bgmPlayTone(at, freq, dur, {
-      type: 'sawtooth', peak, attack: 0.04,
-      filter: { type: 'lowpass', freq: 1800, q: 1.2 },
-      detune: 5, pan: opts.pan ?? 0.15,
-    });
-    _bgmPlayTone(at, freq, dur, {
-      type: 'sawtooth', peak: peak * 0.55, attack: 0.05,
-      filter: { type: 'lowpass', freq: 1400, q: 1.2 },
-      detune: -5, pan: -(opts.pan ?? 0.15),
-    });
-  }
-  function _bgmPlayJazzRhodes(at, freq, dur, opts = {}) {
-    const peak = opts.peak ?? 0.08;
-    _bgmPlayTone(at, freq, dur, {
-      type: 'sine', peak, attack: 0.005,
-      pan: opts.pan ?? 0,
-    });
-    _bgmPlayFmBell(at, freq, dur * 0.3, {
-      peak: peak * 0.3, modDepth: 30, ratio: 4.01,
-      pan: opts.pan ?? 0,
-    });
-  }
-
-  // Two jazz progressions. JAZZ_I_VI_II_V is the classic "rhythm
-  // changes" turnaround; JAZZ_VI_II_V_I is the same chords starting
-  // on the relative minor for a moodier opening.
-  const JAZZ_I_VI_II_V = [
-    [130.81, 164.81, 196.00, 246.94], // Cmaj7
-    [220.00, 261.63, 329.63, 415.30], // Am7
-    [146.83, 174.61, 220.00, 261.63], // Dm7
-    [196.00, 246.94, 293.66, 349.23], // G7
-  ];
-  const JAZZ_VI_II_V_I = [
-    [220.00, 261.63, 329.63, 415.30], // Am7
-    [146.83, 174.61, 220.00, 261.63], // Dm7
-    [196.00, 246.94, 293.66, 349.23], // G7
-    [130.81, 164.81, 196.00, 246.94], // Cmaj7
-  ];
-
-  // 1) MIDNIGHT LOUNGE — slow ballad, sustained sax, brushed snare.
-  const _JAZZ_LOUNGE_LEAD = [523.25, 587.33, 659.25, 587.33, 523.25, 493.88, 440.00, 523.25];
-  function _bgmScheduleJazzMidnightLounge(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.6, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 400 },
-    });
-    if (beat % 4 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 0.7, { peak: 0.07, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.2, freq: 1200, peak: 0.1 });
-    if (beat % 4 === 0) {
-      const idx = ((beat / 4) + bar * 4) % _JAZZ_LOUNGE_LEAD.length;
-      _bgmPlayJazzSax(at, _JAZZ_LOUNGE_LEAD[idx], 1.5, { peak: 0.1 });
-    }
-  }
-
-  // 2) CITY LIGHTS — mid-tempo walking groove + hat + melody.
-  const _JAZZ_CITY_LEAD = [523.25, 587.33, 659.25, 523.25, 440.00, 523.25, 587.33, 523.25];
-  function _bgmScheduleJazzCityLights(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_I_VI_II_V[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 400 },
-    });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8000, peak: 0.05, pan: 0.25,
-    });
-    if (beat % 4 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 0.5, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.15, freq: 1500, peak: 0.12 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _JAZZ_CITY_LEAD.length;
-      _bgmPlayJazzSax(at, _JAZZ_CITY_LEAD[idx], 0.4, { peak: 0.08 });
-    }
-  }
-
-  // 3) AFTER PARTY — chill, sparse, long sax notes over slow chords.
-  function _bgmScheduleJazzAfterParty(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_VI_II_V_I[bar];
-    if (beat === 0) {
-      _bgmPlayTone(at, ch[0] / 2, 0.8, {
-        type: 'triangle', peak: 0.22,
-        filter: { type: 'lowpass', freq: 380 },
-      });
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 3.5, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat === 8) _bgmPlayTone(at, ch[2] / 2, 0.6, {
-      type: 'triangle', peak: 0.18,
-      filter: { type: 'lowpass', freq: 380 },
-    });
-    if (beat === 0 || beat === 10) {
-      _bgmPlayJazzSax(at, ch[2] * 2, 2.5, { peak: 0.09 });
-    }
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.02, {
-      filterType: 'highpass', freq: 8000, peak: 0.03, pan: 0.3,
-    });
-  }
-
-  // 4) CHAMPAGNE — bouncy lively, 8th-note bass, full kit.
-  const _JAZZ_CHAMPAGNE_LEAD = [659.25, 587.33, 523.25, 659.25, 783.99, 659.25, 587.33, 523.25];
-  function _bgmScheduleJazzChampagne(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_I_VI_II_V[bar];
-    if (beat % 2 === 0) _bgmPlayTone(at, ((beat % 4) < 2 ? ch[0] : ch[2]) / 2, 0.18, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 420 },
-    });
-    if (beat % 4 === 2) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 0.3, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8500, peak: 0.05,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.12, freq: 1700, peak: 0.14 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _JAZZ_CHAMPAGNE_LEAD.length;
-      _bgmPlayJazzSax(at, _JAZZ_CHAMPAGNE_LEAD[idx], 0.35, { peak: 0.09 });
-    }
-  }
-
-  // 5) RAIN ON GLASS — gentle, mellow, light droplet noise.
-  function _bgmScheduleJazzRainOnGlass(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = LOFI_CHORDS[bar];
-    if (beat === 0) {
-      _bgmPlayTone(at, ch[0] / 2, 0.6, {
-        type: 'triangle', peak: 0.2,
-        filter: { type: 'lowpass', freq: 360 },
-      });
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 3.5, { peak: 0.06, pan: (i - 1.5) * 0.3 });
-      }
-    }
-    // Random droplet noise.
-    if (Math.random() < 0.45) _bgmPlayNoise(at + Math.random() * 0.1, 0.015, {
-      filterType: 'highpass', freq: 6500 + Math.random() * 2500,
-      peak: 0.04, pan: (Math.random() * 2) - 1,
-    });
-    if (beat === 4 || beat === 11) {
-      _bgmPlayJazzSax(at, ch[2] * 2, 1.2, { peak: 0.08 });
-    }
-  }
-
-  // 6) LATE TRAIN — strong walking bass + soft snare groove.
-  function _bgmScheduleJazzLateTrain(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_I_VI_II_V[bar];
-    // Quarter-note walking bass.
-    if (beat % 2 === 0) {
-      const walk = [ch[0], ch[1], ch[2], ch[1]];
-      _bgmPlayTone(at, walk[(beat / 2) % 4] / 2, 0.3, {
-        type: 'triangle', peak: 0.22,
-        filter: { type: 'lowpass', freq: 400 },
-      });
-    }
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.022, {
-      filterType: 'highpass', freq: 8500, peak: 0.05, pan: 0.3,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.16, freq: 1400, peak: 0.12 });
-    if (beat % 4 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 0.5, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat === 2 || beat === 10) {
-      _bgmPlayJazzSax(at, ch[2] * 2, 0.8, { peak: 0.08 });
-    }
-  }
-
-  // 7) VELVET ROOM — smoky, dark, slow, deep bass.
-  const _JAZZ_VELVET_CH = [
-    [73.42, 110.00, 130.81, 174.61], // D minor low
-    [98.00, 130.81, 164.81, 196.00], // G minor low
-    [82.41, 123.47, 146.83, 196.00], // E low
-    [110.00, 130.81, 164.81, 220.00], // Am low
-  ];
-  function _bgmScheduleJazzVelvetRoom(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = _JAZZ_VELVET_CH[bar];
-    if (beat === 0) _bgmPlayTone(at, ch[0] / 2, 0.9, {
-      type: 'sine', peak: 0.3,
-      filter: { type: 'lowpass', freq: 200 },
-    });
-    if (beat === 8) _bgmPlayTone(at, ch[1] / 2, 0.7, {
-      type: 'sine', peak: 0.25,
-      filter: { type: 'lowpass', freq: 200 },
-    });
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i] * 2, 3.0, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.22, freq: 1100, peak: 0.09 });
-    if (beat === 6 || beat === 13) {
-      _bgmPlayJazzSax(at, ch[3], 1.4, { peak: 0.08 });
-    }
-  }
-
-  // 8) SUNSET DRIVE — warm cruise, steady sax lead, soft hat.
-  const _JAZZ_SUNSET_LEAD = [392, 440, 523.25, 587.33, 523.25, 440, 392, 440];
-  function _bgmScheduleJazzSunsetDrive(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_I_VI_II_V[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.5, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 400 },
-    });
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 3.0, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.024, {
-      filterType: 'highpass', freq: 8200, peak: 0.04, pan: 0.25,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.14, freq: 1500, peak: 0.1 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _JAZZ_SUNSET_LEAD.length;
-      _bgmPlayJazzSax(at, _JAZZ_SUNSET_LEAD[idx], 0.4, { peak: 0.085 });
-    }
-  }
-
-  // 9) HONEY SUITE — sweet melodic, bright Rhodes + sax melody.
-  const _JAZZ_HONEY_LEAD = [659.25, 783.99, 880.00, 783.99, 659.25, 587.33, 523.25, 587.33];
-  function _bgmScheduleJazzHoneySuite(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_I_VI_II_V[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'triangle', peak: 0.2,
-      filter: { type: 'lowpass', freq: 420 },
-    });
-    // Brighter Rhodes chord — higher voicing.
-    if (beat % 4 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i] * 2, 0.7, { peak: 0.06, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.022, {
-      filterType: 'highpass', freq: 8500, peak: 0.045, pan: 0.3,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.13, freq: 1600, peak: 0.11 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _JAZZ_HONEY_LEAD.length;
-      _bgmPlayJazzSax(at, _JAZZ_HONEY_LEAD[idx], 0.35, { peak: 0.09 });
-    }
-  }
-
-  // 10) BLUE NEON — bluesy slow, expressive sax with detune bends.
-  const _JAZZ_BLUE_LEAD = [392, 440, 466.16, 440, 392, 349.23, 392, 440];
-  function _bgmScheduleJazzBlueNeon(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = JAZZ_VI_II_V_I[bar];
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.55, {
-      type: 'triangle', peak: 0.22,
-      filter: { type: 'lowpass', freq: 380 },
-    });
-    if (beat % 8 === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayJazzRhodes(at, ch[i], 1.2, { peak: 0.07, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.024, {
-      filterType: 'highpass', freq: 8000, peak: 0.04, pan: 0.25,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.18, freq: 1300, peak: 0.1 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _JAZZ_BLUE_LEAD.length;
-      // Bluesy bend — slightly varying detune adds expression.
-      _bgmPlayJazzSax(at, _JAZZ_BLUE_LEAD[idx], 0.5, {
-        peak: 0.09,
-      });
-    }
-  }
-
-  // ── §folk ── Witcher / Viking / medieval ─────────────────────────
-  // Acoustic-flavoured synthesis. Each helper combines multiple
-  // oscillators (additive harmonics), body-resonance filters, and
-  // articulation transients to read as a real instrument rather than
-  // a thin synth tone.
-  //
-  // _bgmPlayPluck (lute)  — fundamental + 4 harmonics, each decaying
-  //   at sqrt(n) speed (top harmonics fade first, like a real string).
-  //   Brief noise burst at attack = the pluck transient.
-  // _bgmPlayBow (violin)  — three detuned sawtooths + a 5 Hz LFO
-  //   vibrato on the center voice + a peaking body-resonance filter
-  //   around 700 Hz.
-  // _bgmPlayFlute (recorder/whistle) — square fundamental through a
-  //   reedy formant peak at 1.5 kHz + breath-noise layer.
-  // _bgmPlayPipes (bagpipe chanter) — like flute but louder formant
-  //   and constant amplitude (no decay), built for melody.
-  // _bgmPlayDrone (bagpipe drone) — two stacked sawtooths an octave
-  //   apart, slow attack, sustained — the "background hum" of pipes.
-  // _bgmPlayWarDrum (frame drum) — low sine sweep + skin-noise body.
-
-  function _bgmPlayPluck(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.18;
-    const pan  = opts.pan ?? 0;
-    // 5 harmonics, decreasing amplitude. Higher partials decay faster
-    // (per sqrt(n)) which is what makes real strings sound "stringy".
-    const harmonics = [
-      { m: 1, a: 1.00, t: 'triangle' },
-      { m: 2, a: 0.50, t: 'triangle' },
-      { m: 3, a: 0.30, t: 'square' },
-      { m: 4, a: 0.15, t: 'square' },
-      { m: 5, a: 0.08, t: 'square' },
-    ];
-    for (const h of harmonics) {
-      const osc = ctx.createOscillator();
-      osc.type = h.t;
-      osc.frequency.value = freq * h.m;
-      const env = ctx.createGain();
-      env.gain.setValueAtTime(0, at);
-      env.gain.linearRampToValueAtTime(peak * h.a, at + 0.001);
-      const stopAt = at + dur / Math.sqrt(h.m);
-      env.gain.exponentialRampToValueAtTime(0.001, stopAt);
-      let out = env;
-      if (pan !== 0) {
-        const p = ctx.createStereoPanner();
-        p.pan.value = pan;
-        env.connect(p);
-        out = p;
-      }
-      osc.connect(env);
-      out.connect(_bgmMaster);
-      osc.start(at);
-      osc.stop(stopAt + 0.05);
-    }
-    // Pluck transient — short bandpass noise burst at high freq.
-    _bgmPlayNoise(at, 0.008, {
-      filterType: 'bandpass', freq: freq * 3, q: 6,
-      peak: peak * 0.45, pan,
-    });
-  }
-
-  function _bgmPlayBow(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.12;
-    const pan  = opts.pan ?? 0;
-    const attack = opts.attack ?? 0.08;
-    // Three sawtooth voices: ±7¢ + center. Center voice gets a 5 Hz
-    // LFO on detune (±6¢) for natural vibrato.
-    for (let i = 0; i < 3; i++) {
-      const det = i === 0 ? -7 : i === 2 ? 7 : 0;
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = freq;
-      osc.detune.value = det;
-      if (i === 1) {
-        const lfo = ctx.createOscillator();
-        lfo.type = 'sine';
-        lfo.frequency.value = 5;
-        const lfoG = ctx.createGain();
-        lfoG.gain.value = 6;
-        lfo.connect(lfoG).connect(osc.detune);
-        lfo.start(at);
-        lfo.stop(at + dur + 0.1);
-      }
-      // Body resonance — peak around the violin "wood" range.
-      const body = ctx.createBiquadFilter();
-      body.type = 'peaking';
-      body.frequency.value = 700;
-      body.Q.value = 2;
-      body.gain.value = 6;
-      const lpf = ctx.createBiquadFilter();
-      lpf.type = 'lowpass';
-      lpf.frequency.value = 2200;
-      lpf.Q.value = 1.2;
-      const env = ctx.createGain();
-      env.gain.setValueAtTime(0, at);
-      env.gain.linearRampToValueAtTime(peak / 3, at + attack);
-      env.gain.setValueAtTime(peak / 3, at + Math.max(attack, dur - 0.1));
-      env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-      let out = env;
-      if (pan + (i - 1) * 0.08 !== 0) {
-        const p = ctx.createStereoPanner();
-        p.pan.value = Math.max(-1, Math.min(1, pan + (i - 1) * 0.08));
-        env.connect(p);
-        out = p;
-      }
-      osc.connect(body).connect(lpf).connect(env);
-      out.connect(_bgmMaster);
-      osc.start(at);
-      osc.stop(at + dur + 0.1);
-    }
-  }
-
-  function _bgmPlayFlute(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.1;
-    const pan  = opts.pan ?? 0;
-    const osc = ctx.createOscillator();
-    osc.type = 'triangle';
-    osc.frequency.value = freq;
-    // Reedy formant peak at ~1.5 kHz gives the woody recorder character.
-    const formant = ctx.createBiquadFilter();
-    formant.type = 'peaking';
-    formant.frequency.value = 1500;
-    formant.Q.value = 3;
-    formant.gain.value = 6;
-    const lpf = ctx.createBiquadFilter();
-    lpf.type = 'lowpass';
-    lpf.frequency.value = 2400;
-    const env = ctx.createGain();
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + 0.05);
-    env.gain.setValueAtTime(peak, at + Math.max(0.05, dur - 0.12));
-    env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-    let out = env;
-    if (pan !== 0) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = pan;
-      env.connect(p);
-      out = p;
-    }
-    osc.connect(formant).connect(lpf).connect(env);
-    out.connect(_bgmMaster);
-    osc.start(at);
-    osc.stop(at + dur + 0.1);
-    // Breath noise blend.
-    _bgmPlayNoise(at, dur * 0.5, {
-      filterType: 'bandpass', freq: freq * 2, q: 4,
-      peak: peak * 0.18, pan,
-    });
-  }
-
-  function _bgmPlayPipes(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.13;
-    const pan  = opts.pan ?? 0;
-    const osc = ctx.createOscillator();
-    osc.type = 'square';
-    osc.frequency.value = freq;
-    // Strong reedy formant — bagpipe chanter character.
-    const formant = ctx.createBiquadFilter();
-    formant.type = 'peaking';
-    formant.frequency.value = 1500;
-    formant.Q.value = 4;
-    formant.gain.value = 9;
-    const lpf = ctx.createBiquadFilter();
-    lpf.type = 'lowpass';
-    lpf.frequency.value = 2800;
-    const env = ctx.createGain();
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + 0.025);
-    env.gain.setValueAtTime(peak, at + Math.max(0.025, dur - 0.05));
-    env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-    let out = env;
-    if (pan !== 0) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = pan;
-      env.connect(p);
-      out = p;
-    }
-    osc.connect(formant).connect(lpf).connect(env);
-    out.connect(_bgmMaster);
-    osc.start(at);
-    osc.stop(at + dur + 0.1);
-  }
-
-  function _bgmPlayDrone(at, freq, dur, opts = {}) {
-    const peak = opts.peak ?? 0.08;
-    const att  = opts.attack ?? 0.4;
-    // Two octave-doubled sawtooths panned slightly apart — the
-    // characteristic "two-pipe" hum.
-    _bgmPlayTone(at, freq, dur, {
-      type: 'sawtooth', peak, attack: att,
-      filter: { type: 'lowpass', freq: 800, q: 1 },
-      detune: 5, pan: -0.25,
-    });
-    _bgmPlayTone(at, freq * 2, dur, {
-      type: 'sawtooth', peak: peak * 0.6, attack: att,
-      filter: { type: 'lowpass', freq: 1200, q: 1 },
-      detune: -5, pan: 0.25,
-    });
-  }
-
-  function _bgmPlayWarDrum(at, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.5;
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(opts.start ?? 140, at);
-    osc.frequency.exponentialRampToValueAtTime(opts.end ?? 45, at + (opts.sweep ?? 0.08));
-    const env = ctx.createGain();
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + 0.003);
-    env.gain.exponentialRampToValueAtTime(0.001, at + (opts.dur ?? 0.42));
-    osc.connect(env).connect(_bgmMaster);
-    osc.start(at);
-    osc.stop(at + (opts.dur ?? 0.45));
-    // Skin / body noise band around 350 Hz for the frame-drum thwack.
-    _bgmPlayNoise(at, 0.09, {
-      filterType: 'bandpass', freq: 350, q: 1.5,
-      peak: peak * 0.35,
-    });
-  }
-
-  // Shared progressions — Dorian/Aeolian, the medieval/folk home key.
-  const FOLK_CH_AM_DORIAN = [
-    [110.00, 130.81, 164.81],  // Am
-    [ 98.00, 123.47, 146.83],  // G
-    [ 87.31, 110.00, 130.81],  // F
-    [ 98.00, 123.47, 146.83],  // G
-  ];
-
-  // 1) HARP OF THE NORTH — gentle plucked harp, melancholy.
-  const _FOLK_HARP_MEL = [
-    220, 261.63, 329.63, 261.63, 220, 196, 220, 261.63,
-    329.63, 392, 329.63, 261.63, 220, 196, 220, 261.63,
-  ];
-  function _bgmScheduleFolkHarpNorth(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = FOLK_CH_AM_DORIAN[bar];
-    if (beat % 4 === 0) _bgmPlayPluck(at, ch[0] / 2, 0.8, { peak: 0.18 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 8) % _FOLK_HARP_MEL.length;
-      _bgmPlayPluck(at, _FOLK_HARP_MEL[idx], 0.6, { peak: 0.12, pan: 0.2 });
-    }
-    if (beat % 2 === 1) {
-      _bgmPlayPluck(at, ch[((beat - 1) / 2) % 3], 0.5, { peak: 0.08, pan: -0.3 });
-    }
-  }
-
-  // 2) FOREST WHISPERS — wooden flute melody over sustained bagpipe-
-  // style drone (two octaves), no rhythm. Pure forest atmosphere.
-  const _FOLK_FLUTE_MEL = [440, 523.25, 466.16, 440, 392, 349.23, 392, 440];
-  function _bgmScheduleFolkForestWhispers(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    if (beat === 0) _bgmPlayDrone(at, 55, 5.0, { peak: 0.11 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _FOLK_FLUTE_MEL.length;
-      _bgmPlayFlute(at, _FOLK_FLUTE_MEL[idx], 0.5, { peak: 0.1 });
-    }
-  }
-
-  // 3) TAVERN JIG — lively jig, plucked melody, frame drum.
-  const _FOLK_JIG_MEL = [220, 261.63, 329.63, 261.63, 293.66, 329.63, 392, 329.63];
-  function _bgmScheduleFolkTavernJig(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = FOLK_CH_AM_DORIAN[bar];
-    if (beat % 2 === 0) _bgmPlayKick(at, { peak: 0.32, start: 80, end: 40, dur: 0.2 });
-    if (beat % 2 === 0) _bgmPlayPluck(at, ch[0] / 2, 0.18, { peak: 0.18 });
-    _bgmPlayPluck(at, _FOLK_JIG_MEL[(beat + bar * 4) % _FOLK_JIG_MEL.length], 0.18, {
-      peak: 0.13, pan: 0.2,
-    });
-    if (beat % 4 === 0) _bgmPlayNoise(at, 0.04, {
-      filterType: 'highpass', freq: 6000, peak: 0.1,
-    });
-  }
-
-  // 4) WAR DRUMS — heavy frame drums + bagpipe war calls over a low
-  // sustained drone. Replaces the previous bowed-string call with
-  // pipes for the actual "war horn" character.
-  function _bgmScheduleFolkWarDrums(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    if (beat % 4 === 0) _bgmPlayWarDrum(at, { peak: 0.6 });
-    if (beat % 4 === 2) _bgmPlayWarDrum(at, { peak: 0.3 });
-    if (beat === 0) _bgmPlayDrone(at, 55, 4.5, { peak: 0.13 });
-    if (beat === 0 || beat === 12) {
-      _bgmPlayPipes(at, [110, 98, 87.31, 98][bar], 1.6, { peak: 0.14 });
-    }
-    if (beat % 4 === 0) {
-      _bgmPlayPipes(at, [220, 196, 174.61, 196][bar], 0.4, { peak: 0.09 });
-    }
-  }
-
-  // 5) YENNEFER'S THEME — bowed strings + harp, melancholy.
-  const _FOLK_YEN_MEL = [220, 261.63, 329.63, 293.66, 261.63, 220, 196, 220];
-  function _bgmScheduleFolkYenneferTheme(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = FOLK_CH_AM_DORIAN[bar];
-    if (beat === 0) {
-      _bgmPlayBow(at, ch[0] / 2, 3.5, { peak: 0.18 });
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayBow(at, ch[i], 3.5, { peak: 0.08, pan: (i - 2) * 0.3 });
-      }
-    }
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _FOLK_YEN_MEL.length;
-      _bgmPlayPluck(at, _FOLK_YEN_MEL[idx], 0.5, { peak: 0.1 });
-    }
-  }
-
-  // 6) LONGSHIP — Viking row song. Steady frame-drum rowing pulse +
-  // bagpipe drone + chant-pipes lead. The drone runs the whole 4-bar
-  // cycle so the rowing never breaks.
-  function _bgmScheduleFolkLongship(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    if (beat % 2 === 0) _bgmPlayWarDrum(at, { peak: 0.42, sweep: 0.08, dur: 0.4 });
-    if (beat === 0 && bar === 0) _bgmPlayDrone(at, 55, 8.0, { peak: 0.1, attack: 0.6 });
-    if (beat % 4 === 0) {
-      _bgmPlayPipes(at, [110, 98, 110, 98][bar], 0.7, { peak: 0.11 });
-    }
-    if (beat === 0 || beat === 8) {
-      _bgmPlayPipes(at, [165, 175, 196, 175][bar], 1.6, { peak: 0.12 });
-    }
-  }
-
-  // 7) HEARTH FIRE — warm bowed pad + sparse pluck + crackle.
-  const _FOLK_HEARTH_MEL = [261.63, 293.66, 329.63, 293.66];
-  function _bgmScheduleFolkHearthFire(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = FOLK_CH_AM_DORIAN[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayBow(at, ch[i], 3.5, { peak: 0.07, pan: (i - 1) * 0.4 });
-      }
-    }
-    if (beat % 4 === 0) {
-      _bgmPlayPluck(at, _FOLK_HEARTH_MEL[bar], 0.7, { peak: 0.12, pan: 0.2 });
-    }
-    if (Math.random() < 0.2) {
-      _bgmPlayNoise(at, 0.04, {
-        filterType: 'bandpass', freq: 2000 + Math.random() * 2000,
-        q: 6, peak: 0.05,
-      });
-    }
-  }
-
-  // 8) RAVENS — dark moody bowed strings + wind noise + distant flute.
-  function _bgmScheduleFolkRavens(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = FOLK_CH_AM_DORIAN[bar];
-    if (beat === 0) {
-      _bgmPlayBow(at, ch[0] / 2, 4.0, { peak: 0.2 });
-      _bgmPlayBow(at, ch[1], 4.0, { peak: 0.1, pan: -0.3 });
-      _bgmPlayBow(at, ch[2], 4.0, { peak: 0.1, pan: 0.3 });
-    }
-    if (beat === 4 || beat === 11) {
-      _bgmPlayFlute(at, [440, 392, 349.23, 392][bar], 0.8, { peak: 0.07 });
-    }
-    if (Math.random() < 0.3) {
-      _bgmPlayNoise(at, 0.3, {
-        filterType: 'bandpass', freq: 800, q: 3, peak: 0.04,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-
-  // 9) MEAD HALL — celebratory. Big drums + lute bass + bagpipe-led
-  // melody on top so the celebration has actual reedy lift.
-  const _FOLK_MEAD_MEL = [220, 261.63, 329.63, 392, 329.63, 261.63, 220, 196];
-  function _bgmScheduleFolkMeadHall(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    if (beat % 4 === 0) _bgmPlayWarDrum(at, { peak: 0.5, dur: 0.4 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { dur: 0.1, freq: 1500, peak: 0.2 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 7000, peak: 0.06,
-    });
-    if (beat % 4 === 0) _bgmPlayPluck(at, [110, 98, 87.31, 98][bar], 0.4, { peak: 0.2 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _FOLK_MEAD_MEL.length;
-      _bgmPlayPipes(at, _FOLK_MEAD_MEL[idx], 0.22, { peak: 0.11 });
-    }
-  }
-
-  // 10) GERALT'S RIDE — driving folk, galloping rhythm, dual lead:
-  // a Witcher-flavoured fiddle melody (bow) + bagpipe doubling for
-  // weight + lute walking bass.
-  const _FOLK_FIDDLE_MEL = [220, 261.63, 329.63, 392, 329.63, 261.63, 293.66, 329.63];
-  function _bgmScheduleFolkGeraltsRide(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = FOLK_CH_AM_DORIAN[bar];
-    if (beat % 4 === 0) _bgmPlayWarDrum(at, { peak: 0.42, dur: 0.3 });
-    if (beat % 4 === 2) _bgmPlayKick(at, { peak: 0.26 });
-    if (beat === 0 && bar === 0) _bgmPlayDrone(at, 55, 8.0, { peak: 0.07, attack: 0.5 });
-    if (beat % 2 === 0) _bgmPlayPluck(at, ch[(beat / 2) % 3] / 2, 0.2, { peak: 0.18 });
-    if (beat % 2 === 0) {
-      const idx = ((beat / 2) + bar * 2) % _FOLK_FIDDLE_MEL.length;
-      // Bowed fiddle + bagpipe doubling.
-      _bgmPlayBow(at, _FOLK_FIDDLE_MEL[idx], 0.4, { peak: 0.1, pan: -0.15 });
-      _bgmPlayPipes(at, _FOLK_FIDDLE_MEL[idx], 0.32, { peak: 0.07, pan: 0.15 });
-    }
-  }
-
-  // ── §cyberpunk ── noir, neon-soaked, rainy night-city ─────────────
-  // Reuses SYNTH_CHORDS_AM (Am-G-F-G minor). Three new helpers carry
-  // the genre's identity: a high-passed rain bed, a stereo-sweeping
-  // vehicle whoosh, and a sparse FM "glitch beep" for buried signals.
-
-  function _bgmPlayRainBed(at, dur, opts = {}) {
-    _bgmPlayNoise(at, dur, {
-      filterType: 'highpass', freq: 3500,
-      peak: opts.peak ?? 0.05, pan: opts.pan ?? 0,
-    });
-  }
-  // Vehicle whoosh — bandpass noise that sweeps low→high through the
-  // stereo field left to right. Reads as a car passing on wet asphalt.
-  function _bgmPlayWhoosh(at, opts = {}) {
-    const ctx = _bgmCtx;
-    const dur  = opts.dur  ?? 1.2;
-    const peak = opts.peak ?? 0.08;
-    const bufSize = Math.max(1, Math.floor(ctx.sampleRate * dur));
-    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-    const cd = buf.getChannelData(0);
-    for (let i = 0; i < bufSize; i++) cd[i] = (Math.random() * 2 - 1);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const f = ctx.createBiquadFilter();
-    f.type = 'bandpass';
-    f.frequency.setValueAtTime(opts.startFreq ?? 400, at);
-    f.frequency.exponentialRampToValueAtTime(opts.endFreq ?? 1600, at + dur);
-    f.Q.value = 3;
-    const env = ctx.createGain();
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + dur * 0.3);
-    env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-    const p = ctx.createStereoPanner();
-    p.pan.setValueAtTime(-1, at);
-    p.pan.linearRampToValueAtTime(1, at + dur);
-    src.connect(f).connect(env).connect(p).connect(_bgmMaster);
-    src.start(at);
-  }
-  // Glitch beep — short FM-bell chirp with random pan, used for buried
-  // / corrupted signal blips.
-  function _bgmPlayGlitch(at, freq, opts = {}) {
-    _bgmPlayFmBell(at, freq, opts.dur ?? 0.08, {
-      peak: opts.peak ?? 0.06,
-      modDepth: opts.modDepth ?? 200,
-      ratio: opts.ratio ?? 3.51,
-      pan: opts.pan ?? ((Math.random() * 2) - 1),
-    });
-  }
-
-  // 1) NEON RAIN — slow chord pad + rain bed + sub drone + sparse beep.
-  function _bgmScheduleCyberNeonRain(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 2 === 0) _bgmPlayRainBed(at, 0.25, { peak: 0.05 });
-    if (beat === 0) {
-      _bgmPlayTone(at, 55, 4.5, {
-        type: 'sine', peak: 0.25, attack: 0.5,
-        filter: { type: 'lowpass', freq: 200 },
-      });
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 4.0, {
-          type: 'sawtooth', peak: 0.05, attack: 0.8, detune: i * 5,
-          filter: { type: 'lowpass', freq: 1600 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (beat === 7 && Math.random() < 0.5) _bgmPlayGlitch(at, 880);
-  }
-
-  // 2) WET STREETS — distant kick + saw walking bass + soft pad + whoosh.
-  function _bgmScheduleCyberWetStreets(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 2 === 0) _bgmPlayRainBed(at, 0.3, { peak: 0.04 });
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.3, end: 35, dur: 0.4 });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.5, {
-      type: 'sawtooth', peak: 0.22,
-      filter: { type: 'lowpass', freq: 280, q: 3 },
-    });
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 3.5, {
-          type: 'triangle', peak: 0.05, attack: 0.5,
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-    if (beat === 12 && Math.random() < 0.4) _bgmPlayWhoosh(at, { dur: 1.5 });
-  }
-
-  // 3) SUBSIGNAL — buried-signal drone + random glitch beeps + noise wash.
-  function _bgmScheduleCyberSubsignal(step, at) {
-    const beat = step % 16;
-    if (beat % 8 === 0) _bgmPlayTone(at, 43.65, 5.0, {
-      type: 'sine', peak: 0.3, attack: 1.0,
-      filter: { type: 'lowpass', freq: 160 },
-    });
-    if (Math.random() < 0.22) _bgmPlayGlitch(at, 600 + Math.random() * 1500);
-    if (beat % 4 === 0) _bgmPlayNoise(at, 0.8, {
-      filterType: 'bandpass', freq: 700, q: 4, peak: 0.04,
-    });
-  }
-
-  // 4) HOLOGRAM — ghostly sine pad + drifting FM bells.
-  function _bgmScheduleCyberHologram(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 4.0, {
-          type: 'sine', peak: 0.06, attack: 1.0,
-          pan: (i - 1.5) * 0.4,
-        });
-      }
-      _bgmPlayTone(at, 55, 4.5, {
-        type: 'sine', peak: 0.2, attack: 0.6,
-      });
-    }
-    if (step % 3 === 0) {
-      _bgmPlayFmBell(at, ch[((step / 3) | 0) % ch.length] * 4, 1.2, {
-        peak: 0.06, modDepth: 100, ratio: 3.01,
-        pan: ((step * 0.13) % 2) - 1,
-      });
-    }
-  }
-
-  // 5) NEAR FUTURE — driving noir techno: kick + gated saw bass + hat.
-  function _bgmScheduleCyberNearFuture(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.42 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.18 });
-    if (beat % 2 === 0) _bgmPlayTone(at, ch[0] / 2, 0.18, {
-      type: 'sawtooth', peak: 0.26,
-      filter: { type: 'lowpass', freq: 400, q: 5 },
-    });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 7000, peak: 0.05,
-    });
-    if (beat % 2 === 0) _bgmPlayRainBed(at, 0.15, { peak: 0.03 });
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 3.0, {
-          type: 'sawtooth', peak: 0.04, attack: 0.5, detune: i * 4,
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-  }
-
-  // 6) SECTOR 7 — industrial pulse + atmospheric pad + mechanical click.
-  function _bgmScheduleCyberSector7(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 2 === 0) _bgmPlayTone(at, ch[0] / 2, 0.15, {
-      type: 'sawtooth', peak: 0.2,
-      filter: { type: 'lowpass', freq: 350, q: 4 },
-    });
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 3.5, {
-          type: 'sawtooth', peak: 0.05, attack: 0.6, detune: i * 4,
-          filter: { type: 'lowpass', freq: 1500 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.03, {
-      filterType: 'bandpass', freq: 3000, q: 8, peak: 0.06,
-    });
-    if (Math.random() < 0.5) _bgmPlayRainBed(at, 0.12, { peak: 0.03 });
-  }
-
-  // 7) NIGHT DRIVE — slow-tempo saw lead over kick/snare groove + rain.
-  function _bgmScheduleCyberNightDrive(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.28 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.14 });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'sawtooth', peak: 0.2,
-      filter: { type: 'lowpass', freq: 320 },
-    });
-    if (beat === 0 || beat === 6 || beat === 11) {
-      _bgmPlayTone(at, ch[2] * 2, 0.8, {
-        type: 'sawtooth', peak: 0.09, attack: 0.05, detune: 4,
-        filter: { type: 'lowpass', freq: 2000 },
-      });
-    }
-    if (beat % 2 === 0) _bgmPlayRainBed(at, 0.15, { peak: 0.03 });
-  }
-
-  // 8) GRID DOWN — eerie off-rhythm dystopia, irregular glitch pattern.
-  const _CYBER_GRID_PAT = [0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0];
-  function _bgmScheduleCyberGridDown(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      _bgmPlayTone(at, ch[0] / 2, 4.0, {
-        type: 'sawtooth', peak: 0.15, attack: 0.8,
-        filter: { type: 'lowpass', freq: 300, q: 3 },
-      });
-      _bgmPlayTone(at, ch[2], 3.5, {
-        type: 'triangle', peak: 0.05, attack: 0.6,
-      });
-    }
-    if (_CYBER_GRID_PAT[beat]) _bgmPlayGlitch(at, 400 + (step * 47) % 1600);
-    if (beat % 4 === 0) _bgmPlayRainBed(at, 0.6, { peak: 0.04 });
-  }
-
-  // 9) OVERPASS — moving feel, vehicle whoosh + steady kick + rain bed.
-  function _bgmScheduleCyberOverpass(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 2 === 0) _bgmPlayRainBed(at, 0.25, { peak: 0.045 });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.5, {
-      type: 'sawtooth', peak: 0.22,
-      filter: { type: 'lowpass', freq: 300 },
-    });
-    if (beat === 0 || beat === 9) _bgmPlayWhoosh(at, { dur: 1.4 });
-    if (beat === 0) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 3.5, {
-          type: 'triangle', peak: 0.05, attack: 0.6,
-          pan: (i - 2) * 0.3,
-        });
-      }
-    }
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.28 });
-  }
-
-  // 10) CHROME REFLECTION — bright sawtooth pad + FM-bell arp + soft bass.
-  function _bgmScheduleCyberChrome(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 3.5, {
-          type: 'sawtooth', peak: 0.05, attack: 0.4, detune: i * 4,
-          filter: { type: 'lowpass', freq: 2400 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-    if (beat % 2 === 0) {
-      _bgmPlayFmBell(at, ch[(beat / 2) % ch.length] * 4, 0.2, {
-        peak: 0.07, modDepth: 80, ratio: 2.51,
-        pan: ((beat % 4) - 1.5) * 0.4,
-      });
-    }
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'sawtooth', peak: 0.18,
-      filter: { type: 'lowpass', freq: 350 },
-    });
-    if (beat % 2 === 0) _bgmPlayRainBed(at, 0.15, { peak: 0.03 });
-  }
-
-  // ── §m83 helpers ── used by the SOUNDTRACK genre ─────────────────
-  // M83 / Oblivion aesthetic: huge breathing pads, pulsing 16th-note
-  // arpeggios that build in volume, soaring vocal-like leads.
-
-  // Saturated synth pad — 3-detune sawtooth chord layer through a
-  // warm lowpass + cyclic "breathing" gain (sidechain-like pumping
-  // at the chord rate). The slow attack + long tail reads as a
-  // reverb-soaked wall of pad.
-  function _bgmPlayPad(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.07;
-    const attack = opts.attack ?? 1.2;
-    const pan = opts.pan ?? 0;
-    for (let i = 0; i < 3; i++) {
-      const det = (i - 1) * 8;
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = freq;
-      osc.detune.value = det;
-      const lpf = ctx.createBiquadFilter();
-      lpf.type = 'lowpass';
-      lpf.frequency.value = opts.cutoff ?? 1800;
-      lpf.Q.value = 0.8;
-      const env = ctx.createGain();
-      env.gain.setValueAtTime(0, at);
-      env.gain.linearRampToValueAtTime(peak / 3, at + attack);
-      // Breathe — gentle gain dip every 0.6s for the "pumping" feel.
-      const pumpEvery = 0.6;
-      let bt = at + attack;
-      while (bt < at + dur - 0.2) {
-        env.gain.linearRampToValueAtTime(peak / 3, bt);
-        env.gain.linearRampToValueAtTime((peak / 3) * 0.7, bt + pumpEvery * 0.4);
-        bt += pumpEvery;
-      }
-      env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-      let out = env;
-      const pp = ctx.createStereoPanner();
-      pp.pan.value = Math.max(-1, Math.min(1, pan + det / 25));
-      env.connect(pp);
-      out = pp;
-      osc.connect(lpf).connect(env);
-      out.connect(_bgmMaster);
-      osc.start(at);
-      osc.stop(at + dur + 0.1);
-    }
-  }
-
-  // M83 pulsing arpeggio — a single note (root, octave up, or fifth)
-  // pulsed on 16th notes with a slow gain crescendo over `dur`. Stops
-  // at full volume so a build feels earned.
-  function _bgmPlayArpPulse(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.1;
-    const stepDur = opts.stepDur ?? 0.18;
-    const cutoffStart = opts.cutoffStart ?? 800;
-    const cutoffEnd = opts.cutoffEnd ?? 2400;
-    const steps = Math.max(1, Math.floor(dur / stepDur));
-    for (let i = 0; i < steps; i++) {
-      const t = at + i * stepDur;
-      const progress = i / Math.max(1, steps - 1);
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = freq;
-      osc.detune.value = 4;
-      const lpf = ctx.createBiquadFilter();
-      lpf.type = 'lowpass';
-      lpf.frequency.value = cutoffStart + (cutoffEnd - cutoffStart) * progress;
-      lpf.Q.value = 2;
-      const env = ctx.createGain();
-      const stepPeak = peak * (0.4 + 0.6 * progress);
-      env.gain.setValueAtTime(0, t);
-      env.gain.linearRampToValueAtTime(stepPeak, t + 0.005);
-      env.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 0.95);
-      osc.connect(lpf).connect(env).connect(_bgmMaster);
-      osc.start(t);
-      osc.stop(t + stepDur + 0.02);
-    }
-  }
-
-  // Soaring synth lead — sine fundamental + saturated saw doubled
-  // up an octave. Reads as a wordless vocal hook in M83's "Oblivion".
-  function _bgmPlaySoarLead(at, freq, dur, opts = {}) {
-    const peak = opts.peak ?? 0.12;
-    const attack = opts.attack ?? 0.15;
-    const pan = opts.pan ?? 0;
-    _bgmPlayTone(at, freq, dur, {
-      type: 'sine', peak, attack,
-      filter: { type: 'lowpass', freq: 2400 },
-      pan,
-    });
-    _bgmPlayTone(at, freq * 2, dur, {
-      type: 'sawtooth', peak: peak * 0.45, attack: attack * 1.2,
-      filter: { type: 'lowpass', freq: 2200 },
-      detune: 6, pan: pan - 0.15,
-    });
-    _bgmPlayTone(at, freq * 2, dur, {
-      type: 'sawtooth', peak: peak * 0.45, attack: attack * 1.2,
-      filter: { type: 'lowpass', freq: 2200 },
-      detune: -6, pan: pan + 0.15,
-    });
-  }
-
-  // ── §soundtrack ── cinematic space-score (Starfield / Interstellar)
-  // Three new helpers give the genre its sonic identity:
-  //   brass   — 3 detuned sawtooths with a slow-attack filter sweep
-  //             opening from 400 Hz → ~2.2 kHz, then closing back. Reads
-  //             as a swelling brass / French-horn section.
-  //   choir   — two detuned triangles with a long attack + breath noise
-  //             at 1.5×freq. Soft "ahh" choral pad.
-  //   timpani — pitched sine with a quick pitch sweep (3/2 → 1/1) + a
-  //             skin-noise body burst. The film-orchestra mallet hit.
-
-  function _bgmPlayBrass(at, freq, dur, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.1;
-    const attack = opts.attack ?? 0.5;
-    for (let i = 0; i < 3; i++) {
-      const det = (i - 1) * 6;
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = freq;
-      osc.detune.value = det;
-      const f = ctx.createBiquadFilter();
-      f.type = 'lowpass';
-      f.frequency.setValueAtTime(400, at);
-      f.frequency.exponentialRampToValueAtTime(opts.openTo ?? 2200, at + attack * 0.8);
-      f.frequency.exponentialRampToValueAtTime(800, at + dur);
-      f.Q.value = 1.5;
-      const env = ctx.createGain();
-      env.gain.setValueAtTime(0, at);
-      env.gain.linearRampToValueAtTime(peak / 3, at + attack);
-      env.gain.setValueAtTime(peak / 3, at + Math.max(attack, dur - 0.3));
-      env.gain.exponentialRampToValueAtTime(0.001, at + dur);
-      let out = env;
-      if (det !== 0) {
-        const p = ctx.createStereoPanner();
-        p.pan.value = det / 30;
-        env.connect(p);
-        out = p;
-      }
-      osc.connect(f).connect(env);
-      out.connect(_bgmMaster);
-      osc.start(at);
-      osc.stop(at + dur + 0.1);
-    }
-  }
-
-  function _bgmPlayChoir(at, freq, dur, opts = {}) {
-    const peak = opts.peak ?? 0.08;
-    const attack = opts.attack ?? 0.6;
-    _bgmPlayTone(at, freq, dur, {
-      type: 'triangle', peak, attack,
-      filter: { type: 'lowpass', freq: 1800, q: 1 },
-      pan: (opts.pan ?? 0) - 0.2,
-    });
-    _bgmPlayTone(at, freq, dur, {
-      type: 'triangle', peak: peak * 0.7, attack,
-      filter: { type: 'lowpass', freq: 1600, q: 1 },
-      detune: 6,
-      pan: (opts.pan ?? 0) + 0.2,
-    });
-    _bgmPlayNoise(at, dur * 0.5, {
-      filterType: 'bandpass', freq: freq * 1.5, q: 4,
-      peak: peak * 0.1,
-      pan: opts.pan ?? 0,
-    });
-  }
-
-  function _bgmPlayTimpani(at, freq, opts = {}) {
-    const ctx = _bgmCtx;
-    const peak = opts.peak ?? 0.4;
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(freq * 1.5, at);
-    osc.frequency.exponentialRampToValueAtTime(freq, at + 0.08);
-    const env = ctx.createGain();
-    env.gain.setValueAtTime(0, at);
-    env.gain.linearRampToValueAtTime(peak, at + 0.005);
-    env.gain.exponentialRampToValueAtTime(0.001, at + 0.8);
-    osc.connect(env).connect(_bgmMaster);
-    osc.start(at);
-    osc.stop(at + 0.85);
-    _bgmPlayNoise(at, 0.06, {
-      filterType: 'bandpass', freq: freq * 2, q: 1.5,
-      peak: peak * 0.25,
-    });
-  }
-
-  // C-Am-F-G epic progression — cinematic home turf.
-  const SPACE_CHORDS = [
-    [130.81, 164.81, 196.00],  // C
-    [110.00, 130.81, 164.81],  // Am
-    [174.61, 220.00, 261.63],  // F
-    [196.00, 246.94, 293.66],  // G
-  ];
-
-  // 1) DEPARTURE — M83 Oblivion opening: huge breathing pad, sub bass,
-  // sparse high vocal-like soar that drops in midway.
-  function _bgmScheduleSpaceDeparture(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 7.5, {
-          peak: 0.08, attack: 1.5, pan: (i - 1) * 0.4,
-        });
-      }
-      _bgmPlayTone(at, ch[0] / 2, 7.5, {
-        type: 'sine', peak: 0.22, attack: 1.2,
-      });
-    }
-    // Soaring lead enters on bar 2, lasts through bar 3.
-    if (beat === 0 && (bar === 1 || bar === 3)) {
-      _bgmPlaySoarLead(at, ch[2] * 2, 6.0, { peak: 0.11, attack: 0.6 });
-    }
-    if (beat === 8 || beat === 12) {
-      _bgmPlayFmBell(at, ch[2] * 4, 1.5, {
-        peak: 0.06, modDepth: 60, ratio: 2.01,
-        pan: ((beat - 10) / 4),
-      });
-    }
-  }
-
-  // 2) CROSSING — M83 "Outside" feel: pulsing arpeggio that builds
-  // over a breathing pad. The arp's filter opens as it crescendos.
-  function _bgmScheduleSpaceCrossing(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayChoir(at, ch[i], 7.0, {
-          peak: 0.07, attack: 1.8, pan: (i - 1) * 0.4,
-        });
-      }
-      _bgmPlayTone(at, ch[0] / 2, 7.0, {
-        type: 'sine', peak: 0.22, attack: 1.2,
-      });
-      // Pulsing arpeggio — single root note 16ths that build over a
-      // full bar. Fires once at the top of each bar; the helper
-      // pulses internally.
-      _bgmPlayArpPulse(at, ch[2] * 2, 3.6, {
-        peak: 0.09, stepDur: 0.18,
-        cutoffStart: 700, cutoffEnd: 2500,
-      });
-    }
-    if (beat % 4 === 0) _bgmPlayNoise(at, 2.5, {
-      filterType: 'bandpass', freq: 600 + (bar * 200), q: 3, peak: 0.04,
-      pan: ((step * 0.13) % 2) - 1,
-    });
-  }
-
-  // 3) SOLARIS — deep meditative drone + slow choir + sparse bells.
-  function _bgmScheduleSpaceSolaris(step, at) {
-    const beat = step % 16;
-    if (beat % 8 === 0) {
-      _bgmPlayTone(at, 41.20, 7.0, {
-        type: 'sine', peak: 0.3, attack: 1.5,
-      });
-      _bgmPlayTone(at, 82.41, 7.0, {
-        type: 'triangle', peak: 0.06, attack: 2.0,
-      });
-    }
-    if (beat === 0) {
-      _bgmPlayChoir(at, 165, 6.0, { peak: 0.07, attack: 2.0, pan: -0.3 });
-      _bgmPlayChoir(at, 246.94, 6.0, { peak: 0.07, attack: 2.0, pan: 0.3 });
-    }
-    if (Math.random() < 0.06) {
-      _bgmPlayFmBell(at, 660 + Math.random() * 600, 2.0, {
-        peak: 0.04, modDepth: 80, ratio: 3.01,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-  }
-
-  // 4) ORION'S BELT — M83 main-theme soar: breathing pad bed + sub +
-  // a sustained vocal-like lead carrying the 8-note hook.
-  const _SPACE_ORION_MEL = [392, 440, 523.25, 587.33, 523.25, 440, 392, 349.23];
-  function _bgmScheduleSpaceOrion(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 5.0, {
-          peak: 0.07, attack: 0.9, pan: (i - 1) * 0.4,
-        });
-      }
-      _bgmPlayTone(at, ch[0] / 2, 5.0, {
-        type: 'sine', peak: 0.2, attack: 0.8,
-      });
-    }
-    if (beat % 4 === 0) {
-      const note = _SPACE_ORION_MEL[((beat / 4) + bar * 4) % _SPACE_ORION_MEL.length];
-      _bgmPlaySoarLead(at, note, 1.1, { peak: 0.11, attack: 0.18 });
-    }
-    if (beat === 12) _bgmPlayTimpani(at, ch[0]);
-  }
-
-  // 5) NEBULA — drifting 3-detune pad cloud + sine-pan FM bells.
-  function _bgmScheduleSpaceNebula(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        for (const det of [-8, 0, 8]) {
-          _bgmPlayTone(at, ch[i] * 2, 6.0, {
-            type: 'sawtooth', peak: 0.04, attack: 1.2, detune: det,
-            filter: { type: 'lowpass', freq: 1800 },
-            pan: det / 25,
-          });
+      const high = targetPct != null && targetPct >= 80 ? ' high' : '';
+      const targetTxt = targetPct == null ? '—' : `${targetPct.toFixed(0)}`;
+      const barW = targetPct == null ? 0 : Math.max(0, Math.min(100, targetPct));
+      // Average RPM across the group's fans (informational — gives a
+      // sense of "what the group is doing right now" without per-fan
+      // detail clutter).
+      const avgRpm = Math.round(groupFans.reduce((s, f) => s + Number(f.value), 0) / groupFans.length);
+      // Member sub-list: each fan, name + RPM only (no per-fan bar
+      // because the group is linked — they all run the same curve).
+      const members = groupFans.map((f) => `
+        <li class="fans-member">
+          <span class="fans-member-name" title="${escapeHtml(f.device || '')} · ${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+          <span class="fans-member-rpm">${Math.round(f.value)} RPM</span>
+        </li>`).join('');
+      parts.push(`<li class="fans-group" data-group="${group}">
+        <div class="fans-group-head">
+          <span class="fans-group-label">${GROUP_LABELS[group]}</span>
+          <span class="fans-group-readout">
+            <span class="caret">▸</span>
+            <span class="fans-group-target">${targetTxt}</span>
+            <span class="fans-group-unit">%</span>
+            <span class="fans-group-rpm">${groupFans.length} FAN${groupFans.length === 1 ? '' : 'S'} · AVG ${avgRpm} RPM</span>
+          </span>
+        </div>
+        <div class="seg-bar"><div class="seg-bar-fill seg-fan${high}" style="width:${barW.toFixed(1)}%"></div></div>
+        <div class="fans-group-source">${curve ? escapeHtml(tempLabel || 'curve set · driving temp not detected') : 'NO CURVE · CLICK CURVE TO CREATE'}</div>
+        <ul class="fans-members">${members}</ul>
+      </li>`);
+    }
+    listEl.innerHTML = parts.join('');
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  // ── Editor open/close ────────────────────────────────────────────
+  function groupFanCount(group) {
+    return (_last?.fans || []).filter((f) => Number(f.value) > 0 && classifyFan(f) === group).length;
+  }
+  function populateSelects() {
+    const temps = _last?.temps || [];
+    // Group picker (CPU + Case / GPU). We always show both groups
+    // even if no fans were detected in one yet — the user might be
+    // designing offline, or a fan may be momentarily stopped.
+    fanSelect.innerHTML = GROUPS.map((g) => {
+      const n = groupFanCount(g);
+      return `<option value="${g}">${GROUP_LABELS[g]}${n ? ' · ' + n + ' fan' + (n === 1 ? '' : 's') : ' · 0 active'}</option>`;
+    }).join('');
+    if (!temps.length) {
+      tempSelect.innerHTML = `<option value="">(no temp sensors detected)</option>`;
+    } else {
+      tempSelect.innerHTML = temps.map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.device || '')} · ${escapeHtml(t.name)}</option>`).join('');
+    }
+    fanSelect.value = _editorGroup;
+    syncFromCurve();
+  }
+  function syncFromCurve() {
+    const saved = _curves[_editorGroup];
+    _editorPoints = saved ? saved.points.slice() : DEFAULT_POINTS.slice();
+    if (saved?.sourceTempId) {
+      tempSelect.value = saved.sourceTempId;
+    } else {
+      // Group-appropriate default temp source:
+      //   cpu group → first option containing "CPU"
+      //   gpu group → first option containing "GPU"
+      // Both fall back to the first temp sensor in the list.
+      const opts = Array.from(tempSelect.options);
+      const want = _editorGroup === 'gpu' ? /gpu/i : /cpu/i;
+      const pick = opts.find((o) => want.test(o.textContent));
+      tempSelect.value = (pick || opts[0])?.value || '';
+    }
+    paintCurve();
+    setEditorStatus('', false);
+  }
+  function setEditorStatus(msg, isErr) {
+    if (!statusEl) return;
+    statusEl.textContent = msg || '';
+    statusEl.classList.toggle('is-error', !!isErr);
+  }
+  function openEditor() {
+    if (!overlay) return;
+    populateSelects();
+    if (!_last || _last.status !== 'connected') {
+      setEditorStatus('Sensor backend not responding yet. You can design curves offline; they save once a fan is detected.', true);
+    } else {
+      setEditorStatus('', false);
+    }
+    overlay.hidden = false;
+  }
+  function closeEditor() {
+    if (!overlay) return;
+    overlay.hidden = true;
+  }
+  editBtn?.addEventListener('click', openEditor);
+  closeBtn?.addEventListener('click', closeEditor);
+  overlay?.addEventListener('click', (ev) => { if (ev.target === overlay) closeEditor(); });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && overlay && !overlay.hidden) closeEditor();
+  });
+  fanSelect?.addEventListener('change', () => {
+    _editorGroup = fanSelect.value === 'gpu' ? 'gpu' : 'cpu';
+    syncFromCurve();
+  });
+  tempSelect?.addEventListener('change', () => {
+    // Just repaint the live overlay; don't reset points.
+    paintLiveOverlay();
+  });
+
+  resetBtn?.addEventListener('click', () => {
+    _editorPoints = DEFAULT_POINTS.slice();
+    paintCurve();
+    setEditorStatus('Reset to default curve (not yet saved).', false);
+  });
+  deleteBtn?.addEventListener('click', async () => {
+    _curves[_editorGroup] = null;
+    try {
+      const r = await window.dash?.fansSaveCurves?.(_curves);
+      if (r?.ok) setEditorStatus(`${GROUP_LABELS[_editorGroup]} curve deleted.`, false);
+      else setEditorStatus('Delete failed: ' + (r?.error || 'unknown'), true);
+    } catch (err) { setEditorStatus('Delete failed: ' + err.message, true); }
+    renderFanList();
+    syncFromCurve();
+  });
+  saveBtn?.addEventListener('click', async () => {
+    const temp = (_last?.temps || []).find((t) => t.id === tempSelect.value);
+    const fanCount = groupFanCount(_editorGroup);
+    _curves[_editorGroup] = {
+      sourceTempId: temp?.id || null,
+      sourceTempName: temp?.name || null,
+      points: _editorPoints.slice().sort((a, b) => a.temp - b.temp),
+    };
+    let ok = false;
+    try {
+      const r = await window.dash?.fansSaveCurves?.(_curves);
+      if (r?.ok) {
+        ok = true;
+        // On the appliance the curve is pushed to the ASUS hardware;
+        // report whether that took so the user knows it's live.
+        const ap = r.applied;
+        let msg;
+        if (ap && ap.ok) {
+          msg = `Saved · curve applied to hardware (${ap.applied.join(', ')}).`;
+        } else if (ap && !ap.ok) {
+          msg = `Saved to disk, but hardware apply failed: ${ap.error || 'unknown'}.`;
+        } else {
+          msg = `Saved · ${GROUP_LABELS[_editorGroup]} curve (${fanCount} fan${fanCount === 1 ? '' : 's'}).`;
         }
+        setEditorStatus(msg, !!(ap && !ap.ok));
+      } else {
+        setEditorStatus('Save failed: ' + (r?.error || 'unknown'), true);
       }
-      _bgmPlayTone(at, ch[0] / 2, 6.0, {
-        type: 'sine', peak: 0.2, attack: 1.0,
-      });
-    }
-    if (step % 5 === 0) {
-      _bgmPlayFmBell(at, ch[((step / 5) | 0) % ch.length] * 3, 1.8, {
-        peak: 0.06, modDepth: 80, ratio: 2.01,
-        pan: Math.sin(step / 8),
-      });
-    }
-  }
+    } catch (err) { setEditorStatus('Save failed: ' + err.message, true); }
+    renderFanList();
+    // Close on a clean save; on hardware-apply failure leave it open so
+    // the message is readable.
+    if (ok) setTimeout(closeEditor, 1400);
+  });
 
-  // 6) GRAVITY WELL — heavy descent, sub bass + timpani + dark brass.
-  function _bgmScheduleSpaceGravityWell(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      _bgmPlayTone(at, ch[0] / 4, 4.5, {
-        type: 'sine', peak: 0.32, attack: 1.0,
-      });
-      _bgmPlayBrass(at, ch[2], 3.5, { peak: 0.1, attack: 0.6 });
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 4.0, {
-          type: 'sawtooth', peak: 0.05, attack: 0.8, detune: i * 4,
-          filter: { type: 'lowpass', freq: 1200, q: 2 },
-          pan: (i - 1) * 0.3,
-        });
-      }
-    }
-    if (beat % 4 === 0) _bgmPlayTimpani(at, ch[0] / 2, { peak: 0.4 });
-  }
-
-  // 7) EXOPLANET — dissonant sub + alien FM bells + filtered noise.
-  function _bgmScheduleSpaceExoplanet(step, at) {
-    const beat = step % 16;
-    if (beat === 0) {
-      _bgmPlayTone(at, 73.42, 5.0, {
-        type: 'sine', peak: 0.22, attack: 1.5,
-      });
-      _bgmPlayTone(at, 116.54, 5.0, {
-        type: 'triangle', peak: 0.05, attack: 1.8,
-        filter: { type: 'lowpass', freq: 1200 },
-      });
-    }
-    if (Math.random() < 0.15) {
-      _bgmPlayFmBell(at, 600 + Math.random() * 1200, 1.2, {
-        peak: 0.05, modDepth: 200, ratio: 4.51,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    if (beat % 4 === 0) {
-      _bgmPlayNoise(at, 2.0, {
-        filterType: 'bandpass', freq: 500 + Math.random() * 1000,
-        q: 5, peak: 0.04,
-      });
-    }
-  }
-
-  // 8) THE LAUNCH — M83-anthem build: breathing pad + crescendo arp
-  // + timpani downbeats + soaring lead on bar 3 + cymbal-noise sweep
-  // when the lead drops in.
-  function _bgmScheduleSpaceLaunch(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat % 4 === 0) _bgmPlayTimpani(at, ch[0] / 2, { peak: 0.45 });
-    if (beat === 4 || beat === 12) _bgmPlayTimpani(at, ch[2] / 2, { peak: 0.3 });
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 3.6, {
-          peak: 0.08, attack: 0.6 + i * 0.15, pan: (i - 1) * 0.3,
-        });
-      }
-      // Each bar: an 8-step crescendo arp on the dominant of the chord.
-      _bgmPlayArpPulse(at, ch[1] * 2, 3.5, {
-        peak: 0.1, stepDur: 0.22,
-        cutoffStart: 700, cutoffEnd: 2800,
-      });
-    }
-    // Soaring lead enters on bar 3 (the "lift-off" moment).
-    if (beat === 0 && bar === 2) {
-      _bgmPlaySoarLead(at, ch[2] * 2, 6.5, { peak: 0.12, attack: 0.25 });
-    }
-    if (beat === 0 || beat === 8) {
-      _bgmPlayNoise(at, 0.8, {
-        filterType: 'highpass', freq: 5000, peak: 0.06,
-      });
-    }
-  }
-
-  // 9) STARDUST — gentle pad + twinkling random high FM bells + soft kick.
-  function _bgmScheduleSpaceStardust(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 5.0, {
-          type: 'sine', peak: 0.06, attack: 1.0,
-          pan: (i - 1) * 0.4,
-        });
-      }
-      _bgmPlayTone(at, ch[0], 5.0, {
-        type: 'triangle', peak: 0.1, attack: 0.6,
-        filter: { type: 'lowpass', freq: 1000 },
-      });
-    }
-    if (Math.random() < 0.35) {
-      _bgmPlayFmBell(at, 1500 + Math.random() * 2500, 0.6, {
-        peak: 0.05, modDepth: 50, ratio: 3.01,
-        pan: (Math.random() * 2) - 1,
-      });
-    }
-    if (beat === 0 || beat === 8) {
-      _bgmPlayKick(at, { peak: 0.2, end: 40, dur: 0.5 });
-    }
-  }
-
-  // 10) HOMEBOUND — emotional return: M83 breathing pad + soaring
-  // lead carries the 8-note melodic line + soft phrase timpani.
-  const _SPACE_HOME_MEL = [392, 440, 392, 349.23, 329.63, 349.23, 392, 440];
-  function _bgmScheduleSpaceHomebound(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SPACE_CHORDS[bar];
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 5.0, {
-          peak: 0.07, attack: 1.0, pan: (i - 1) * 0.3,
-        });
-      }
-      _bgmPlayTone(at, ch[0] / 2, 5.0, {
-        type: 'sine', peak: 0.18, attack: 0.8,
-      });
-    }
-    if (beat % 4 === 0) {
-      const note = _SPACE_HOME_MEL[((beat / 4) + bar * 4) % _SPACE_HOME_MEL.length];
-      _bgmPlaySoarLead(at, note, 1.3, { peak: 0.1, attack: 0.18 });
-    }
-    if (beat === 0 || beat === 12) {
-      _bgmPlayTimpani(at, ch[0] / 2, { peak: 0.25 });
-    }
-  }
-
-  // ── §daft ── Daft Punk / Tron Legacy: four-on-the-floor kicks,
-  // pumping pads, filtered house bass, vocoder-flavoured square leads.
-  // Reuses SYNTH_CHORDS_AM (Am-G-F-G) — the techno/disco minor home.
-
-  // Vocoder lead — square + sine fundamental through a narrow lowpass,
-  // reads as the talk-box / vocoder timbre central to Daft Punk's hooks.
-  function _bgmPlayVocoder(at, freq, dur, opts = {}) {
-    const peak = opts.peak ?? 0.1;
-    _bgmPlayTone(at, freq, dur, {
-      type: 'square', peak, attack: 0.01,
-      filter: { type: 'lowpass', freq: 1800, q: 2 },
-      pan: opts.pan ?? 0,
-    });
-    _bgmPlayTone(at, freq, dur, {
-      type: 'sine', peak: peak * 0.4, attack: 0.01,
-      pan: opts.pan ?? 0,
-    });
-  }
-
-  // 1) DERESOLUTION — Tron Legacy boss feel, big kick + pulsing arp.
-  function _bgmScheduleDaftDeresolution(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.55 });
-    _bgmPlayTone(at, ch[0] / 2, 0.1, {
-      type: 'sawtooth', peak: 0.18,
-      filter: { type: 'lowpass', freq: 400, q: 4 },
-    });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8000, peak: 0.06,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.22 });
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 0.4, {
-          type: 'sawtooth', peak: 0.07, attack: 0.005,
-          filter: { type: 'lowpass', freq: 1400, q: 3 },
-          pan: (i - 1.5) * 0.3,
-        });
-      }
-    }
-  }
-
-  // 2) RECOGNIZER — slow ominous Tron Legacy march.
-  function _bgmScheduleDaftRecognizer(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.5, end: 30, dur: 0.6 });
-    if (beat === 0) {
-      _bgmPlayTone(at, ch[0] / 2, 4.0, {
-        type: 'sine', peak: 0.32, attack: 0.5,
-        filter: { type: 'lowpass', freq: 200 },
-      });
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 4.0, { peak: 0.06, attack: 0.8, pan: (i - 1.5) * 0.3 });
-      }
-    }
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 7000, peak: 0.05,
-    });
-  }
-
-  // 3) AROUND THE WORLD — disco-house bass + 4/4 kick.
-  const _DAFT_DISCO_BASS = [110, 110, 130.81, 110, 110, 98, 87.31, 98];
-  function _bgmScheduleDaftAroundWorld(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.5 });
-    if (beat % 2 === 0) {
-      const note = _DAFT_DISCO_BASS[((beat / 2) + bar * 2) % _DAFT_DISCO_BASS.length];
-      _bgmPlayTone(at, note, 0.18, {
-        type: 'sawtooth', peak: 0.22,
-        filter: { type: 'lowpass', freq: 600, q: 4 },
-      });
-    }
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8500, peak: 0.06,
-    });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.2 });
-    if (beat === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 3.5, { peak: 0.06, attack: 0.4, pan: (i - 1.5) * 0.3 });
-      }
-    }
-  }
-
-  // 4) HARDER FASTER — driving 130, 16th-note bass + filter-mod arp.
-  function _bgmScheduleDaftHarderFaster(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.55 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.22 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 9000, peak: 0.06,
-    });
-    _bgmPlayTone(at, beat % 2 === 0 ? ch[0] / 2 : ch[0], 0.08, {
-      type: 'sawtooth', peak: 0.2,
-      filter: { type: 'lowpass', freq: 500, q: 4 },
-    });
-    if (beat % 2 === 0) {
-      _bgmPlayTone(at, ch[(beat / 2) % ch.length] * 2, 0.1, {
-        type: 'square', peak: 0.08,
-        filter: { type: 'lowpass', freq: 1800 + beat * 100, q: 3 },
-      });
-    }
-  }
-
-  // 5) GAME GRID — Tron grid syncopated arp on every step.
-  const _DAFT_GAME_ARP = [220, 261.63, 329.63, 261.63, 392, 329.63, 261.63, 220];
-  function _bgmScheduleDaftGameGrid(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.45 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.18 });
-    const note = _DAFT_GAME_ARP[beat % _DAFT_GAME_ARP.length];
-    _bgmPlayTone(at, note, 0.12, {
-      type: 'square', peak: 0.1,
-      filter: { type: 'lowpass', freq: 2200, q: 2 },
-      pan: ((beat % 4) - 1.5) * 0.4,
-    });
-    if (beat % 4 === 0) _bgmPlayTone(at, ch[0] / 2, 0.4, {
-      type: 'sawtooth', peak: 0.22,
-      filter: { type: 'lowpass', freq: 350, q: 4 },
-    });
-  }
-
-  // 6) DA FUNK — swung bassline + offbeat-emphasized hat + chord stab.
-  const _DAFT_FUNK_BASS = [110, 0, 110, 130.81, 0, 110, 98, 110];
-  function _bgmScheduleDaftDaFunk(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.48 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.2 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 8000, peak: 0.07,
-    });
-    if (beat % 2 === 0) {
-      const note = _DAFT_FUNK_BASS[((beat / 2) + bar * 2) % _DAFT_FUNK_BASS.length];
-      if (note > 0) _bgmPlayTone(at, note, 0.18, {
-        type: 'sawtooth', peak: 0.25,
-        filter: { type: 'lowpass', freq: 600 + (bar * 100), q: 3 },
-      });
-    }
-    if (beat === 6) {
-      for (let i = 1; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i], 0.18, {
-          type: 'square', peak: 0.07,
-          filter: { type: 'lowpass', freq: 1800 },
-        });
-      }
-    }
-  }
-
-  // 7) DISC WARS — aggressive fast: 16th saw arp + big stabs.
-  function _bgmScheduleDaftDiscWars(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.55 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.25 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.03, {
-      filterType: 'highpass', freq: 9000, peak: 0.07,
-    });
-    _bgmPlayTone(at, ch[beat % ch.length], 0.07, {
-      type: 'sawtooth', peak: 0.14,
-      filter: { type: 'lowpass', freq: 1600, q: 3 },
-    });
-    if (beat % 8 === 0) {
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayTone(at, ch[i] * 2, 0.3, {
-          type: 'sawtooth', peak: 0.08, attack: 0.005,
-          filter: { type: 'lowpass', freq: 2000, q: 3 },
-        });
-      }
-    }
-  }
-
-  // 8) VOIDLINE — slow atmospheric Tron, deep sub + pumping pad.
-  function _bgmScheduleDaftVoidline(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0 || beat === 8) _bgmPlayKick(at, { peak: 0.4, end: 30 });
-    if (beat === 0) {
-      _bgmPlayTone(at, ch[0] / 4, 4.0, {
-        type: 'sine', peak: 0.3, attack: 0.5,
-        filter: { type: 'lowpass', freq: 180 },
-      });
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i] * 2, 4.0, { peak: 0.07, attack: 0.8, pan: (i - 1.5) * 0.4 });
-      }
-    }
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 7500, peak: 0.05,
-    });
-  }
-
-  // 9) DIGITAL LOVE — bouncy melodic with vocoder lead.
-  const _DAFT_LOVE_LEAD = [523.25, 587.33, 659.25, 523.25, 392, 440, 523.25, 587.33];
-  function _bgmScheduleDaftDigitalLove(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat % 4 === 0) _bgmPlayKick(at, { peak: 0.45 });
-    if (beat === 4 || beat === 12) _bgmPlaySnare(at, { peak: 0.18 });
-    if (beat % 2 === 1) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 8500, peak: 0.06,
-    });
-    if (beat % 2 === 0) _bgmPlayTone(at, ch[0] / 2, 0.2, {
-      type: 'sawtooth', peak: 0.2,
-      filter: { type: 'lowpass', freq: 500, q: 3 },
-    });
-    if (beat % 2 === 0) {
-      const note = _DAFT_LOVE_LEAD[((beat / 2) + bar * 2) % _DAFT_LOVE_LEAD.length];
-      _bgmPlayVocoder(at, note, 0.18, { peak: 0.09 });
-    }
-  }
-
-  // 10) END OF LINE — emotional outro, sparse vocoder over emotional pad.
-  function _bgmScheduleDaftEndOfLine(step, at) {
-    const beat = step % 16;
-    const bar  = Math.floor(step / 16) % 4;
-    const ch   = SYNTH_CHORDS_AM[bar];
-    if (beat === 0) {
-      _bgmPlayKick(at, { peak: 0.4, end: 35, dur: 0.6 });
-      _bgmPlayTone(at, ch[0] / 2, 4.0, {
-        type: 'sine', peak: 0.25, attack: 0.6,
-      });
-      for (let i = 0; i < ch.length; i++) {
-        _bgmPlayPad(at, ch[i], 5.0, { peak: 0.08, attack: 1.0, pan: (i - 1.5) * 0.3 });
-      }
-    }
-    if (beat === 4 || beat === 11) {
-      _bgmPlayVocoder(at, ch[2] * 2, 1.5, { peak: 0.1 });
-    }
-    if (beat % 4 === 2) _bgmPlayNoise(at, 0.025, {
-      filterType: 'highpass', freq: 7500, peak: 0.05,
-    });
-  }
-
-  // ── §catalog ── genre / track registry ────────────────────────────
-  // Adding a new track is two steps: write a schedule(step, at)
-  // function above, then add an entry under the genre's `tracks`
-  // array here. patternLen sets the loop length (in 16th-note steps)
-  // and BPM defines the step duration.
-  const BGM_CATALOG = {
-    plundercore: {
-      name: 'PLUNDER CORE',
-      tracks: [
-        { id: 'core-loop',      name: 'CORE LOOP',      bpm: 104, patternLen: 16, schedule: _bgmSchedulePlunderCoreLoop },
-        { id: 'crate-dig',      name: 'CRATE DIG',      bpm: 88,  patternLen: 64, schedule: _bgmSchedulePlunderCrateDig },
-        { id: 'fragment',       name: 'FRAGMENT',       bpm: 96,  patternLen: 32, schedule: _bgmSchedulePlunderFragment },
-        { id: 'tape-splice',    name: 'TAPE SPLICE',    bpm: 100, patternLen: 64, schedule: _bgmSchedulePlunderTapeSplice },
-        { id: 'stutter-step',   name: 'STUTTER STEP',   bpm: 116, patternLen: 16, schedule: _bgmSchedulePlunderStutterStep },
-        { id: 'phantom-room',   name: 'PHANTOM ROOM',   bpm: 76,  patternLen: 64, schedule: _bgmSchedulePlunderPhantomRoom },
-        { id: 'hook-cycle',     name: 'HOOK CYCLE',     bpm: 108, patternLen: 16, schedule: _bgmSchedulePlunderHookCycle },
-        { id: 'ghost-crackle',  name: 'GHOST CRACKLE',  bpm: 84,  patternLen: 64, schedule: _bgmSchedulePlunderGhostCrackle },
-        { id: 'slow-burn',      name: 'SLOW BURN',      bpm: 68,  patternLen: 64, schedule: _bgmSchedulePlunderSlowBurn },
-        { id: 'mosaic',         name: 'MOSAIC',         bpm: 124, patternLen: 16, schedule: _bgmSchedulePlunderMosaic },
-      ],
-    },
-    vaporwave: {
-      name: 'VAPORWAVE',
-      tracks: [
-        { id: 'mall-air',         name: 'MALL AIR',         bpm: 92,  patternLen: 64, schedule: _bgmScheduleVaporMallAir },
-        { id: 'plaza-bath',       name: 'PLAZA BATH',       bpm: 84,  patternLen: 64, schedule: _bgmScheduleVaporPlazaBath },
-        { id: 'sunset-cassette',  name: 'SUNSET CASSETTE',  bpm: 98,  patternLen: 64, schedule: _bgmScheduleVaporSunsetCassette },
-        { id: 'static-lobby',     name: 'STATIC LOBBY',     bpm: 80,  patternLen: 64, schedule: _bgmScheduleVaporStaticLobby },
-        { id: 'pixel-highway',    name: 'PIXEL HIGHWAY',    bpm: 112, patternLen: 64, schedule: _bgmScheduleVaporPixelHighway },
-        { id: 'dead-mall',        name: 'DEAD MALL',        bpm: 72,  patternLen: 64, schedule: _bgmScheduleVaporDeadMall },
-        { id: 'pink-flamingo',    name: 'PINK FLAMINGO',    bpm: 88,  patternLen: 64, schedule: _bgmScheduleVaporPinkFlamingo },
-        { id: 'beach-haze',       name: 'BEACH HAZE',       bpm: 76,  patternLen: 64, schedule: _bgmScheduleVaporBeachHaze },
-        { id: 'fax-modem',        name: 'FAX MODEM',        bpm: 96,  patternLen: 64, schedule: _bgmScheduleVaporFaxModem },
-        { id: 'tropic-dusk',      name: 'TROPIC DUSK',      bpm: 90,  patternLen: 64, schedule: _bgmScheduleVaporTropicDusk },
-      ],
-    },
-    synthwave: {
-      name: 'SYNTHWAVE',
-      tracks: [
-        { id: 'neon-drive',       name: 'NEON DRIVE',       bpm: 116, patternLen: 64, schedule: _bgmScheduleSynthNeonDrive },
-        { id: 'midnight-cruise',  name: 'MIDNIGHT CRUISE',  bpm: 100, patternLen: 64, schedule: _bgmScheduleSynthMidnightCruise },
-        { id: 'outrun',           name: 'OUTRUN',           bpm: 128, patternLen: 64, schedule: _bgmScheduleSynthOutrun },
-        { id: 'ghost-grid',       name: 'GHOST GRID',       bpm: 104, patternLen: 64, schedule: _bgmScheduleSynthGhostGrid },
-        { id: 'vhs-glow',         name: 'VHS GLOW',         bpm: 92,  patternLen: 64, schedule: _bgmScheduleSynthVhsGlow },
-        { id: 'chrome-highway',   name: 'CHROME HIGHWAY',   bpm: 120, patternLen: 64, schedule: _bgmScheduleSynthChromeHighway },
-        { id: 'starlight',        name: 'STARLIGHT',        bpm: 88,  patternLen: 64, schedule: _bgmScheduleSynthStarlight },
-        { id: 'city-glitter',     name: 'CITY GLITTER',     bpm: 108, patternLen: 64, schedule: _bgmScheduleSynthCityGlitter },
-        { id: 'dark-matter',      name: 'DARK MATTER',      bpm: 84,  patternLen: 64, schedule: _bgmScheduleSynthDarkMatter },
-        { id: 'horizon-rush',     name: 'HORIZON RUSH',     bpm: 132, patternLen: 64, schedule: _bgmScheduleSynthHorizonRush },
-      ],
-    },
-    lofi: {
-      name: 'LO-FI',
-      tracks: [
-        { id: 'study-desk',       name: 'STUDY DESK',       bpm: 80,  patternLen: 64, schedule: _bgmScheduleLofiStudyDesk },
-        { id: 'coffee-steam',     name: 'COFFEE STEAM',     bpm: 84,  patternLen: 64, schedule: _bgmScheduleLofiCoffeeSteam },
-        { id: 'rain-window',      name: 'RAIN WINDOW',      bpm: 76,  patternLen: 64, schedule: _bgmScheduleLofiRainWindow },
-        { id: 'vinyl-crackle',    name: 'VINYL CRACKLE',    bpm: 88,  patternLen: 64, schedule: _bgmScheduleLofiVinylCrackle },
-        { id: 'night-bus',        name: 'NIGHT BUS',        bpm: 92,  patternLen: 64, schedule: _bgmScheduleLofiNightBus },
-        { id: 'vinyl-pop',        name: 'VINYL POP',        bpm: 82,  patternLen: 64, schedule: _bgmScheduleLofiVinylPop },
-        { id: 'after-hours',      name: 'AFTER HOURS',      bpm: 72,  patternLen: 64, schedule: _bgmScheduleLofiAfterHours },
-        { id: 'open-window',      name: 'OPEN WINDOW',      bpm: 86,  patternLen: 64, schedule: _bgmScheduleLofiOpenWindow },
-        { id: 'school-hall',      name: 'SCHOOL HALL',      bpm: 78,  patternLen: 64, schedule: _bgmScheduleLofiSchoolHall },
-        { id: 'dusk-stroll',      name: 'DUSK STROLL',      bpm: 90,  patternLen: 64, schedule: _bgmScheduleLofiDuskStroll },
-      ],
-    },
-    darkambient: {
-      name: 'DARK AMBIENT',
-      tracks: [
-        { id: 'abyss',            name: 'ABYSS',            bpm: 60,  patternLen: 64, schedule: _bgmScheduleDarkAbyss },
-        { id: 'cathedral',        name: 'CATHEDRAL',        bpm: 56,  patternLen: 64, schedule: _bgmScheduleDarkCathedral },
-        { id: 'static-rift',      name: 'STATIC RIFT',      bpm: 64,  patternLen: 64, schedule: _bgmScheduleDarkStaticRift },
-        { id: 'deep-signal',      name: 'DEEP SIGNAL',      bpm: 60,  patternLen: 64, schedule: _bgmScheduleDarkDeepSignal },
-        { id: 'sublayer',         name: 'SUBLAYER',         bpm: 52,  patternLen: 64, schedule: _bgmScheduleDarkSublayer },
-        { id: 'event-horizon',    name: 'EVENT HORIZON',    bpm: 58,  patternLen: 64, schedule: _bgmScheduleDarkEventHorizon },
-        { id: 'midnight-veil',    name: 'MIDNIGHT VEIL',    bpm: 50,  patternLen: 64, schedule: _bgmScheduleDarkMidnightVeil },
-        { id: 'the-well',         name: 'THE WELL',         bpm: 54,  patternLen: 64, schedule: _bgmScheduleDarkTheWell },
-        { id: 'starfield',        name: 'STARFIELD',        bpm: 62,  patternLen: 64, schedule: _bgmScheduleDarkStarfield },
-        { id: 'void-hum',         name: 'VOID HUM',         bpm: 48,  patternLen: 64, schedule: _bgmScheduleDarkVoidHum },
-      ],
-    },
-    eightbit: {
-      name: '8 BIT',
-      tracks: [
-        { id: 'hyrule-field',     name: 'HYRULE FIELD',     bpm: 124, patternLen: 64, schedule: _bgmSchedule8BitHyruleField },
-        { id: 'star-road',        name: 'STAR ROAD',        bpm: 140, patternLen: 64, schedule: _bgmSchedule8BitStarRoad },
-        { id: 'dungeon-crawl',    name: 'DUNGEON CRAWL',    bpm: 80,  patternLen: 64, schedule: _bgmSchedule8BitDungeonCrawl },
-        { id: 'boss-battle',      name: 'BOSS BATTLE',      bpm: 150, patternLen: 64, schedule: _bgmSchedule8BitBossBattle },
-        { id: 'pixel-quest',      name: 'PIXEL QUEST',      bpm: 132, patternLen: 64, schedule: _bgmSchedule8BitPixelQuest },
-        { id: 'castle-fanfare',   name: 'CASTLE FANFARE',   bpm: 116, patternLen: 64, schedule: _bgmSchedule8BitCastleFanfare },
-        { id: 'water-temple',     name: 'WATER TEMPLE',     bpm: 96,  patternLen: 64, schedule: _bgmSchedule8BitWaterTemple },
-        { id: 'sky-island',       name: 'SKY ISLAND',       bpm: 110, patternLen: 64, schedule: _bgmSchedule8BitSkyIsland },
-        { id: 'final-boss',       name: 'FINAL BOSS',       bpm: 156, patternLen: 64, schedule: _bgmSchedule8BitFinalBoss },
-        { id: 'minigame',         name: 'MINIGAME',         bpm: 160, patternLen: 64, schedule: _bgmSchedule8BitMinigame },
-      ],
-    },
-    smoothjazz: {
-      name: 'SMOOTH JAZZ',
-      tracks: [
-        { id: 'midnight-lounge',  name: 'MIDNIGHT LOUNGE',  bpm: 68,  patternLen: 64, schedule: _bgmScheduleJazzMidnightLounge },
-        { id: 'city-lights',      name: 'CITY LIGHTS',      bpm: 92,  patternLen: 64, schedule: _bgmScheduleJazzCityLights },
-        { id: 'after-party',      name: 'AFTER PARTY',      bpm: 78,  patternLen: 64, schedule: _bgmScheduleJazzAfterParty },
-        { id: 'champagne',        name: 'CHAMPAGNE',        bpm: 102, patternLen: 64, schedule: _bgmScheduleJazzChampagne },
-        { id: 'rain-on-glass',    name: 'RAIN ON GLASS',    bpm: 72,  patternLen: 64, schedule: _bgmScheduleJazzRainOnGlass },
-        { id: 'late-train',       name: 'LATE TRAIN',       bpm: 96,  patternLen: 64, schedule: _bgmScheduleJazzLateTrain },
-        { id: 'velvet-room',      name: 'VELVET ROOM',      bpm: 64,  patternLen: 64, schedule: _bgmScheduleJazzVelvetRoom },
-        { id: 'sunset-drive',     name: 'SUNSET DRIVE',     bpm: 88,  patternLen: 64, schedule: _bgmScheduleJazzSunsetDrive },
-        { id: 'honey-suite',      name: 'HONEY SUITE',      bpm: 84,  patternLen: 64, schedule: _bgmScheduleJazzHoneySuite },
-        { id: 'blue-neon',        name: 'BLUE NEON',        bpm: 76,  patternLen: 64, schedule: _bgmScheduleJazzBlueNeon },
-      ],
-    },
-    daft: {
-      name: 'DAFT',
-      tracks: [
-        { id: 'deresolution',     name: 'DERESOLUTION',     bpm: 110, patternLen: 64, schedule: _bgmScheduleDaftDeresolution },
-        { id: 'recognizer',       name: 'RECOGNIZER',       bpm: 70,  patternLen: 64, schedule: _bgmScheduleDaftRecognizer },
-        { id: 'around-world',     name: 'AROUND THE WORLD', bpm: 124, patternLen: 64, schedule: _bgmScheduleDaftAroundWorld },
-        { id: 'harder-faster',    name: 'HARDER FASTER',    bpm: 130, patternLen: 64, schedule: _bgmScheduleDaftHarderFaster },
-        { id: 'game-grid',        name: 'GAME GRID',        bpm: 120, patternLen: 64, schedule: _bgmScheduleDaftGameGrid },
-        { id: 'da-funk',          name: 'DA FUNK',          bpm: 110, patternLen: 64, schedule: _bgmScheduleDaftDaFunk },
-        { id: 'disc-wars',        name: 'DISC WARS',        bpm: 132, patternLen: 64, schedule: _bgmScheduleDaftDiscWars },
-        { id: 'voidline',         name: 'VOIDLINE',         bpm: 72,  patternLen: 64, schedule: _bgmScheduleDaftVoidline },
-        { id: 'digital-love',     name: 'DIGITAL LOVE',     bpm: 122, patternLen: 64, schedule: _bgmScheduleDaftDigitalLove },
-        { id: 'end-of-line',      name: 'END OF LINE',      bpm: 80,  patternLen: 64, schedule: _bgmScheduleDaftEndOfLine },
-      ],
-    },
-    soundtrack: {
-      name: 'SOUNDTRACK',
-      tracks: [
-        { id: 'departure',        name: 'DEPARTURE',        bpm: 56,  patternLen: 64, schedule: _bgmScheduleSpaceDeparture },
-        { id: 'crossing',         name: 'CROSSING',         bpm: 48,  patternLen: 64, schedule: _bgmScheduleSpaceCrossing },
-        { id: 'solaris',          name: 'SOLARIS',          bpm: 44,  patternLen: 64, schedule: _bgmScheduleSpaceSolaris },
-        { id: 'orion',            name: "ORION'S BELT",     bpm: 64,  patternLen: 64, schedule: _bgmScheduleSpaceOrion },
-        { id: 'nebula',           name: 'NEBULA',           bpm: 52,  patternLen: 64, schedule: _bgmScheduleSpaceNebula },
-        { id: 'gravity-well',     name: 'GRAVITY WELL',     bpm: 70,  patternLen: 64, schedule: _bgmScheduleSpaceGravityWell },
-        { id: 'exoplanet',        name: 'EXOPLANET',        bpm: 56,  patternLen: 64, schedule: _bgmScheduleSpaceExoplanet },
-        { id: 'the-launch',       name: 'THE LAUNCH',       bpm: 76,  patternLen: 64, schedule: _bgmScheduleSpaceLaunch },
-        { id: 'stardust',         name: 'STARDUST',         bpm: 60,  patternLen: 64, schedule: _bgmScheduleSpaceStardust },
-        { id: 'homebound',        name: 'HOMEBOUND',        bpm: 72,  patternLen: 64, schedule: _bgmScheduleSpaceHomebound },
-      ],
-    },
-    cyberpunk: {
-      name: 'CYBERPUNK',
-      tracks: [
-        { id: 'neon-rain',        name: 'NEON RAIN',        bpm: 70,  patternLen: 64, schedule: _bgmScheduleCyberNeonRain },
-        { id: 'wet-streets',      name: 'WET STREETS',      bpm: 78,  patternLen: 64, schedule: _bgmScheduleCyberWetStreets },
-        { id: 'subsignal',        name: 'SUBSIGNAL',        bpm: 60,  patternLen: 64, schedule: _bgmScheduleCyberSubsignal },
-        { id: 'hologram',         name: 'HOLOGRAM',         bpm: 72,  patternLen: 64, schedule: _bgmScheduleCyberHologram },
-        { id: 'near-future',      name: 'NEAR FUTURE',      bpm: 92,  patternLen: 64, schedule: _bgmScheduleCyberNearFuture },
-        { id: 'sector-7',         name: 'SECTOR 7',         bpm: 88,  patternLen: 64, schedule: _bgmScheduleCyberSector7 },
-        { id: 'night-drive',      name: 'NIGHT DRIVE',      bpm: 96,  patternLen: 64, schedule: _bgmScheduleCyberNightDrive },
-        { id: 'grid-down',        name: 'GRID DOWN',        bpm: 64,  patternLen: 64, schedule: _bgmScheduleCyberGridDown },
-        { id: 'overpass',         name: 'OVERPASS',         bpm: 84,  patternLen: 64, schedule: _bgmScheduleCyberOverpass },
-        { id: 'chrome-reflection',name: 'CHROME REFLECTION',bpm: 80,  patternLen: 64, schedule: _bgmScheduleCyberChrome },
-      ],
-    },
-    taverncore: {
-      name: 'TAVERNCORE',
-      tracks: [
-        { id: 'harp-north',       name: 'HARP OF THE NORTH', bpm: 72,  patternLen: 64, schedule: _bgmScheduleFolkHarpNorth },
-        { id: 'forest-whispers',  name: 'FOREST WHISPERS',  bpm: 60,  patternLen: 64, schedule: _bgmScheduleFolkForestWhispers },
-        { id: 'tavern-jig',       name: 'TAVERN JIG',       bpm: 132, patternLen: 64, schedule: _bgmScheduleFolkTavernJig },
-        { id: 'war-drums',        name: 'WAR DRUMS',        bpm: 88,  patternLen: 64, schedule: _bgmScheduleFolkWarDrums },
-        { id: 'yennefer-theme',   name: "YENNEFER'S THEME", bpm: 76,  patternLen: 64, schedule: _bgmScheduleFolkYenneferTheme },
-        { id: 'longship',         name: 'LONGSHIP',         bpm: 80,  patternLen: 64, schedule: _bgmScheduleFolkLongship },
-        { id: 'hearth-fire',      name: 'HEARTH FIRE',      bpm: 70,  patternLen: 64, schedule: _bgmScheduleFolkHearthFire },
-        { id: 'ravens',           name: 'RAVENS',           bpm: 64,  patternLen: 64, schedule: _bgmScheduleFolkRavens },
-        { id: 'mead-hall',        name: 'MEAD HALL',        bpm: 110, patternLen: 64, schedule: _bgmScheduleFolkMeadHall },
-        { id: 'geralts-ride',     name: "GERALT'S RIDE",    bpm: 120, patternLen: 64, schedule: _bgmScheduleFolkGeraltsRide },
-      ],
-    },
-  };
-
-  // ── §favorites ── cross-genre playlist ──────────────────────────
-  // Keys are "<genreId>:<trackId>". Persisted under cfg.bgmFavorites
-  // as a plain string array. The "favs" virtual genre is computed at
-  // lookup time so toggling a favorite updates the FAVS list without a
-  // catalog rebuild.
-  const _bgmFavorites = new Set();
-  function _bgmFavoriteTracks() {
-    const out = [];
-    for (const key of _bgmFavorites) {
-      const sep = key.indexOf(':');
-      if (sep <= 0) continue;
-      const genreId = key.slice(0, sep);
-      const trackId = key.slice(sep + 1);
-      const g = BGM_CATALOG[genreId];
-      if (!g) continue;
-      const t = g.tracks.find((x) => x.id === trackId);
-      if (!t) continue;
-      // Composite id so FAVS keeps a unique key per row; original
-      // schedule/bpm/patternLen survive via spread.
-      out.push({
-        ...t,
-        id: key,
-        name: `${t.name} · ${g.name}`,
-      });
-    }
-    return out;
-  }
-  function _bgmCurrentGenre() {
-    if (window._bgmState.genre === 'favs') {
-      return { name: 'FAVS', tracks: _bgmFavoriteTracks() };
-    }
-    return BGM_CATALOG[window._bgmState.genre] || BGM_CATALOG.plundercore;
-  }
-  function _bgmCurrentTrack() {
-    const g = _bgmCurrentGenre();
-    return g.tracks.find((t) => t.id === window._bgmState.trackId) || g.tracks[0];
-  }
-  // Resolve the favorite-key for whatever track is current — handles
-  // both the FAVS view (track.id is already the composite key) and any
-  // normal genre (build the composite key on the fly).
-  function _bgmCurrentFavoriteKey() {
-    const t = _bgmCurrentTrack();
-    if (!t) return null;
-    if (window._bgmState.genre === 'favs') return t.id;
-    return `${window._bgmState.genre}:${t.id}`;
-  }
-  function _bgmIsFavorite() {
-    const k = _bgmCurrentFavoriteKey();
-    return !!k && _bgmFavorites.has(k);
-  }
-  async function _bgmSaveFavorites() {
-    try { await window.dash?.setConfig?.({ bgmFavorites: [..._bgmFavorites] }); }
-    catch {}
-  }
-  function _bgmToggleFavorite() {
-    const key = _bgmCurrentFavoriteKey();
-    if (!key) return;
-    if (_bgmFavorites.has(key)) _bgmFavorites.delete(key);
-    else _bgmFavorites.add(key);
-    _bgmPaintFavoriteBtn();
-    // If we're currently looking at FAVS, the track list changed —
-    // repaint it. Removing the active track is fine; _bgmCurrentTrack
-    // falls back to first in list.
-    if (window._bgmState.genre === 'favs') _bgmRenderTracks();
-    _bgmSaveFavorites();
-  }
-  function _bgmPaintFavoriteBtn() {
-    const btn = document.getElementById('bgm-fav-btn');
-    if (!btn) return;
-    const fav = _bgmIsFavorite();
-    btn.classList.toggle('is-active', fav);
-    btn.title = fav ? 'Remove from FAVS' : 'Add to FAVS';
-    const outline = btn.querySelector('.bgm-fav-outline');
-    const filled  = btn.querySelector('.bgm-fav-filled');
-    if (outline) outline.hidden = fav;
-    if (filled)  filled.hidden  = !fav;
-  }
-  // Load on init.
+  // ── Boot + poll loop ─────────────────────────────────────────────
+  buildGrid();
   (async () => {
     try {
-      const cfg = (await window.dash?.getConfig?.()) || {};
-      const arr = Array.isArray(cfg.bgmFavorites) ? cfg.bgmFavorites : [];
-      for (const k of arr) if (typeof k === 'string') _bgmFavorites.add(k);
-      if (window._bgmState.genre === 'favs') _bgmRenderTracks();
-      _bgmPaintFavoriteBtn();
+      const r = await window.dash?.fansLoadCurves?.();
+      // Normalize: accept only the new {cpu, gpu} shape. Old per-fan
+      // curve data (keyed by sensor id) is silently discarded — those
+      // curves wouldn't apply correctly under the group model anyway.
+      if (r?.ok && r.curves) {
+        _curves = { cpu: r.curves.cpu || null, gpu: r.curves.gpu || null };
+      }
     } catch {}
+    renderFanList();
   })();
-
-  // ── §ui ── populate the TRACK row whenever the genre changes. ─────
-  function _bgmRenderTracks() {
-    if (!bgmTracksEl) return;
-    const g = _bgmCurrentGenre();
-    const curId = _bgmCurrentTrack()?.id;
-    bgmTracksEl.innerHTML = '';
-    if (!g.tracks.length) {
-      // FAVS-empty fallback: a dim hint instead of an empty row so the
-      // user knows where to favorite tracks from.
-      const hint = document.createElement('span');
-      hint.className = 'bgm-track-empty';
-      hint.textContent = 'NO FAVS YET · ♥ a track in any genre to add';
-      bgmTracksEl.appendChild(hint);
-      return;
-    }
-    for (const t of g.tracks) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'bgm-track' + (t.id === curId ? ' is-active' : '');
-      b.dataset.bgmTrack = t.id;
-      b.textContent = `${t.name} · ${t.bpm}`;
-      bgmTracksEl.appendChild(b);
-    }
-  }
-  _bgmRenderTracks();
-
-  // ── §scheduler ── dispatches to the current track's schedule. ─────
-  // 100 ms lookahead means setInterval jitter doesn't audibly skew event
-  // timing. _bgmStep keeps climbing forever; we modulo by the track's
-  // patternLen when scheduling so the loop is endless.
-  const BGM_LOOKAHEAD_S = 0.1;
-  const BGM_SCHED_INTERVAL_MS = 25;
-  function _bgmStepDurS() {
-    const t = _bgmCurrentTrack();
-    return (60 / (t?.bpm || 80)) / 4; // 16th notes
-  }
-  function _bgmTick() {
-    if (!_bgmCtx) return;
-    const t = _bgmCurrentTrack();
-    if (!t) return;
-    const now = _bgmCtx.currentTime;
-    while (_bgmNextStepTime < now + BGM_LOOKAHEAD_S) {
-      try { t.schedule(_bgmStep % t.patternLen, _bgmNextStepTime); }
-      catch (err) { console.warn('[bgm] schedule threw:', err); }
-      _bgmStep++;
-      _bgmNextStepTime += _bgmStepDurS();
-    }
-  }
-
-  // Output level meter — segmented EQ bars matching the system audio
-  // visualizer (audio-color → amber → red gradient via two-color lerp,
-  // glass-floor reflection, red peak markers, gentle "smile" curve).
-  // Source is the BGM master-bus analyser, not system loopback.
-  // Bar count is dynamic: derived from the canvas's CSS width so larger
-  // pane sizes get more resolution. Target ~3 CSS px per bar (1 bar +
-  // 1 gap fits comfortably), clamped to [64, 384] so very narrow panes
-  // still read and very wide ones don't run out of FFT bins.
-  let _bgmBarCount = 0;
-  let _bgmDisplayed = new Float32Array(0);
-  let _bgmPeaks = new Float32Array(0);
-  let _bgmPeakHold = new Float32Array(0);
-  function _bgmTargetBarCount(W) {
-    // Was 3 px / cap 384 — on a wide pane that gave ~250+ bars redrawn at
-    // 60 Hz. 6 px / cap 128 halves the canvas fillRect count per frame
-    // and the FFT bucket loop scales with bar count, so the entire draw
-    // path is ~2× cheaper. Visually still reads as a dense spectrum.
-    const TARGET_BAR_PX = 6;
-    return Math.max(48, Math.min(128, Math.floor(W / TARGET_BAR_PX)));
-  }
-  function _bgmEnsureBarArrays(n) {
-    if (_bgmBarCount === n) return;
-    _bgmBarCount = n;
-    _bgmDisplayed = new Float32Array(n);
-    _bgmPeaks = new Float32Array(n);
-    _bgmPeakHold = new Float32Array(n);
-  }
-  function _bgmResolveColors() {
-    const cs = getComputedStyle(bgmMeterEl || document.documentElement);
-    // Music meter uses a split palette so it visually echoes the audio
-    // input + output panels:
-    //   OUT side (left of centre) → --accent      (audio-out colour)
-    //   IN  side (right of centre) → --amber      (audio-in  colour)
-    // Falling back through --audio-color preserves the prior look on
-    // themes that haven't defined --accent specifically.
-    const accentStr = (cs.getPropertyValue('--accent').trim()
-                    || cs.getPropertyValue('--audio-color').trim()
-                    || '#5ccfff');
-    const amberStr  = (cs.getPropertyValue('--amber').trim() || '#f3a83b');
-    const redStr    = (cs.getPropertyValue('--red').trim()   || '#ff3b30');
-    const parseHex = (s) => {
-      let h = (s || '').trim();
-      if (h.startsWith('#')) h = h.slice(1);
-      if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
-      if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return null;
-      return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
-    };
-    // OUT side = audio-out (accent / cyan). IN side = audio-in (amber).
-    const brightOut = parseHex(accentStr) || [80, 200, 255];
-    const dimOut    = [Math.round(brightOut[0]*0.25), Math.round(brightOut[1]*0.25), Math.round(brightOut[2]*0.25)];
-    const brightIn  = parseHex(amberStr) || [243, 168, 59];
-    const dimIn     = [Math.round(brightIn[0]*0.25), Math.round(brightIn[1]*0.25), Math.round(brightIn[2]*0.25)];
-    return { brightOut, dimOut, brightIn, dimIn, accentStr, amberStr, redStr };
-  }
-  function _bgmDrawMeter() {
-    if (!bgmMeterEl || !_bgmAnalyser) return;
-    // Resize the backing store to match the displayed CSS size every
-    // frame — picker collapses can change the canvas's CSS dims and we
-    // want crisp output without setting up a separate resize handler.
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = bgmMeterEl.clientWidth || bgmMeterEl.width;
-    const cssH = bgmMeterEl.clientHeight || bgmMeterEl.height;
-    const targetW = Math.round(cssW * dpr);
-    const targetH = Math.round(cssH * dpr);
-    if (bgmMeterEl.width !== targetW)  bgmMeterEl.width  = targetW;
-    if (bgmMeterEl.height !== targetH) bgmMeterEl.height = targetH;
-    const ctx2d = bgmMeterEl.getContext('2d');
-    ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const W = cssW;
-    const H = cssH;
-    ctx2d.clearRect(0, 0, W, H);
-
-    // Dynamic bar count derived from current canvas width — more bars
-    // on bigger panes, fewer on narrow ones. Smoothing arrays resize
-    // when the count changes (no carryover from old indices).
-    _bgmEnsureBarArrays(_bgmTargetBarCount(W));
-    const N = _bgmBarCount;
-
-    // FFT → N buckets. Max-of-bins per bucket so transients pop. With
-    // fftSize 1024 we have 512 bins; even at N=384 there's room to
-    // average / spread without empty buckets.
-    const buf = new Uint8Array(_bgmAnalyser.frequencyBinCount);
-    _bgmAnalyser.getByteFrequencyData(buf);
-    const binsPerBar = buf.length / N;
-    for (let i = 0; i < N; i++) {
-      const lo = Math.floor(i * binsPerBar);
-      const hi = Math.max(lo + 1, Math.floor((i + 1) * binsPerBar));
-      let v = 0;
-      for (let j = lo; j < hi; j++) v = Math.max(v, buf[j] || 0);
-      const target = (v / 255) * 100;
-      _bgmDisplayed[i] = target > _bgmDisplayed[i]
-        ? target
-        : _bgmDisplayed[i] * 0.92;
-      if (target >= _bgmPeaks[i]) { _bgmPeaks[i] = target; _bgmPeakHold[i] = 28; }
-      else if (_bgmPeakHold[i] > 0) { _bgmPeakHold[i]--; }
-      else { _bgmPeaks[i] = Math.max(0, _bgmPeaks[i] - 1.4); }
-    }
-
-    // Segmented bar layout — same shape as the system audio viz, but the
-    // palette is split down the centre: left half uses the audio-OUT
-    // colour (accent), right half uses the audio-IN colour (amber), so
-    // the music meter visually bridges the two input/output panels.
-    const { brightOut, dimOut, brightIn, dimIn, redStr } = _bgmResolveColors();
-    const gap = 1;
-    const barW = Math.max(1, (W - gap * (N - 1)) / N);
-    const baselineY = H * 0.78;
-    const usableH = baselineY;
-    const reflectH = H - baselineY;
-    const segments = Math.max(6, Math.min(30, Math.floor(usableH / 4)));
-    const segPitch = usableH / segments;
-    const cellH = Math.max(1, segPitch * 0.55);
-    const cellGapY = segPitch - cellH;
-    const reflectSegMax = Math.max(1, Math.floor(reflectH / segPitch));
-    // Pre-compute two segment-colour gradients — one per side — so the
-    // hot path stays a single fillStyle write per cell.
-    const colorsOut = new Array(segments);
-    const colorsIn  = new Array(segments);
-    for (let s = 0; s < segments; s++) {
-      const t = s / Math.max(1, segments - 1);
-      const ro = Math.round(dimOut[0] * (1 - t) + brightOut[0] * t);
-      const go = Math.round(dimOut[1] * (1 - t) + brightOut[1] * t);
-      const bo = Math.round(dimOut[2] * (1 - t) + brightOut[2] * t);
-      colorsOut[s] = `rgb(${ro},${go},${bo})`;
-      const ri = Math.round(dimIn[0] * (1 - t) + brightIn[0] * t);
-      const gi = Math.round(dimIn[1] * (1 - t) + brightIn[1] * t);
-      const bi = Math.round(dimIn[2] * (1 - t) + brightIn[2] * t);
-      colorsIn[s] = `rgb(${ri},${gi},${bi})`;
-    }
-    const halfN = N / 2;
-    for (let i = 0; i < N; i++) {
-      const dist = N > 1 ? Math.abs(i / (N - 1) - 0.5) * 2 : 0;
-      // Bell-curve falloff (matches audio bars) — tallest at centre,
-      // ~30% at edges. Replaces the prior "smile" that exaggerated the
-      // edges; user wanted the opposite shape.
-      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
-      const value = (_bgmDisplayed[i] / 100) * scale;
-      const cellsLit = Math.min(segments, Math.ceil(value * segments));
-      const x = i * (barW + gap);
-      // Hard split at the midpoint — left side OUT (accent), right side
-      // IN (amber). Bar index < N/2 → OUT, else → IN.
-      const palette = (i < halfN) ? colorsOut : colorsIn;
-      for (let s = 0; s < cellsLit; s++) {
-        ctx2d.fillStyle = palette[s];
-        const y = baselineY - (s + 1) * segPitch + cellGapY;
-        ctx2d.fillRect(x, y, barW, cellH);
-      }
-      const reflectN = Math.min(cellsLit, reflectSegMax);
-      if (reflectN > 0) {
-        ctx2d.globalAlpha = 0.22;
-        for (let s = 0; s < reflectN; s++) {
-          ctx2d.fillStyle = palette[s];
-          const y = baselineY + s * segPitch;
-          ctx2d.fillRect(x, y, barW, cellH);
-        }
-        ctx2d.globalAlpha = 1;
-      }
-    }
-    // Floating peak markers in --red.
-    ctx2d.fillStyle = redStr;
-    for (let i = 0; i < N; i++) {
-      const dist = N > 1 ? Math.abs(i / (N - 1) - 0.5) * 2 : 0;
-      // Same bell-curve falloff so peaks track the bar fill profile.
-      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
-      const peakValue = (_bgmPeaks[i] / 100) * scale;
-      const peakSeg = Math.min(segments, Math.ceil(peakValue * segments));
-      if (peakSeg <= 0) continue;
-      const x = i * (barW + gap);
-      const y = baselineY - peakSeg * segPitch + cellGapY;
-      ctx2d.fillRect(x, y, barW, cellH);
-    }
-    // Re-queue only if BGM is still playing AND the music tab is visible.
-    // When the user switches away from the music tab, the in-flight draw
-    // completes once then the rAF chain stops naturally — no more canvas
-    // work happens in the background. When they come back to the tab,
-    // setComboMode calls window._bgmMaybeStartMeter() (defined below) to
-    // restart the rAF. Music itself keeps playing either way.
-    if (window._bgmState.playing && window._isMusicTabVisible) {
-      _bgmMeterRaf = requestAnimationFrame(_bgmDrawMeter);
-    } else {
-      _bgmMeterRaf = 0;
-    }
-  }
-  // Exposed so setComboMode can restart the meter when the user returns
-  // to the music tab while BGM is playing. No-op if the rAF chain is
-  // already running.
-  window._bgmMaybeStartMeter = () => {
-    if (_bgmMeterRaf) return;
-    if (window._bgmState?.playing && window._isMusicTabVisible) {
-      _bgmMeterRaf = requestAnimationFrame(_bgmDrawMeter);
-    }
-  };
-
-  function _bgmPaintPlayBtn() {
-    if (!bgmPlayBtn) return;
-    const playing = !!window._bgmState.playing;
-    bgmPlayBtn.classList.toggle('is-active', playing);
-    bgmPlayBtn.title = playing ? 'Pause' : 'Play';
-    const pIcon = bgmPlayBtn.querySelector('.bgm-play-icon');
-    const sIcon = bgmPlayBtn.querySelector('.bgm-pause-icon');
-    if (pIcon) pIcon.hidden = playing;
-    if (sIcon) sIcon.hidden = !playing;
-  }
-  async function _bgmStart() {
-    _bgmEnsureCtx();
-    if (_bgmCtx.state === 'suspended') {
-      try { await _bgmCtx.resume(); } catch {}
-    }
-    window._bgmState.playing = true;
-    _bgmStep = 0;
-    _bgmNextStepTime = _bgmCtx.currentTime + 0.1;
+  async function poll() {
     try {
-      _bgmMaster.gain.cancelScheduledValues(_bgmCtx.currentTime);
-      _bgmMaster.gain.setValueAtTime(window._bgmState.volume, _bgmCtx.currentTime);
-    } catch {}
-    _bgmSchedTimer = setInterval(_bgmTick, BGM_SCHED_INTERVAL_MS);
-    // Arm the 5-minute auto-cycle. Re-armed every time _bgmStart runs
-    // (so manual prev/next/genre/track changes reset the countdown
-    // rather than auto-advancing immediately after a manual switch).
-    if (_bgmCycleTimer) { clearTimeout(_bgmCycleTimer); }
-    _bgmCycleTimer = setTimeout(() => {
-      _bgmCycleTimer = null;
-      if (window._bgmState.playing) _bgmAdvanceTrack(+1);
-    }, BGM_AUTOCYCLE_MS);
-    _bgmPaintPlayBtn();
-    _bgmUpdateNow();
-    cancelAnimationFrame(_bgmMeterRaf);
-    _bgmMeterRaf = requestAnimationFrame(_bgmDrawMeter);
-  }
-  function _bgmStop() {
-    window._bgmState.playing = false;
-    if (_bgmSchedTimer) { clearInterval(_bgmSchedTimer); _bgmSchedTimer = null; }
-    if (_bgmCycleTimer) { clearTimeout(_bgmCycleTimer); _bgmCycleTimer = null; }
-    cancelAnimationFrame(_bgmMeterRaf);
-    if (_bgmCtx && _bgmMaster) {
-      try {
-        const t = _bgmCtx.currentTime;
-        _bgmMaster.gain.cancelScheduledValues(t);
-        _bgmMaster.gain.setValueAtTime(_bgmMaster.gain.value, t);
-        _bgmMaster.gain.linearRampToValueAtTime(0, t + 0.25);
-      } catch {}
-    }
-    _bgmPaintPlayBtn();
-    if (bgmNowEl) bgmNowEl.textContent = '— STOPPED —';
-  }
-
-  function _bgmUpdateNow() {
-    // The favorite-button state reflects whichever track is current,
-    // so refresh it on every now-label update (covers play/pause,
-    // prev/next, genre switch, and auto-cycle).
-    _bgmPaintFavoriteBtn();
-    if (!bgmNowEl) return;
-    if (!window._bgmState.playing) { bgmNowEl.textContent = '— STOPPED —'; return; }
-    const g = _bgmCurrentGenre();
-    const t = _bgmCurrentTrack();
-    if (!t) { bgmNowEl.textContent = `${g.name} · — EMPTY —`; return; }
-    bgmNowEl.textContent = `${g.name} · ${t.name} · ${t.bpm} BPM`;
-  }
-
-  // Walk the current genre's track list. Wraps both ends so PREV at
-  // index 0 goes to the last track and NEXT at the end goes back to 0.
-  // Restart playback cleanly if music is currently playing.
-  function _bgmAdvanceTrack(dir) {
-    const g = _bgmCurrentGenre();
-    const cur = _bgmCurrentTrack();
-    const idx = g.tracks.findIndex((t) => t.id === cur?.id);
-    const next = (idx + dir + g.tracks.length) % g.tracks.length;
-    window._bgmState.trackId = g.tracks[next].id;
-    bgmTracksEl?.querySelectorAll('.bgm-track').forEach((b) =>
-      b.classList.toggle('is-active', b.dataset.bgmTrack === window._bgmState.trackId));
-    if (window._bgmState.playing) {
-      _bgmStop();
-      setTimeout(() => _bgmStart(), 280);
-    } else {
-      _bgmUpdateNow();
-    }
-  }
-  function _bgmAdjustVolume(deltaPct) {
-    const next = Math.max(0, Math.min(100, Math.round(window._bgmState.volume * 100) + deltaPct));
-    if (bgmVolEl) bgmVolEl.value = String(next);
-    const v = next / 100;
-    window._bgmState.volume = v;
-    if (bgmVolValEl) bgmVolValEl.textContent = `${next}%`;
-    if (_bgmMaster && _bgmCtx) {
-      _bgmMaster.gain.setTargetAtTime(v, _bgmCtx.currentTime, 0.02);
-    }
-  }
-
-  bgmPlayBtn?.addEventListener('click', () => {
-    if (window._bgmState.playing) _bgmStop();
-    else _bgmStart();
-    playSfx?.('click');
-  });
-  document.getElementById('bgm-stop-btn')?.addEventListener('click', () => {
-    _bgmStop();
-    playSfx?.('click');
-  });
-  document.getElementById('bgm-prev-btn')?.addEventListener('click', () => {
-    _bgmAdvanceTrack(-1);
-    playSfx?.('click');
-  });
-  document.getElementById('bgm-next-btn')?.addEventListener('click', () => {
-    _bgmAdvanceTrack(+1);
-    playSfx?.('click');
-  });
-  document.getElementById('bgm-fav-btn')?.addEventListener('click', () => {
-    _bgmToggleFavorite();
-    playSfx?.('click');
-  });
-  document.getElementById('bgm-vol-down')?.addEventListener('click', () => {
-    _bgmAdjustVolume(-5);
-    playSfx?.('click');
-  });
-  document.getElementById('bgm-vol-up')?.addEventListener('click', () => {
-    _bgmAdjustVolume(+5);
-    playSfx?.('click');
-  });
-  bgmVolEl?.addEventListener('input', () => {
-    const v = Math.max(0, Math.min(1, (Number(bgmVolEl.value) || 0) / 100));
-    window._bgmState.volume = v;
-    if (bgmVolValEl) bgmVolValEl.textContent = `${Math.round(v * 100)}%`;
-    if (_bgmMaster && _bgmCtx) {
-      _bgmMaster.gain.setTargetAtTime(v, _bgmCtx.currentTime, 0.02);
-    }
-  });
-  bgmGenresEl?.addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-bgm-genre]');
-    if (!btn) return;
-    bgmGenresEl.querySelectorAll('.bgm-genre').forEach((b) =>
-      b.classList.toggle('is-active', b === btn));
-    window._bgmState.genre = btn.dataset.bgmGenre;
-    // Reset track to first of new genre and repaint the track row.
-    window._bgmState.trackId = null;
-    _bgmRenderTracks();
-    if (window._bgmState.playing) {
-      // Restart cleanly so the new genre's timing/pattern takes effect.
-      _bgmStop();
-      setTimeout(() => _bgmStart(), 280);
-    } else {
-      _bgmUpdateNow();
-    }
-    playSfx?.('click');
-  });
-  bgmTracksEl?.addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-bgm-track]');
-    if (!btn) return;
-    bgmTracksEl.querySelectorAll('.bgm-track').forEach((b) =>
-      b.classList.toggle('is-active', b === btn));
-    window._bgmState.trackId = btn.dataset.bgmTrack;
-    if (window._bgmState.playing) {
-      _bgmStop();
-      setTimeout(() => _bgmStart(), 280);
-    } else {
-      _bgmUpdateNow();
-    }
-    playSfx?.('click');
-  });
-}
-
-// ── §generate ── COMFYUI front-end ─────────────────────────────────
-// Modular workflow runner. Scans the configured workflow folder via
-// IPC, renders a tab per JSON, and on RUN converts the ComfyUI UI
-// workflow format → API format, POSTs to /prompt, polls /history,
-// and saves the result back into gallery/generated/.
-//
-// The UI→API conversion uses ComfyUI's /object_info endpoint to learn
-// each node type's input order, so `widgets_values` arrays can be
-// mapped back to named inputs. We fetch /object_info once per session
-// and cache it.
-{
-  const COMFY_HOST_DEFAULT = 'http://127.0.0.1:8000';
-  // Per-session client id (ComfyUI keys prompts/queues by this).
-  const _genClientId = 'dash3d-' + Math.random().toString(36).slice(2, 10);
-  let _genObjectInfo = null;     // /object_info cache
-  let _genWorkflows  = [];       // [{file, kind, display}]
-  let _genCurrent    = null;     // currently selected workflow {file, kind, display, json, fields}
-  let _genRunning    = false;
-  let _genHost       = COMFY_HOST_DEFAULT;
-  window._genState = window._genState || { workflowName: '' };
-
-  const genNowEl      = document.getElementById('gen-now');
-  const genStatusEl   = document.getElementById('gen-status');
-  const genTabsEl     = document.getElementById('gen-tabs');
-  const genBodyEl     = document.getElementById('gen-body');
-  const genEmptyEl    = document.getElementById('gen-empty');
-  const genRefreshBtn = document.getElementById('gen-refresh-btn');
-  const genCancelBtn  = document.getElementById('gen-cancel-btn');
-  const genFlushBtn   = document.getElementById('gen-flush-btn');
-  let   _genCancelRequested = false;
-  let   _genCurrentPromptId = null;
-  const genOutputEl   = document.getElementById('gen-output');
-  const genOutputImg  = document.getElementById('gen-output-img');
-  const genOutputVid  = document.getElementById('gen-output-video');
-  const genOutputAud  = document.getElementById('gen-output-audio');
-  const genOutputName = document.getElementById('gen-output-name');
-  const genOutputThumbs = document.getElementById('gen-output-thumbs');
-  // Per-session list of every output we've shown — used to render the
-  // thumbnail strip and let the user jump back to earlier generations.
-  const _genOutputHistory = [];
-
-  function _genSetStatus(text, kind) {
-    if (!genStatusEl) return;
-    genStatusEl.textContent = text || '';
-    genStatusEl.classList.toggle('is-online', kind === 'ok');
-    genStatusEl.classList.toggle('is-error',  kind === 'error');
-  }
-  function _genSetNow(text) {
-    if (genNowEl) genNowEl.textContent = text || '— READY —';
-  }
-
-  // ── ComfyUI client ──────────────────────────────────────────────
-  // All HTTP goes through main via the comfyHttp IPC. The renderer's
-  // own fetch() to 127.0.0.1 fails because Electron treats the app
-  // origin as opaque for CORS; main proxies via Node http instead.
-  function _decodeBytesToText(bytes) {
-    try { return new TextDecoder('utf-8').decode(bytes); } catch { return ''; }
-  }
-  async function _genHttp(opts) {
-    const r = await window.dash?.comfyHttp?.(opts);
-    return r || { ok: false, error: 'IPC bridge missing' };
-  }
-  async function _genGetJson(url) {
-    const r = await _genHttp({ method: 'GET', url });
-    if (!r.ok || !r.bytes) return null;
-    try { return JSON.parse(_decodeBytesToText(r.bytes)); } catch { return null; }
-  }
-  async function _genCheckComfy() {
-    const r = await _genHttp({ method: 'GET', url: `${_genHost}/system_stats` });
-    if (r.ok) {
-      _genSetStatus('COMFYUI ONLINE', 'ok');
-      return true;
-    }
-    const reason = r.status ? `HTTP ${r.status}` : (r.error || 'failed');
-    _genSetStatus(`COMFYUI OFFLINE · ${reason}`, 'error');
-    return false;
-  }
-  async function _genFetchObjectInfo() {
-    if (_genObjectInfo) return _genObjectInfo;
-    const data = await _genGetJson(`${_genHost}/object_info`);
-    if (!data) {
-      console.warn('[generate] object_info fetch failed');
-      return null;
-    }
-    _genObjectInfo = data;
-    return _genObjectInfo;
-  }
-
-  // ── UI workflow → API workflow ─────────────────────────────────
-  // ComfyUI's UI JSON has:
-  //   nodes: [{ id, type, inputs:[{name,link}], widgets_values: [...] }]
-  //   links: [linkId, fromNodeId, fromSlotIdx, toNodeId, toSlotIdx, type]
-  // The API JSON wants:
-  //   { "<nodeId>": { class_type: "<type>", inputs: {
-  //       "<inputName>": [fromNodeId, fromSlotIdx] | <literal value>,
-  //   } } }
-  // We build a link table, then walk each node copying linked inputs
-  // and matching widget_values against the type's input_order from
-  // /object_info.
-  function _genUiToApi(uiWorkflow, objectInfo) {
-    const out = {};
-    const links = new Map(); // linkId → [fromNodeId, fromSlotIdx]
-    for (const link of (uiWorkflow.links || [])) {
-      if (!Array.isArray(link) || link.length < 3) continue;
-      links.set(link[0], [String(link[1]), Number(link[2])]);
-    }
-    // UI-only node types: annotations (no outputs, safe to drop) and
-    // routing nodes (must be passed through — handled below).
-    const UI_ANNOTATION_TYPES = new Set(['MarkdownNote', 'Note']);
-    // Reroute / PrimitiveNode aren't real ComfyUI server nodes — they
-    // route a value/link through. For each, remember its upstream link
-    // so downstream consumers can resolve past the Reroute to the real
-    // producer.
-    const passthroughUpstreamLink = new Map(); // nodeId -> linkId of its input
-    for (const node of (uiWorkflow.nodes || [])) {
-      if (!node) continue;
-      if (node.type !== 'Reroute' && node.type !== 'PrimitiveNode') continue;
-      const inp = (node.inputs || [])[0];
-      if (!inp || inp.link == null) continue;
-      passthroughUpstreamLink.set(String(node.id), inp.link);
-    }
-    function resolveLink(linkId, depth) {
-      if (depth > 32) return null;
-      const src = links.get(linkId);
-      if (!src) return null;
-      const up = passthroughUpstreamLink.get(src[0]);
-      if (up != null) return resolveLink(up, depth + 1);
-      return src;
-    }
-    for (const node of (uiWorkflow.nodes || [])) {
-      if (!node || node.mode === 2 /* MUTE */ || node.mode === 4 /* BYPASS */) continue;
-      const id = String(node.id);
-      const type = node.type;
-      if (UI_ANNOTATION_TYPES.has(type)) continue;
-      if (passthroughUpstreamLink.has(id)) continue; // Reroute / PrimitiveNode
-      // Drop any node ComfyUI's /object_info doesn't recognize — keeps
-      // unknown frontend-only / custom-node residue out of the prompt.
-      if (objectInfo && !objectInfo[type]) continue;
-      const apiNode = { class_type: type, inputs: {} };
-      // 1) Linked inputs (resolved past any Reroute hops).
-      for (const inp of (node.inputs || [])) {
-        if (inp.link == null) continue;
-        const src = resolveLink(inp.link, 0);
-        if (src) apiNode.inputs[inp.name] = src;
-      }
-      // 2) Widget values. Map index → input name via object_info.
-      const widgets = Array.isArray(node.widgets_values) ? node.widgets_values : [];
-      const info = objectInfo?.[type];
-      if (info && widgets.length) {
-        // object_info gives us required + optional inputs with their
-        // declared order. Widget inputs are scalars (not links) so
-        // we iterate them and match.
-        const required = info.input?.required || {};
-        const optional = info.input?.optional || {};
-        // Only widget-backed inputs consume slots in widgets_values.
-        // Link-only inputs (CLIP, MODEL, IMAGE, LATENT, …) don't — if
-        // we include them, a dangling link would let the loop assign a
-        // widget value into the wrong name and shift every subsequent
-        // widget by one. This logic must mirror _genDiscoverFields.
-        // Widget-input detection. ComfyUI's object_info uses several
-        // dialects for the same idea — we need to recognize all of them
-        // so a widget-backed input doesn't get treated as a link-only
-        // type (and miss its widgets_values slot, shifting every later
-        // widget by one).
-        //
-        //   ["STRING", { ... }]          ← scalar widget by type name
-        //   ["INT" / "FLOAT" / "BOOLEAN" / "COMBO", { ... }]
-        //   [[ "choice", "choice", ... ], { ... }]   ← combo (inline choices)
-        //   [ "...", { choices/options: [...] } ]    ← typed COMBO (new style)
-        //
-        // Anything else is a link-only type (AUDIO, MODEL, CLIP, IMAGE,
-        // LATENT, CONDITIONING, MASK, VAE, …) and doesn't consume a
-        // widgets_values slot.
-        const SCALAR_WIDGET_TYPES = new Set(['STRING', 'INT', 'FLOAT', 'BOOLEAN', 'COMBO']);
-        const isWidgetSpec = (v) => {
-          if (!Array.isArray(v)) return false;
-          const t = v[0];
-          if (Array.isArray(t)) return true;
-          if (SCALAR_WIDGET_TYPES.has(t)) return true;
-          const opts = v[1];
-          if (opts && typeof opts === 'object'
-              && (Array.isArray(opts.choices) || Array.isArray(opts.options))) {
-            return true;
-          }
-          return false;
-        };
-        const orderedNames = [];
-        for (const [k, v] of Object.entries(required)) {
-          if (isWidgetSpec(v)) orderedNames.push(k);
-        }
-        for (const [k, v] of Object.entries(optional)) {
-          if (isWidgetSpec(v)) orderedNames.push(k);
-        }
-        let wi = 0;
-        for (const name of orderedNames) {
-          if (wi >= widgets.length) break;
-          // Skip names already filled by linked inputs (they're not
-          // widget-backed).
-          if (apiNode.inputs[name] !== undefined) continue;
-          apiNode.inputs[name] = widgets[wi++];
-          // Some node types stuff a "control_after_generate" boolean
-          // immediately after a "seed" widget — burn the next widget
-          // slot if so.
-          if (name === 'seed' || name === 'noise_seed') {
-            if (wi < widgets.length && (
-              widgets[wi] === 'randomize' ||
-              widgets[wi] === 'fixed' ||
-              widgets[wi] === 'increment' ||
-              widgets[wi] === 'decrement'
-            )) wi++;
-          }
-        }
-      }
-      out[id] = apiNode;
-    }
-    return out;
-  }
-
-  // ── Field discovery ────────────────────────────────────────────
-  // For each node in the workflow, look up its type's input schema in
-  // /object_info, walk widgets_values, and produce an entry per
-  // editable widget tagged with its kind (int/float/string/bool/combo)
-  // + min/max/choices. This surfaces every model-specific knob —
-  // resolution, steps, cfg, sampler choice, length, fps, etc — without
-  // having to hand-code anything per workflow.
-  // Walk every editable node in the workflow — including nodes nested
-  // inside subgraph definitions. ComfyUI v3 workflows wrap the bulk of
-  // their nodes in `definitions.subgraphs[].nodes`; a top-level instance
-  // node (whose `type` is the subgraph's UUID) is what the user sees on
-  // the canvas, but the prompts/sampler/etc. all live one level down.
-  //
-  // Returns an array of [node, subgraphInstanceId|null]. The instance id
-  // is needed so edit writeback can find the right copy of the node in
-  // the original JSON tree.
-  function _genWalkAllNodes(uiWorkflow) {
-    const out = [];
-    const sgById = new Map();
-    for (const sg of (uiWorkflow.definitions?.subgraphs || [])) sgById.set(sg.id, sg);
-    for (const node of (uiWorkflow.nodes || [])) {
-      if (!node) continue;
-      if (sgById.has(node.type)) {
-        const sg = sgById.get(node.type);
-        // Build a (innerNodeId|innerWidgetName) → user-facing label map
-        // by reconciling the instance's visible inputs against the full
-        // proxyWidgets list. The instance only shows a subset of proxied
-        // widgets, and their order in `inputs[]` matches the proxyWidgets
-        // order they were declared in. We walk both in parallel and
-        // record the label whenever the widget names line up.
-        const proxyWidgets = node.properties?.proxyWidgets || [];
-        const instInputs = node.inputs || [];
-        const labelMap = new Map();
-        const usedProxies = new Set();
-        for (const inp of instInputs) {
-          if (!inp.widget) continue;
-          const wname = inp.widget.name;
-          let matchIdx = -1;
-          for (let i = 0; i < proxyWidgets.length; i++) {
-            if (usedProxies.has(i)) continue;
-            if (String(proxyWidgets[i][1]) === String(wname)) { matchIdx = i; break; }
-          }
-          if (matchIdx === -1) continue;
-          usedProxies.add(matchIdx);
-          const [innerId, innerWidget] = proxyWidgets[matchIdx];
-          labelMap.set(`${innerId}|${innerWidget}`, String(inp.label || inp.name || ''));
-        }
-        for (const inner of (sg.nodes || [])) out.push([inner, String(node.id), labelMap]);
-      } else {
-        out.push([node, null, null]);
-      }
-    }
-    return out;
-  }
-
-  function _genDiscoverFields(uiWorkflow, objectInfo) {
-    const nodes = [];
-    if (!objectInfo) return { nodes, missingObjectInfo: true };
-    for (const [node, subgraphInstanceId, labelMap] of _genWalkAllNodes(uiWorkflow)) {
-      if (!node) continue;
-      if (node.mode === 2 || node.mode === 4) continue; // muted/bypassed
-      const widgets = Array.isArray(node.widgets_values) ? node.widgets_values : [];
-      if (!widgets.length) continue;
-      const info = objectInfo[node.type];
-      if (!info) continue;
-      // Build the input order ComfyUI uses for widgets_values. Required
-      // first, then optional. We can't tell scalar inputs from linked
-      // ones from object_info alone — but linked inputs aren't in
-      // widgets_values either, so we only walk slots until we've placed
-      // every widget value.
-      const required = info.input?.required || {};
-      const optional = info.input?.optional || {};
-      const slots = [];
-      for (const k of Object.keys(required)) slots.push({ name: k, spec: required[k] });
-      for (const k of Object.keys(optional)) slots.push({ name: k, spec: optional[k] });
-
-      const entries = [];
-      let wi = 0;
-      for (const slot of slots) {
-        if (wi >= widgets.length) break;
-        const spec = slot.spec;
-        const typeOrChoices = Array.isArray(spec) ? spec[0] : spec;
-        const opts = (Array.isArray(spec) && spec[1] && typeof spec[1] === 'object') ? spec[1] : {};
-        let kind;
-        let choices = null;
-        if (Array.isArray(typeOrChoices)) {
-          kind = 'combo';
-          choices = typeOrChoices;
-        } else if (typeOrChoices === 'INT') kind = 'int';
-        else if (typeOrChoices === 'FLOAT') kind = 'float';
-        else if (typeOrChoices === 'STRING') kind = 'string';
-        else if (typeOrChoices === 'BOOLEAN') kind = 'bool';
-        else if (typeOrChoices === 'COMBO') {
-          // New-style typed combo. Choices live in spec[1].choices or
-          // spec[1].options.
-          kind = 'combo';
-          choices = Array.isArray(opts.choices) ? opts.choices
-                  : Array.isArray(opts.options) ? opts.options
-                  : [];
-        } else if (Array.isArray(opts.choices) || Array.isArray(opts.options)) {
-          // Newer dialect: the named type is the value type (e.g.
-          // "STRING") but the input is really a constrained combo via
-          // a choices/options array in the spec dict.
-          kind = 'combo';
-          choices = Array.isArray(opts.choices) ? opts.choices : opts.options;
-        }
-        else continue; // skip linked-only types (MODEL, CLIP, IMAGE, etc.)
-        entries.push({
-          name: slot.name,
-          kind,
-          value: widgets[wi],
-          choices,
-          min: opts.min,
-          max: opts.max,
-          step: opts.step,
-          multiline: !!opts.multiline,
-          widgetIndex: wi,
-          subgraphLabel: labelMap ? labelMap.get(`${node.id}|${slot.name}`) || '' : '',
-        });
-        wi++;
-        // ComfyUI's seed/noise_seed widgets are followed by a
-        // control_after_generate string slot in widgets_values that
-        // isn't declared as an input — burn it so the next widget
-        // aligns with the next named slot.
-        if ((slot.name === 'seed' || slot.name === 'noise_seed') && wi < widgets.length) {
-          const next = widgets[wi];
-          if (next === 'randomize' || next === 'fixed' || next === 'increment' || next === 'decrement') {
-            wi++;
-          }
-        }
-      }
-      if (!entries.length) continue;
-      nodes.push({
-        id: node.id,
-        type: node.type,
-        title: (node.title && node.title !== node.type) ? node.title : node.type,
-        entries,
-        subgraphInstanceId,
-      });
-    }
-    return { nodes };
-  }
-
-  // Walk the UI workflow to tag entries with semantic roles so the form
-  // can lift prompts and media inputs into a hero block instead of
-  // burying them in a generic "node N" section.
-  //
-  // Roles assigned (mutates fields.nodes entries in place):
-  //   prompt-positive · positive-prompt text widget (CLIPTextEncode-ish)
-  //   prompt-negative · negative-prompt text widget
-  //   media-image     · LoadImage/LoadImageMask first-string widget
-  //   media-video     · VHS_LoadVideo / LoadVideo first-string widget
-  //   media-audio     · LoadAudio / VHS_LoadAudio first-string widget
-  //   (otherwise no role — rendered as a plain parameter)
-  function _genClassifyRoles(_uiWorkflow, fields) {
-    // Prompt detection — works for both flat and subgraph workflows by
-    // looking at NODE TYPE rather than tracing sampler links (subgraph
-    // links are scoped to the definition and not directly traversable
-    // from the outer view).
-    //
-    // Priority order:
-    //   1. PrimitiveStringMultiline   ← v3 subgraph convention: user-
-    //                                   facing prompt is a dedicated
-    //                                   multiline string primitive that
-    //                                   feeds into the encoder.
-    //   2. CLIPTextEncode             ← classic flat workflows.
-    //   3. TextEncodeAceStepAudio /   ← audio workflows (first widget
-    //      *TextEncode* (last resort)   = tags/lyrics text).
-    const PROMPT_PRIMARY_RE = /^PrimitiveStringMultiline$/i;
-    const PROMPT_SECONDARY_RE = /^CLIPTextEncode$/i;
-    const PROMPT_AUDIO_RE = /TextEncode/i;
-    // Collect candidate string-bearing nodes in workflow order.
-    const candidates = [];
-    for (const fn of fields.nodes) {
-      const t = String(fn.type || '');
-      let tier = null;
-      if (PROMPT_PRIMARY_RE.test(t)) tier = 1;
-      else if (PROMPT_SECONDARY_RE.test(t)) tier = 2;
-      else if (PROMPT_AUDIO_RE.test(t)) tier = 3;
-      if (tier == null) continue;
-      // Find the first multiline string entry on this node.
-      const stringEntry = fn.entries.find((e) => e.kind === 'string' && e.multiline)
-        || fn.entries.find((e) => e.kind === 'string');
-      if (!stringEntry) continue;
-      candidates.push({ tier, entry: stringEntry, fn });
-    }
-    candidates.sort((a, b) => a.tier - b.tier);
-    // Highest-tier candidate = positive prompt. If a candidate of the
-    // SAME tier exists, the second one is the negative prompt. (Many
-    // workflows have a positive + negative pair of the same node type.)
-    if (candidates.length > 0) {
-      candidates[0].entry.role = 'prompt-positive';
-      const sameTier = candidates.filter((c) => c.tier === candidates[0].tier);
-      if (sameTier.length >= 2 && sameTier[1].entry !== candidates[0].entry) {
-        sameTier[1].entry.role = 'prompt-negative';
-      }
-    }
-    // Loader detection — first scalar widget on these node types is the
-    // filename that should be surfaced as a media uploader. Walks every
-    // discovered node, top-level AND subgraph-inner, so a LoadImage
-    // sitting outside the subgraph (image_flux2 pattern) and one inside
-    // (video_ltx2_3_t2v pattern) both work.
-    const IMAGE_LOADER_RE = /^(LoadImage(Mask)?|ImageLoader|LoadImageFromUrl)/i;
-    const VIDEO_LOADER_RE = /VHS_LoadVideo|^LoadVideo/i;
-    const AUDIO_LOADER_RE = /VHS_LoadAudio|^LoadAudio/i;
-    for (const fn of fields.nodes) {
-      const t = String(fn.type || '');
-      let kind = null;
-      if (IMAGE_LOADER_RE.test(t)) kind = 'image';
-      else if (VIDEO_LOADER_RE.test(t)) kind = 'video';
-      else if (AUDIO_LOADER_RE.test(t)) kind = 'audio';
-      if (!kind) continue;
-      for (const e of fn.entries) {
-        if (e.kind === 'combo' || e.kind === 'string') {
-          e.role = `media-${kind}`;
-          e.mediaKind = kind;
-          break;
-        }
-      }
-    }
-  }
-
-  // Upload a File/Blob to ComfyUI and return the filename that should be
-  // written into the workflow's loader-widget value. Uses /upload/image
-  // for both still images and video (ComfyUI accepts the latter on the
-  // same endpoint — `type=input` lands them in input/ where loaders
-  // look). Multipart payload is assembled manually so we can stay on
-  // the IPC proxy (renderer fetch hits CORS).
-  async function _genUploadMedia(file) {
-    const boundary = '----dash3d-' + Math.random().toString(36).slice(2, 10);
-    const enc = new TextEncoder();
-    const head = enc.encode(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="image"; filename="${file.name.replace(/"/g, '')}"\r\n` +
-      `Content-Type: ${file.type || 'application/octet-stream'}\r\n\r\n`
-    );
-    const fileBytes = new Uint8Array(await file.arrayBuffer());
-    const tail = enc.encode(
-      `\r\n--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n` +
-      `--${boundary}--\r\n`
-    );
-    const body = new Uint8Array(head.length + fileBytes.length + tail.length);
-    body.set(head, 0);
-    body.set(fileBytes, head.length);
-    body.set(tail, head.length + fileBytes.length);
-    const r = await _genHttp({
-      method: 'POST',
-      url: `${_genHost}/upload/image`,
-      body,
-      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-    });
-    if (!r.ok) throw new Error(`upload HTTP ${r.status || 'fail'}`);
-    const data = JSON.parse(_decodeBytesToText(r.bytes));
-    return data?.name || file.name;
-  }
-
-  // Apply edited values back into a fresh UI-workflow clone, then
-  // convert to API format. Each entry knows its widgetIndex so we can
-  // write straight into widgets_values — but the target node may live
-  // inside a subgraph definition, so we build a 2-level lookup that
-  // covers both top-level nodes and subgraph-nested ones.
-  function _genBuildApiPayload(workflow) {
-    const ui = JSON.parse(JSON.stringify(workflow.json));
-    // top-level: id -> node
-    const topMap = new Map();
-    for (const n of (ui.nodes || [])) topMap.set(String(n.id), n);
-    // subgraph-nested: instanceId -> (innerId -> node)
-    const sgMap = new Map();
-    for (const sg of (ui.definitions?.subgraphs || [])) {
-      for (const n of (ui.nodes || [])) {
-        if (n.type === sg.id) {
-          const inner = new Map();
-          for (const innerNode of (sg.nodes || [])) inner.set(String(innerNode.id), innerNode);
-          sgMap.set(String(n.id), inner);
-        }
-      }
-    }
-    for (const n of workflow.fields.nodes) {
-      let target;
-      if (n.subgraphInstanceId) {
-        target = sgMap.get(String(n.subgraphInstanceId))?.get(String(n.id));
-      } else {
-        target = topMap.get(String(n.id));
-      }
-      if (!target || !Array.isArray(target.widgets_values)) continue;
-      for (const e of n.entries) {
-        target.widgets_values[e.widgetIndex] = e.value;
-      }
-    }
-    // Flatten subgraphs before API conversion — ComfyUI's /prompt endpoint
-    // wants a single dict of nodes, not a hierarchy.
-    const flat = _genFlattenSubgraphs(ui);
-    return _genUiToApi(flat, _genObjectInfo);
-  }
-
-  // Inline every subgraph instance into the workflow's top-level nodes/
-  // links so the result looks like a flat ComfyUI v2 workflow that
-  // _genUiToApi can handle.
-  //
-  // Strategy for each instance:
-  //   1. Copy every inner node into the top-level list with a prefixed
-  //      id (`<instanceId>_<innerId>`) so ids stay unique.
-  //   2. Copy the subgraph's internal links with new ids, remapping
-  //      endpoint node ids to the prefixed versions.
-  //   3. Bridge external connections:
-  //      a. For each instance input that has an outer `link`, find which
-  //         inner node consumes that input (via subgraph.inputs[i].linkIds
-  //         → subgraph.links → target inner node + slot) and rewrite the
-  //         inner node's matching input.link to point at the outer link
-  //         id directly — and the outer link's `to` to that inner node.
-  //      b. For each instance output, find which inner node produces it
-  //         (via subgraph.outputs[i].linkIds → subgraph.links → source
-  //         inner node + slot) and rewrite outer links whose `from` was
-  //         the instance to source from the inner producer instead.
-  //   4. Drop the instance node itself.
-  function _genFlattenSubgraphs(workflow) {
-    const sgById = new Map();
-    for (const sg of (workflow.definitions?.subgraphs || [])) sgById.set(sg.id, sg);
-    if (!sgById.size) return workflow;
-    // ComfyUI v3 stores subgraph internal links as objects
-    //   { id, origin_id, origin_slot, target_id, target_slot, type }
-    // while top-level workflow links are tuples
-    //   [id, fromId, fromSlot, toId, toSlot, type]
-    // Normalize everything to the tuple form so the rest of this pass
-    // can use a single accessor pattern.
-    const normalizeLink = (l) => {
-      if (Array.isArray(l)) return l.length >= 6 ? l : null;
-      if (l && typeof l === 'object' && l.id != null) {
-        return [l.id, String(l.origin_id), Number(l.origin_slot),
-                String(l.target_id), Number(l.target_slot), l.type];
-      }
-      return null;
-    };
-    const out = { ...workflow, nodes: [], links: [] };
-    let linkSeq = (workflow.last_link_id || 0) + 100000;
-    const outerLinkById = new Map();
-    for (const link of (workflow.links || [])) {
-      const norm = normalizeLink(link);
-      if (norm) outerLinkById.set(norm[0], [...norm]);
-    }
-    // outer link id -> { fromId, fromSlot } when a subgraph output needs
-    // to be re-sourced to its inner producer at the flatten step.
-    const outerLinkSourceRewrite = new Map();
-    for (const node of (workflow.nodes || [])) {
-      if (!node || node.mode === 2 || node.mode === 4) continue;
-      const sg = sgById.get(node.type);
-      if (!sg) {
-        // Non-subgraph node — keep as-is (deep clone so later edits don't
-        // leak into source).
-        out.nodes.push(JSON.parse(JSON.stringify(node)));
-        continue;
-      }
-      const instanceId = String(node.id);
-      const innerNodeRemap = new Map();
-      const innerLinkRemap = new Map();
-      const sgLinkById = new Map();
-      for (const inner of (sg.nodes || [])) {
-        innerNodeRemap.set(String(inner.id), `${instanceId}_${inner.id}`);
-      }
-      // Normalize subgraph internal links (objects) into tuples and
-      // remap ids in the same pass.
-      for (const raw of (sg.links || [])) {
-        const link = normalizeLink(raw);
-        if (!link) continue;
-        sgLinkById.set(link[0], link);
-        innerLinkRemap.set(link[0], ++linkSeq);
-      }
-      // For each instance input position, list of {innerNodeId, innerSlot}.
-      const inputConsumers = (sg.inputs || []).map((sgIn) => {
-        const consumers = [];
-        for (const lid of (sgIn.linkIds || [])) {
-          const link = sgLinkById.get(lid);
-          if (!link) continue;
-          consumers.push({ innerNodeId: String(link[3]), innerSlot: link[4] });
-        }
-        return consumers;
-      });
-      // For each instance output position, the producer inner node.
-      const outputProducers = (sg.outputs || []).map((sgOut) => {
-        const link = sgOut.linkIds && sgOut.linkIds.length ? sgLinkById.get(sgOut.linkIds[0]) : null;
-        if (!link) return null;
-        return { innerNodeId: String(link[1]), innerSlot: link[2] };
-      });
-      // Emit inner nodes (deep-cloned, with remapped ids + link refs).
-      for (const inner of (sg.nodes || [])) {
-        if (inner.mode === 2 || inner.mode === 4) continue;
-        const clone = JSON.parse(JSON.stringify(inner));
-        clone.id = innerNodeRemap.get(String(inner.id));
-        for (const inp of (clone.inputs || [])) {
-          if (inp.link != null && innerLinkRemap.has(inp.link)) {
-            inp.link = innerLinkRemap.get(inp.link);
-          }
-        }
-        out.nodes.push(clone);
-      }
-      // Emit inner links with remapped ids (sgLinkById holds the
-      // already-normalized tuple form).
-      for (const link of sgLinkById.values()) {
-        const newLid = innerLinkRemap.get(link[0]);
-        const fromMapped = innerNodeRemap.get(String(link[1]));
-        const toMapped = innerNodeRemap.get(String(link[3]));
-        if (!fromMapped || !toMapped) continue; // skip phantom port links (-10/-20)
-        out.links.push([newLid, fromMapped, link[2], toMapped, link[4], link[5]]);
-      }
-      // Bridge instance inputs: each instance.inputs[i] with a real outer
-      // link feeds inputConsumers[i].
-      const instInputs = node.inputs || [];
-      for (let i = 0; i < instInputs.length; i++) {
-        const inp = instInputs[i];
-        if (inp.link == null) continue;
-        const outerLink = outerLinkById.get(inp.link);
-        if (!outerLink) continue;
-        const consumers = inputConsumers[i] || [];
-        for (const c of consumers) {
-          const newToId = innerNodeRemap.get(c.innerNodeId);
-          if (!newToId) continue;
-          // Mint a bridging link from the outer source to the inner
-          // consumer, and update that inner node's input.link.
-          const bridgeLid = ++linkSeq;
-          out.links.push([bridgeLid, outerLink[1], outerLink[2], newToId, c.innerSlot, outerLink[5]]);
-          const target = out.nodes.find((n) => n.id === newToId);
-          if (target) {
-            const slot = (target.inputs || [])[c.innerSlot];
-            if (slot) slot.link = bridgeLid;
-          }
-        }
-      }
-      // Bridge instance outputs: any outer link whose source is this
-      // instance gets re-sourced to the inner producer.
-      const instOutputs = node.outputs || [];
-      for (let i = 0; i < instOutputs.length; i++) {
-        const producer = outputProducers[i];
-        if (!producer) continue;
-        const newFromId = innerNodeRemap.get(producer.innerNodeId);
-        if (!newFromId) continue;
-        for (const lid of (instOutputs[i].links || [])) {
-          // We've already pushed this link into out.links from the
-          // outer-link copy below. But we copy outer links AFTER this
-          // loop, so the rewrite happens there based on a remap table.
-          outerLinkSourceRewrite.set(lid, { fromId: newFromId, fromSlot: producer.innerSlot });
-        }
-      }
-    }
-    // Copy outer links not involving subgraph instances, with source
-    // rewrites applied where needed.
-    for (const raw of (workflow.links || [])) {
-      const link = normalizeLink(raw);
-      if (!link) continue;
-      const [lid, fromId, fromSlot, toId, toSlot, type] = link;
-      // If the source was a subgraph instance, redirect.
-      const rewrite = outerLinkSourceRewrite.get(lid);
-      let useFromId = fromId, useFromSlot = fromSlot;
-      if (rewrite) {
-        useFromId = rewrite.fromId;
-        useFromSlot = rewrite.fromSlot;
-      }
-      // If the target is a subgraph instance, the link is already
-      // bridged above and we should skip the outer copy.
-      const tgtNode = (workflow.nodes || []).find((n) => String(n.id) === String(toId));
-      if (tgtNode && sgById.has(tgtNode.type)) continue;
-      // If the source is still a subgraph instance with no rewrite,
-      // we couldn't resolve a producer — skip.
-      const srcNode = (workflow.nodes || []).find((n) => String(n.id) === String(useFromId));
-      if (srcNode && sgById.has(srcNode.type) && !rewrite) continue;
-      out.links.push([lid, useFromId, useFromSlot, toId, toSlot, type]);
-    }
-    return out;
-  }
-
-  // ── Tab rendering ──────────────────────────────────────────────
-  async function _genLoadWorkflows() {
-    if (genTabsEl) genTabsEl.innerHTML = '';
-    if (genBodyEl && genEmptyEl) genBodyEl.innerHTML = '';
-    const result = await window.dash?.comfyListWorkflows?.();
-    _genWorkflows = result?.entries || [];
-    if (!_genWorkflows.length) {
-      _genSetStatus(result?.error ? `SCAN ERROR · ${result.error}` : 'NO WORKFLOWS', 'error');
-      if (genBodyEl && genEmptyEl) {
-        genBodyEl.appendChild(genEmptyEl);
-        genEmptyEl.textContent = result?.dir
-          ? `NO WORKFLOWS IN ${result.dir}`
-          : 'NO WORKFLOW FOLDER CONFIGURED';
-      }
-      return;
-    }
-    // Build tabs.
-    for (const w of _genWorkflows) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'gen-tab';
-      btn.dataset.file = w.file;
-      btn.dataset.kind = w.kind;
-      btn.innerHTML = `<span class="gen-tab-kind">${w.kind.toUpperCase()}</span>${w.display}`;
-      genTabsEl?.appendChild(btn);
-    }
-    // Auto-select first.
-    await _genSelectWorkflow(_genWorkflows[0].file);
-  }
-
-  async function _genSelectWorkflow(file) {
-    const meta = _genWorkflows.find((w) => w.file === file);
-    if (!meta) return;
-    genTabsEl?.querySelectorAll('.gen-tab').forEach((b) =>
-      b.classList.toggle('is-active', b.dataset.file === file));
-    // Load workflow JSON.
-    const result = await window.dash?.comfyLoadWorkflow?.(file);
-    if (!result?.ok) {
-      _genSetStatus(`LOAD ERROR · ${result?.error || 'unknown'}`, 'error');
-      return;
-    }
-    // Ensure object_info is loaded — field discovery uses it to know
-    // each node's widget types (int / float / combo / etc.). If
-    // ComfyUI is offline this returns null and the form shows a hint.
-    await _genFetchObjectInfo();
-    const fields = _genDiscoverFields(result.json, _genObjectInfo);
-    if (!fields.missingObjectInfo) _genClassifyRoles(result.json, fields);
-    _genCurrent = { ...meta, json: result.json, fields };
-    window._genState.workflowName = meta.display;
-    _genRenderFields();
-    _genSetNow(`${meta.kind.toUpperCase()} · ${meta.display}`);
-  }
-
-  // Build one labeled input for a single widget entry. Returns the
-  // outer row element. All edits flow back into `entry.value` by
-  // reference, so the workflow's payload picks them up at RUN time.
-  function _genBuildEntryRow(entry) {
-    const row = document.createElement('div');
-    row.className = entry.kind === 'string' && entry.multiline ? 'gen-row' : 'gen-row gen-row-h';
-    const label = document.createElement('span');
-    label.className = 'gen-label';
-    label.textContent = (entry.name || '').toUpperCase();
-    row.appendChild(label);
-    if (entry.kind === 'string' && entry.multiline) {
-      const ta = document.createElement('textarea');
-      ta.className = 'gen-textarea';
-      ta.value = (entry.value == null) ? '' : String(entry.value);
-      ta.spellcheck = false;
-      ta.addEventListener('input', () => { entry.value = ta.value; });
-      row.appendChild(ta);
-      return row;
-    }
-    if (entry.kind === 'string') {
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.className = 'gen-input';
-      input.value = (entry.value == null) ? '' : String(entry.value);
-      input.addEventListener('input', () => { entry.value = input.value; });
-      row.appendChild(input);
-      return row;
-    }
-    if (entry.kind === 'combo') {
-      const sel = document.createElement('select');
-      sel.className = 'gen-input';
-      for (const opt of (entry.choices || [])) {
-        const o = document.createElement('option');
-        o.value = String(opt);
-        o.textContent = String(opt);
-        if (String(opt) === String(entry.value)) o.selected = true;
-        sel.appendChild(o);
-      }
-      sel.addEventListener('change', () => { entry.value = sel.value; });
-      row.appendChild(sel);
-      return row;
-    }
-    if (entry.kind === 'bool') {
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.className = 'gen-checkbox';
-      input.checked = !!entry.value;
-      input.addEventListener('change', () => { entry.value = input.checked; });
-      row.appendChild(input);
-      return row;
-    }
-    // int / float — number input, with min/max/step from object_info.
-    // Seed-named widgets get a 🎲 randomize button alongside.
-    const inputRow = document.createElement('div');
-    inputRow.className = 'gen-input-row';
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.className = 'gen-input';
-    input.value = (entry.value == null) ? '' : String(entry.value);
-    if (entry.kind === 'int') {
-      input.step = '1';
-    } else if (entry.step != null) {
-      input.step = String(entry.step);
-    } else {
-      input.step = '0.01';
-    }
-    if (Number.isFinite(entry.min)) input.min = String(entry.min);
-    if (Number.isFinite(entry.max)) input.max = String(entry.max);
-    input.addEventListener('input', () => {
-      const v = (entry.kind === 'int')
-        ? parseInt(input.value, 10)
-        : parseFloat(input.value);
-      if (Number.isFinite(v)) entry.value = v;
-    });
-    inputRow.appendChild(input);
-    if (entry.name === 'seed' || entry.name === 'noise_seed') {
-      const rnd = document.createElement('button');
-      rnd.type = 'button';
-      rnd.className = 'gen-action';
-      rnd.textContent = '🎲';
-      rnd.title = 'Randomize';
-      rnd.addEventListener('click', () => {
-        const v = Math.floor(Math.random() * 0xFFFFFFFF);
-        input.value = String(v);
-        entry.value = v;
-      });
-      inputRow.appendChild(rnd);
-    }
-    row.appendChild(inputRow);
-    return row;
-  }
-
-  function _genRenderFields() {
-    if (!genBodyEl || !_genCurrent) return;
-    genBodyEl.innerHTML = '';
-    const { fields } = _genCurrent;
-    if (fields.missingObjectInfo) {
-      const hint = document.createElement('div');
-      hint.className = 'gen-empty';
-      hint.textContent = 'WAITING FOR COMFYUI · /object_info NOT YET LOADED — HIT ↻';
-      genBodyEl.appendChild(hint);
-      return;
-    }
-    if (!fields.nodes.length) {
-      const hint = document.createElement('div');
-      hint.className = 'gen-empty';
-      hint.textContent = 'NO EDITABLE WIDGETS DISCOVERED FOR THIS WORKFLOW';
-      genBodyEl.appendChild(hint);
-      return;
-    }
-    // Bucket entries.
-    //   media        → image/video/audio loaders
-    //   positive     → main prompt
-    //   negative     → negative prompt
-    //   dimensions   → width/height/megapixels/duration/fps/scale-ish
-    //   advanced     → everything else (collapsed by default)
-    //
-    // Dimension detection uses both the widget's own name and the
-    // subgraph-instance label that proxies to it — that's how a
-    // `value` widget on a `PrimitiveInt` is recognized as "WIDTH" in
-    // ltx2_3 workflows where the subgraph relabels it.
-    const DIM_RE = /^(width|height|megapixels?|mp|scale|resolution|image_size|size|aspect_ratio|longer_edge_size|fps|frame_?rate|duration|length|num_frames|batch_size|seconds)$/i;
-    let positive = null, negative = null;
-    const media = [];
-    const dims = [];
-    const advanced = [];
-    for (const node of fields.nodes) {
-      for (const entry of node.entries) {
-        if (entry.role === 'prompt-positive')      { positive = entry; continue; }
-        if (entry.role === 'prompt-negative')      { negative = entry; continue; }
-        if (entry.role && entry.role.startsWith('media-')) { media.push({ node, entry }); continue; }
-        const dimLabel = (entry.subgraphLabel && DIM_RE.test(entry.subgraphLabel))
-          ? entry.subgraphLabel
-          : (DIM_RE.test(entry.name || '') ? entry.name : null);
-        if (dimLabel && (entry.kind === 'int' || entry.kind === 'float')) {
-          dims.push({ node, entry, label: dimLabel });
-          continue;
-        }
-        advanced.push({ node, entry });
-      }
-    }
-    // ── HERO (always visible) ─────────────────────────────────────
-    for (const m of media) genBodyEl.appendChild(_genBuildMediaBlock(m.entry));
-    if (positive) genBodyEl.appendChild(_genBuildPromptBlock('PROMPT', positive, 'positive'));
-    if (negative) genBodyEl.appendChild(_genBuildPromptBlock('NEGATIVE PROMPT', negative, 'negative'));
-    if (dims.length) genBodyEl.appendChild(_genBuildDimsBlock(dims));
-    // ── ADVANCED (collapsible) ────────────────────────────────────
-    if (advanced.length) {
-      genBodyEl.appendChild(_genBuildAdvancedBlock(advanced));
-    }
-    // RUN
-    const runBtn = document.createElement('button');
-    runBtn.type = 'button';
-    runBtn.className = 'gen-run-btn';
-    runBtn.id = 'gen-run-btn';
-    runBtn.textContent = '▶ RUN';
-    runBtn.addEventListener('click', () => _genRun());
-    genBodyEl.appendChild(runBtn);
-  }
-
-  // Dimensions block — a grid of width/height/fps/etc sliders, each one
-  // a labelled number input with a range slider when min/max are known.
-  function _genBuildDimsBlock(dims) {
-    const block = document.createElement('div');
-    block.className = 'gen-dims-block';
-    const head = document.createElement('div');
-    head.className = 'gen-section-head';
-    head.textContent = 'DIMENSIONS';
-    block.appendChild(head);
-    const grid = document.createElement('div');
-    grid.className = 'gen-dims-grid';
-    for (const d of dims) grid.appendChild(_genBuildDimRow(d.label, d.entry));
-    block.appendChild(grid);
-    return block;
-  }
-
-  function _genBuildDimRow(label, entry) {
-    const row = document.createElement('div');
-    row.className = 'gen-dim-row';
-    const lbl = document.createElement('span');
-    lbl.className = 'gen-dim-label';
-    lbl.textContent = String(label).toUpperCase();
-    row.appendChild(lbl);
-    const num = document.createElement('input');
-    num.type = 'number';
-    num.className = 'gen-input gen-dim-num';
-    num.value = (entry.value == null) ? '' : String(entry.value);
-    if (entry.kind === 'int') num.step = '1';
-    else if (entry.step != null) num.step = String(entry.step);
-    else num.step = '0.01';
-    if (Number.isFinite(entry.min)) num.min = String(entry.min);
-    if (Number.isFinite(entry.max)) num.max = String(entry.max);
-    // Range slider if we have both bounds — caps at 4096 / 240 for
-    // sane stepping; the number field can still go higher.
-    let slider = null;
-    if (Number.isFinite(entry.min) && Number.isFinite(entry.max)) {
-      slider = document.createElement('input');
-      slider.type = 'range';
-      slider.className = 'gen-dim-slider';
-      slider.min = String(entry.min);
-      slider.max = String(entry.max);
-      slider.step = num.step;
-      slider.value = num.value;
-    }
-    const commit = (v, src) => {
-      const parsed = (entry.kind === 'int') ? parseInt(v, 10) : parseFloat(v);
-      if (!Number.isFinite(parsed)) return;
-      entry.value = parsed;
-      if (src !== 'num') num.value = String(parsed);
-      if (slider && src !== 'slider') slider.value = String(parsed);
-    };
-    num.addEventListener('input', () => commit(num.value, 'num'));
-    if (slider) slider.addEventListener('input', () => commit(slider.value, 'slider'));
-    if (slider) row.appendChild(slider);
-    row.appendChild(num);
-    return row;
-  }
-
-  // Collapsible ADVANCED section — header is a toggle, body is the
-  // compact label/control grid we had before. Collapsed by default;
-  // state is persisted across re-renders of the same workflow on a
-  // per-tab key.
-  function _genBuildAdvancedBlock(advanced) {
-    const block = document.createElement('details');
-    block.className = 'gen-advanced';
-    const stateKey = `advOpen:${_genCurrent?.file || ''}`;
-    if (window._genState[stateKey]) block.open = true;
-    block.addEventListener('toggle', () => {
-      window._genState[stateKey] = block.open;
-    });
-    const summary = document.createElement('summary');
-    summary.className = 'gen-section-head gen-advanced-head';
-    summary.innerHTML = '<span class="gen-advanced-chev">▸</span>ADVANCED SETTINGS';
-    block.appendChild(summary);
-    const grid = document.createElement('div');
-    grid.className = 'gen-params-grid';
-    for (const p of advanced) grid.appendChild(_genBuildCompactRow(p.entry, p.node));
-    block.appendChild(grid);
-    return block;
-  }
-
-  // Big textarea block for a prompt — full width, several lines tall.
-  function _genBuildPromptBlock(label, entry, variant) {
-    const block = document.createElement('div');
-    block.className = `gen-prompt-block gen-prompt-${variant}`;
-    const lbl = document.createElement('div');
-    lbl.className = 'gen-section-head';
-    lbl.textContent = label;
-    block.appendChild(lbl);
-    const ta = document.createElement('textarea');
-    ta.className = 'gen-textarea gen-prompt-textarea';
-    ta.value = (entry.value == null) ? '' : String(entry.value);
-    ta.spellcheck = false;
-    ta.placeholder = variant === 'negative'
-      ? 'describe what to avoid…'
-      : 'describe the image / video / audio you want…';
-    ta.addEventListener('input', () => { entry.value = ta.value; });
-    block.appendChild(ta);
-    return block;
-  }
-
-  // File-picker block for image/video loader widgets. Drops the file
-  // onto ComfyUI's /upload/image endpoint and writes the returned name
-  // into the widget value, so the loader picks it up at RUN time.
-  function _genBuildMediaBlock(entry) {
-    const kind = entry.mediaKind || 'image';
-    const block = document.createElement('div');
-    block.className = 'gen-media-block';
-    const lbl = document.createElement('div');
-    lbl.className = 'gen-section-head';
-    lbl.textContent = `${kind.toUpperCase()} INPUT`;
-    block.appendChild(lbl);
-    const row = document.createElement('div');
-    row.className = 'gen-media-row';
-    const fileBtn = document.createElement('label');
-    fileBtn.className = 'gen-media-btn';
-    fileBtn.textContent = '⇪ CHOOSE FILE';
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = kind === 'image'
-      ? 'image/*'
-      : (kind === 'video' ? 'video/*' : 'audio/*');
-    fileInput.style.display = 'none';
-    fileBtn.appendChild(fileInput);
-    const name = document.createElement('span');
-    name.className = 'gen-media-name';
-    name.textContent = entry.value ? String(entry.value) : '(no file)';
-    const preview = document.createElement(kind === 'video' ? 'video' : (kind === 'audio' ? 'audio' : 'img'));
-    preview.className = 'gen-media-preview';
-    if (kind !== 'image') preview.controls = true;
-    preview.hidden = true;
-    fileInput.addEventListener('change', async () => {
-      const f = fileInput.files?.[0];
-      if (!f) return;
-      name.textContent = `… UPLOADING ${f.name}`;
-      try {
-        const uploaded = await _genUploadMedia(f);
-        entry.value = uploaded;
-        name.textContent = uploaded;
-        const url = URL.createObjectURL(f);
-        if (kind === 'image') preview.src = url;
-        else preview.src = url;
-        preview.hidden = false;
-      } catch (err) {
-        name.textContent = `UPLOAD FAILED · ${err.message || err}`;
-      }
-    });
-    row.appendChild(fileBtn);
-    row.appendChild(name);
-    block.appendChild(row);
-    block.appendChild(preview);
-    return block;
-  }
-
-  // One row in the compact 2-col settings grid. Label-on-left, control
-  // on the right; multi-line strings span the full row.
-  function _genBuildCompactRow(entry, node) {
-    const row = document.createElement('div');
-    const isWide = (entry.kind === 'string' && entry.multiline);
-    row.className = 'gen-grid-row' + (isWide ? ' is-wide' : '');
-    const label = document.createElement('span');
-    label.className = 'gen-grid-label';
-    label.textContent = (entry.name || '').toUpperCase();
-    label.title = `${node?.title || node?.type || ''} #${node?.id ?? ''}`;
-    row.appendChild(label);
-    // Reuse the original entry builder but strip its outer label so the
-    // grid owns alignment. We pluck the control element out of what
-    // _genBuildEntryRow returns and re-parent it under the grid row.
-    const inner = _genBuildEntryRow(entry);
-    const innerLabel = inner.querySelector('.gen-label');
-    if (innerLabel) innerLabel.remove();
-    // The original row also wraps number inputs in a flex .gen-input-row
-    // — keep it; just transplant whatever node remains.
-    while (inner.firstChild) row.appendChild(inner.firstChild);
-    return row;
-  }
-
-  // ── Submit + poll ──────────────────────────────────────────────
-  async function _genRun() {
-    if (_genRunning || !_genCurrent) return;
-    const runBtn = document.getElementById('gen-run-btn');
-    _genRunning = true;
-    _genCancelRequested = false;
-    _genCurrentPromptId = null;
-    if (genCancelBtn) genCancelBtn.disabled = false;
-    if (runBtn) {
-      runBtn.classList.add('is-running');
-      runBtn.textContent = '… SUBMITTING';
-      runBtn.disabled = true;
-    }
-    _genSetStatus('SUBMITTING', 'ok');
-    try {
-      await _genFetchObjectInfo();
-      const prompt = _genBuildApiPayload(_genCurrent);
-      const r = await _genHttp({
-        method: 'POST',
-        url: `${_genHost}/prompt`,
-        body: { prompt, client_id: _genClientId },
-      });
-      if (!r.ok) {
-        const txt = r.bytes ? _decodeBytesToText(r.bytes) : (r.error || '');
-        throw new Error(`HTTP ${r.status || 'fail'}: ${txt.slice(0, 200)}`);
-      }
-      const data = JSON.parse(_decodeBytesToText(r.bytes));
-      const promptId = data.prompt_id;
-      if (!promptId) throw new Error('no prompt_id in response');
-      _genCurrentPromptId = promptId;
-      _genSetStatus(`QUEUED · ${promptId.slice(0, 8)}`, 'ok');
-      if (runBtn) runBtn.textContent = '… RUNNING';
-      await _genPollAndFetch(promptId);
+      const r = await window.dash?.fansPoll?.();
+      _last = r || { status: 'unavailable', reason: 'no response' };
     } catch (err) {
-      if (_genCancelRequested) {
-        _genSetStatus('CANCELLED', 'error');
-      } else {
-        console.warn('[generate] run failed:', err);
-        _genSetStatus(`ERROR · ${err.message || err}`, 'error');
-      }
-    } finally {
-      _genRunning = false;
-      _genCurrentPromptId = null;
-      if (genCancelBtn) genCancelBtn.disabled = true;
-      if (runBtn) {
-        runBtn.classList.remove('is-running');
-        runBtn.textContent = '▶ RUN';
-        runBtn.disabled = false;
-      }
+      _last = { status: 'unavailable', reason: err.message };
     }
+    // Cross-block share: refreshTemps() reads from this snapshot so
+    // the main THERMAL panel can prefer LHM's accurate CPU/GPU temps
+    // over the systeminformation/RAPL fallback (which has been known
+    // to return broken values, e.g. -39°C from a stuck ACPI zone).
+    window._lhmSnapshot = (_last && _last.status === 'connected') ? _last : null;
+    renderFanList();
+    if (overlay && !overlay.hidden) paintLiveOverlay();
   }
+  poll();
+  setInterval(poll, POLL_MS);
+})();
 
-  // Tell ComfyUI to interrupt the running job, then break out of our
-  // local poll loop by flipping a flag that _genPollAndFetch checks.
-  async function _genCancel() {
-    if (!_genRunning) return;
-    _genCancelRequested = true;
-    if (genCancelBtn) genCancelBtn.disabled = true;
-    _genSetStatus('CANCELLING…', 'error');
-    try {
-      await _genHttp({ method: 'POST', url: `${_genHost}/interrupt`, body: {} });
-      // Best-effort: also drop our queued job from the server queue, in
-      // case the interrupt landed on the running one but ours was queued.
-      if (_genCurrentPromptId) {
-        await _genHttp({
-          method: 'POST',
-          url: `${_genHost}/queue`,
-          body: { delete: [_genCurrentPromptId] },
-        });
-      }
-    } catch (err) {
-      console.warn('[generate] cancel failed:', err);
-    }
-  }
-
-  // Tell ComfyUI to unload models and free VRAM/RAM. Safe to call when
-  // idle. Posts to /free with both flags set — the server will release
-  // model weights and clear its CUDA cache.
-  async function _genFlushMemory() {
-    if (genFlushBtn) genFlushBtn.disabled = true;
-    _genSetStatus('FLUSHING MEMORY…', 'ok');
-    try {
-      const r = await _genHttp({
-        method: 'POST',
-        url: `${_genHost}/free`,
-        body: { unload_models: true, free_memory: true },
-      });
-      if (r.ok) {
-        _genSetStatus('MEMORY FLUSHED', 'ok');
-      } else {
-        _genSetStatus(`FLUSH FAILED · HTTP ${r.status || r.error || 'fail'}`, 'error');
-      }
-    } catch (err) {
-      _genSetStatus(`FLUSH ERROR · ${err.message || err}`, 'error');
-    } finally {
-      if (genFlushBtn) genFlushBtn.disabled = false;
-    }
-  }
-
-  async function _genPollAndFetch(promptId) {
-    const start = Date.now();
-    const TIMEOUT_MS = 30 * 60 * 1000; // 30 min — generation can be long
-    while (Date.now() - start < TIMEOUT_MS) {
-      await new Promise((res) => setTimeout(res, 1200));
-      if (_genCancelRequested) throw new Error('cancelled');
-      const history = await _genGetJson(`${_genHost}/history/${promptId}`);
-      if (!history) continue;
-      const entry = history?.[promptId];
-      if (!entry) continue;
-      const status = entry.status?.status_str;
-      if (status === 'error') throw new Error('comfy reported error');
-      if (status !== 'success' && !entry.outputs) continue;
-      // Iterate EVERY output item so batch generations land all their
-      // images/videos/audio in the thumbnail strip — not just the first.
-      let downloaded = 0;
-      for (const nodeId of Object.keys(entry.outputs || {})) {
-        const node = entry.outputs[nodeId];
-        const groups = [
-          ['image', node.images],
-          ['video', node.gifs],
-          ['video', node.videos],
-          ['audio', node.audio],
-        ];
-        for (const [kind, items] of groups) {
-          if (!Array.isArray(items)) continue;
-          for (const item of items) {
-            const url = `${_genHost}/view?filename=${encodeURIComponent(item.filename)}`
-                      + `&subfolder=${encodeURIComponent(item.subfolder || '')}`
-                      + `&type=${encodeURIComponent(item.type || 'output')}`;
-            await _genFetchAndSave(url, item.filename, kind);
-            downloaded++;
-          }
-        }
-      }
-      if (downloaded > 0) return;
-      if (status === 'success') {
-        _genSetStatus('COMPLETED · no output items', 'ok');
-        return;
-      }
-    }
-    throw new Error('timeout waiting for completion');
-  }
-
-  // Two-word atmospheric tag generator for audio outputs. Sequential
-  // USER NNNN names don't say anything about a song; an evocative name
-  // doubles as a quick visual cue in the gallery and the thumbnail strip.
-  // Number suffix avoids collisions; main de-collides further if needed.
-  function _genAudioName() {
-    const ADJ = [
-      'NEON', 'AURORA', 'VELVET', 'COSMIC', 'CRYSTAL', 'SHADOW',
-      'MIDNIGHT', 'SOLAR', 'AMBER', 'FROZEN', 'ECHO', 'GHOST',
-      'IRON', 'OBSIDIAN', 'PHANTOM', 'EMBER', 'SILVER', 'ARCANE',
-      'ASTRAL', 'LUMINOUS', 'OPAL', 'PLASMA', 'QUANTUM', 'RADIANT',
-      'SCARLET', 'TIDAL', 'VOID', 'EMERALD', 'ROGUE', 'STARLIT',
-    ];
-    const NOUN = [
-      'PULSE', 'CASCADE', 'MIRAGE', 'ECLIPSE', 'NEBULA', 'ORBIT',
-      'REVERIE', 'TIDE', 'VORTEX', 'WAKE', 'CIPHER', 'DRIFT',
-      'FROST', 'GLITCH', 'HORIZON', 'INFERNO', 'LUNA', 'MAZE',
-      'NOMAD', 'OASIS', 'REQUIEM', 'SIGNAL', 'TEMPEST', 'UMBRA',
-      'WAVELENGTH', 'CIRCUIT', 'GHOST', 'ASCENT', 'BLOOM', 'HOLLOW',
-    ];
-    const a = ADJ[Math.floor(Math.random() * ADJ.length)];
-    const n = NOUN[Math.floor(Math.random() * NOUN.length)];
-    const num = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
-    return `${a} ${n} ${num}`;
-  }
-
-  async function _genFetchAndSave(url, originalName, kind) {
-    _genSetStatus('DOWNLOADING', 'ok');
-    const r = await _genHttp({ method: 'GET', url });
-    if (!r.ok || !r.bytes) throw new Error(`download ${r.error || ('HTTP ' + r.status)}`);
-    const buf = new Uint8Array(r.bytes);
-    // Derive extension from original filename.
-    const m = (originalName || '').match(/\.([A-Za-z0-9]{2,5})$/);
-    const ext = m ? '.' + m[1].toLowerCase() : '.png';
-    // Only audio gets a creative name — image/video can be visually
-    // identified at a glance, so sequential USER NNNN is fine there.
-    const nameHint = kind === 'audio' ? _genAudioName() : '';
-    const result = await window.dash?.comfySaveOutput?.(kind, buf, ext, nameHint);
-    if (result?.ok) {
-      _genSetStatus(`SAVED · ${result.name}`, 'ok');
-      _genShowOutput(result.path, kind, result.name);
-    } else {
-      _genSetStatus(`SAVE ERROR · ${result?.error || 'unknown'}`, 'error');
-    }
-  }
-
-  // ── Themed audio widget + fluid waveform visualizer ─────────────
-  // Drives the .gen-audio-player UI: play/pause, scrub bar, time, and a
-  // smooth curve waveform on canvas. The native <audio> element stays
-  // as the playback engine; we just hide its controls and read its
-  // state. WebAudio AnalyserNode feeds getByteTimeDomainData for an
-  // oscilloscope look, smoothed and stroked via quadraticCurveTo so
-  // the line flows rather than ticks.
-  let _genAudioCtx = null;
-  let _genAudioSrc = null;       // MediaElementSource tied to genOutputAud
-  let _genAudioAnalyser = null;
-  let _genAudioVizRaf = 0;
-  let _genAudioWired = false;
-  function _genStopAudioViz() {
-    if (_genAudioVizRaf) {
-      cancelAnimationFrame(_genAudioVizRaf);
-      _genAudioVizRaf = 0;
-    }
-  }
-  function _genWireAudioWidget() {
-    if (_genAudioWired) return; // event listeners are one-time
-    _genAudioWired = true;
-    const playBtn   = document.getElementById('gen-audio-play');
-    const iconPlay  = playBtn?.querySelector('.gen-audio-icon-play');
-    const iconPause = playBtn?.querySelector('.gen-audio-icon-pause');
-    const barEl     = document.getElementById('gen-audio-bar');
-    const progEl    = document.getElementById('gen-audio-progress');
-    const knobEl    = document.getElementById('gen-audio-knob');
-    const timeEl    = document.getElementById('gen-audio-time');
-    const vizCanvas = document.getElementById('gen-audio-viz');
-    if (!genOutputAud) return;
-    // Initialize WebAudio chain once on first play (user gesture
-    // unblocks AudioContext on Chromium).
-    function _ensureAudioGraph() {
-      if (_genAudioCtx) return;
-      try {
-        _genAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        _genAudioSrc = _genAudioCtx.createMediaElementSource(genOutputAud);
-        _genAudioAnalyser = _genAudioCtx.createAnalyser();
-        _genAudioAnalyser.fftSize = 1024;
-        _genAudioAnalyser.smoothingTimeConstant = 0.85;
-        _genAudioSrc.connect(_genAudioAnalyser);
-        _genAudioAnalyser.connect(_genAudioCtx.destination);
-      } catch (err) {
-        console.warn('[gen-audio] AudioContext init failed:', err?.message || err);
-      }
-    }
-    function _setPlayIcons(playing) {
-      if (iconPlay)  iconPlay.hidden  = playing;
-      if (iconPause) iconPause.hidden = !playing;
-    }
-    function _fmt(s) {
-      if (!Number.isFinite(s) || s < 0) s = 0;
-      const m = Math.floor(s / 60);
-      const r = Math.floor(s % 60);
-      return `${m}:${String(r).padStart(2, '0')}`;
-    }
-    function _paintTime() {
-      const cur = genOutputAud.currentTime || 0;
-      const dur = genOutputAud.duration || 0;
-      if (timeEl) timeEl.textContent = `${_fmt(cur)} / ${_fmt(dur)}`;
-      if (dur > 0) {
-        const pct = Math.max(0, Math.min(100, (cur / dur) * 100));
-        if (progEl) progEl.style.width = `${pct}%`;
-        if (knobEl) knobEl.style.left  = `${pct}%`;
-      }
-    }
-    function _drawViz() {
-      const ana = _genAudioAnalyser;
-      const c = vizCanvas;
-      if (!ana || !c) { _genAudioVizRaf = 0; return; }
-      const ctx = c.getContext('2d');
-      // Resize canvas backing store to its CSS size for crisp lines.
-      const cssW = c.clientWidth || c.width;
-      const cssH = c.clientHeight || c.height;
-      if (c.width !== cssW || c.height !== cssH) { c.width = cssW; c.height = cssH; }
-      const N = ana.fftSize;
-      const data = new Uint8Array(N);
-      ana.getByteTimeDomainData(data);
-      ctx.clearRect(0, 0, cssW, cssH);
-      // Accent-tinted glow underlay. Drawing a wider, low-alpha stroke
-      // first gives the line a soft halo without resorting to shadow
-      // blur (which is heavy when animated).
-      const accent = getComputedStyle(document.documentElement)
-        .getPropertyValue('--accent').trim() || '#3df';
-      const midY = cssH / 2;
-      const amp  = cssH * 0.45;
-      // Sample down to ~150 points for smooth curves while staying fast.
-      const step = Math.max(1, Math.floor(N / 150));
-      const pts = [];
-      for (let i = 0; i < N; i += step) {
-        const v = (data[i] - 128) / 128;
-        const x = (i / N) * cssW;
-        const y = midY + v * amp;
-        pts.push([x, y]);
-      }
-      if (pts[pts.length - 1]?.[0] < cssW) pts.push([cssW, midY]);
-      // Two-pass stroke: thick translucent halo + crisp inner line.
-      for (const pass of [{ w: 6, a: 0.18 }, { w: 1.6, a: 0.95 }]) {
-        ctx.beginPath();
-        ctx.moveTo(pts[0][0], pts[0][1]);
-        // Quadratic smoothing between each consecutive pair using
-        // midpoint control points — gives a flowing curve instead of
-        // jagged segments.
-        for (let i = 1; i < pts.length - 1; i++) {
-          const [x1, y1] = pts[i];
-          const [x2, y2] = pts[i + 1];
-          const mx = (x1 + x2) / 2;
-          const my = (y1 + y2) / 2;
-          ctx.quadraticCurveTo(x1, y1, mx, my);
-        }
-        const last = pts[pts.length - 1];
-        ctx.lineTo(last[0], last[1]);
-        ctx.lineWidth   = pass.w;
-        ctx.globalAlpha = pass.a;
-        ctx.strokeStyle = accent;
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-      _paintTime();
-      _genAudioVizRaf = requestAnimationFrame(_drawViz);
-    }
-    playBtn?.addEventListener('click', async () => {
-      _ensureAudioGraph();
-      try { if (_genAudioCtx?.state === 'suspended') await _genAudioCtx.resume(); } catch {}
-      if (genOutputAud.paused) genOutputAud.play().catch(() => {});
-      else genOutputAud.pause();
-    });
-    genOutputAud.addEventListener('play',  () => {
-      _setPlayIcons(true);
-      _genStopAudioViz();
-      _genAudioVizRaf = requestAnimationFrame(_drawViz);
-    });
-    genOutputAud.addEventListener('pause', () => {
-      _setPlayIcons(false);
-      _genStopAudioViz();
-      _paintTime();
-    });
-    genOutputAud.addEventListener('ended', () => { _setPlayIcons(false); _genStopAudioViz(); });
-    genOutputAud.addEventListener('timeupdate', _paintTime);
-    genOutputAud.addEventListener('loadedmetadata', _paintTime);
-    barEl?.addEventListener('click', (e) => {
-      if (!genOutputAud.duration) return;
-      const r = barEl.getBoundingClientRect();
-      const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-      try { genOutputAud.currentTime = frac * genOutputAud.duration; } catch {}
-    });
-  }
-  // Expose stop hook to _genShowMainOutput (which is defined above and
-  // calls it via typeof guard so order doesn't matter).
-  window._genStopAudioViz = _genStopAudioViz;
-
-  function _genShowOutput(absPath, kind, name) {
-    if (!genOutputEl) return;
-    const url = `dash3d-file://gallery/generated/${kind}/${encodeURIComponent(name)}`;
-    // Append to session history (de-dup on name in case of replay).
-    if (!_genOutputHistory.some((o) => o.name === name)) {
-      _genOutputHistory.push({ kind, name, url });
-    }
-    _genShowMainOutput(_genOutputHistory.length - 1);
-    _genRenderThumbs();
-  }
-
-  function _genShowMainOutput(idx) {
-    if (!genOutputEl) return;
-    const item = _genOutputHistory[idx];
-    if (!item) return;
-    genOutputEl.hidden = false;
-    if (genOutputName) genOutputName.textContent = item.name || '';
-    [genOutputImg, genOutputVid, genOutputAud].forEach((el) => {
-      if (el) { el.hidden = true; try { el.removeAttribute('src'); } catch {} }
-    });
-    // Hide the themed audio widget by default; only audio outputs
-    // expose it. Stop any in-flight visualizer animation.
-    const audioPlayerEl = document.getElementById('gen-audio-player');
-    if (audioPlayerEl) audioPlayerEl.hidden = true;
-    if (typeof _genStopAudioViz === 'function') _genStopAudioViz();
-    if (item.kind === 'image' && genOutputImg) {
-      genOutputImg.src = item.url;
-      genOutputImg.hidden = false;
-    } else if (item.kind === 'video' && genOutputVid) {
-      genOutputVid.src = item.url;
-      genOutputVid.hidden = false;
-    } else if (item.kind === 'audio' && genOutputAud) {
-      genOutputAud.src = item.url;
-      // Keep <audio> hidden — playback engine only. Show themed widget.
-      if (audioPlayerEl) audioPlayerEl.hidden = false;
-      if (typeof _genWireAudioWidget === 'function') _genWireAudioWidget();
-    }
-    // Reflect the active thumb selection.
-    genOutputThumbs?.querySelectorAll('.gen-output-thumb').forEach((el, i) => {
-      el.classList.toggle('is-active', i === idx);
-    });
-  }
-
-  function _genRenderThumbs() {
-    if (!genOutputThumbs) return;
-    genOutputThumbs.innerHTML = '';
-    _genOutputHistory.forEach((item, idx) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'gen-output-thumb';
-      btn.title = item.name;
-      if (idx === _genOutputHistory.length - 1) btn.classList.add('is-active');
-      if (item.kind === 'image') {
-        const img = document.createElement('img');
-        img.src = item.url;
-        img.alt = '';
-        btn.appendChild(img);
-      } else {
-        // For video/audio, show a kind glyph instead of decoding a frame.
-        const icon = document.createElement('span');
-        icon.className = 'gen-output-thumb-icon';
-        icon.textContent = item.kind === 'video' ? '▶' : '♪';
-        btn.appendChild(icon);
-      }
-      btn.addEventListener('click', () => _genShowMainOutput(idx));
-      genOutputThumbs.appendChild(btn);
-    });
-  }
-
-  // ── Wiring ─────────────────────────────────────────────────────
-  genTabsEl?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.gen-tab');
-    if (!btn || _genRunning) return;
-    _genSelectWorkflow(btn.dataset.file);
-    playSfx?.('click');
-  });
-  genRefreshBtn?.addEventListener('click', () => {
-    _genLoadWorkflows();
-    _genCheckComfy();
-    playSfx?.('click');
-  });
-  genCancelBtn?.addEventListener('click', () => {
-    _genCancel();
-    playSfx?.('click');
-  });
-  genFlushBtn?.addEventListener('click', () => {
-    _genFlushMemory();
-    playSfx?.('click');
-  });
-
-  // Initial probe — must wait for cfg.comfyHost to load before firing
-  // so non-default hosts (custom port) don't hit the wrong endpoint
-  // on the very first check.
-  (async () => {
-    try {
-      const cfg = (await window.dash?.getConfig?.()) || {};
-      if (cfg.comfyHost && typeof cfg.comfyHost === 'string') {
-        _genHost = cfg.comfyHost.replace(/\/+$/, '');
-      }
-    } catch {}
-    const online = await _genCheckComfy();
-    if (online) _genFetchObjectInfo();
-    _genLoadWorkflows();
-  })();
-  // Periodic connection re-check — quietly switches the status pill if
-  // ComfyUI is started/stopped after the dashboard loads.
-  setInterval(() => {
-    if (!comboPanel?.dataset?.mode === 'generate') return;
-    _genCheckComfy();
-  }, 15000);
-}
+// ── STREAM tab ───────────────────────────────────────────────────────────
+// Lazy combo pane — code lives in features/stream.js, loaded on first
+// open by activateLazyPane() (see the _lazyPaneImports registry).
