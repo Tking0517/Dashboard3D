@@ -27,6 +27,13 @@ let _mainWin = null;
 // the lifecycle hook clean up on app exit.
 let _keyHookProc = null;
 let _keyHookEnabled = false;
+// BrowserView tab registry. Lifted to module scope so the embed-invert
+// IPC handler (registered inside registerIpc(), see ~main.js:2441) can
+// iterate the tabs to repaint invert. The rest of the BV tab manager
+// state (_bvNextId, _bvActiveId, _bvBounds) is fine inside the
+// app.whenReady closure where the tab-management code lives — only the
+// Map needs to be reachable from registerIpc's scope.
+const _bvTabs = new Map(); // id → { view, url, title, loading, canBack, canFwd }
 function _stopKeyHook() {
   if (_keyHookProc) {
     try { _keyHookProc.kill(); } catch {}
@@ -1225,7 +1232,9 @@ app.whenReady().then(() => {
   // in sync. Trackers are cut at the network layer — we don't touch the
   // page DOM (an earlier CLEAN_CSS rule was too broad: legitimate
   // structural classes like "cookie-policy-notice-cmp" got hidden too).
-  const _bvTabs = new Map(); // id → { view, url, title, loading, canBack, canFwd }
+  // _bvTabs itself is declared at module scope (see ~main.js:32) so the
+  // embed-invert IPC handler in registerIpc() can reach it; everything
+  // else here is local to this closure.
   let _bvNextId = 1;
   let _bvActiveId = null;
   let _bvBounds = { x: 0, y: 0, width: 0, height: 0 };

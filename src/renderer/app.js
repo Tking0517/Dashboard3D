@@ -747,7 +747,7 @@ document.addEventListener('click', (e) => {
   const t = e.target;
   if (!t || !t.closest) return;
   // Anything that's a "destructive" surface gets the delete bleep.
-  if (t.closest('.note-tab-close, [data-explore-delete], #close-btn, .chat-clear')) {
+  if (t.closest('.note-tab-close, [data-explore-delete], #close-btn')) {
     playSfx('delete');
     return;
   }
@@ -757,7 +757,7 @@ document.addEventListener('click', (e) => {
     return;
   }
   // Generic buttons.
-  if (t.closest('.topbar-btn, .explore-action, .panel-collapse-btn, .audio-mute-btn, .audio-gain-btn, .chat-send, .paper-tool-btn')) {
+  if (t.closest('.topbar-btn, .explore-action, .panel-collapse-btn, .audio-mute-btn, .audio-gain-btn, .paper-tool-btn')) {
     playSfx('click');
   }
 }, true);
@@ -809,7 +809,6 @@ if (!IS_ELECTRON) {
     getConfig:        () => getJson('/api/config'),
     setConfig:        (partial) => postJson('/api/config', partial),
     configPath:       () => Promise.resolve('(server-side)'),
-    azureAutoConfig:  () => getJson('/api/azure-auto-config'),
     getScreenSources: () => getJson('/api/screen-sources'),
     toggleFullscreen: async () => {
       // Use the browser's own fullscreen API as a best-effort.
@@ -4163,594 +4162,6 @@ function initNotes(cfg) {
   setNotesStatus('SAVED', 'ok');
 }
 
-// ── Chat — Ollama (local) + Azure OpenAI (cloud) ────────────────────────────
-const OLLAMA_URL = 'http://localhost:11434';
-const AZURE_DEFAULT_API_VERSION = '2024-10-21';
-
-const chatProviderEl  = document.querySelector('#chat-provider');
-const chatModelEl     = document.querySelector('#chat-model');
-const chatMessagesEl  = document.querySelector('#chat-messages');
-const chatInputEl     = document.querySelector('#chat-input');
-const chatSendBtn     = document.querySelector('#chat-send');
-const chatClearBtn    = document.querySelector('#chat-clear');
-const chatAutoBtn     = document.querySelector('#chat-auto');
-const chatTagEl       = document.querySelector('#chat-tag');
-const chatFooterEl    = document.querySelector('#chat-footer');
-const azureConfigEl   = document.querySelector('#chat-azure-config');
-const azureEndpointEl   = document.querySelector('#azure-endpoint');
-const azureDeploymentEl = document.querySelector('#azure-deployment');
-const azureVersionEl    = document.querySelector('#azure-version');
-const azureKeyEl        = document.querySelector('#azure-key');
-
-let chatHistory = [];          // [{ role: 'user'|'assistant', content }]
-let chatBusy = false;
-let chatAbort = null;
-let chatProvider = 'ollama';
-let azureConfigVisible = false;
-
-function setChatStatus(text, kind) {
-  if (!chatFooterEl) return;
-  const cls = kind || '';
-  chatFooterEl.innerHTML = `<em>STATE</em> <strong class="${cls}">${text}</strong>`;
-  // Same fix as the notes footer — keep combo-footer-chat so the CSS
-  // mode-based hiding still applies in non-chat combo modes.
-  chatFooterEl.className = 'footer-readout combo-footer-chat';
-}
-
-function renderMessages() {
-  if (!chatMessagesEl) return;
-  if (!chatHistory.length) {
-    chatMessagesEl.innerHTML = '<div class="chat-empty">CHAT IS EMPTY · TYPE BELOW TO START</div>';
-    return;
-  }
-  chatMessagesEl.innerHTML = '';
-  for (const msg of chatHistory) {
-    const div = document.createElement('div');
-    div.className = `chat-msg ${msg.role}`;
-    const role = document.createElement('span');
-    role.className = 'chat-msg-role';
-    role.textContent = msg.role === 'user' ? '▶ YOU' : '◆ ASSISTANT';
-    const content = document.createElement('div');
-    content.className = 'chat-msg-content';
-    content.textContent = msg.content || '…';
-    div.appendChild(role);
-    div.appendChild(content);
-    chatMessagesEl.appendChild(div);
-  }
-  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-}
-
-async function loadOllamaModels() {
-  if (!chatModelEl) return;
-  setChatStatus('CONNECTING…', 'amber');
-  try {
-    const res = await fetch(`${OLLAMA_URL}/api/tags`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const models = Array.isArray(data.models) ? data.models : [];
-    if (!models.length) {
-      chatModelEl.innerHTML = '<option value="">— NO MODELS —</option>';
-      chatTagEl.textContent = '00';
-      setChatStatus('NO MODELS · OLLAMA EMPTY', 'amber');
-      return;
-    }
-    chatModelEl.innerHTML = models
-      .map(m => `<option value="${escapeText(m.name)}">${escapeText(m.name).toUpperCase()}</option>`)
-      .join('');
-    chatTagEl.textContent = String(models.length).padStart(2, '0');
-    // Restore saved model selection if any
-    const cfg = (await window.dash?.getConfig?.()) || {};
-    if (cfg.chatModel && models.some(m => m.name === cfg.chatModel)) {
-      chatModelEl.value = cfg.chatModel;
-    }
-    setChatStatus('READY', 'ok');
-  } catch (err) {
-    // Ollama isn't running locally — not a system-level offline state.
-    // Keep the wording specific so the footer can't be mistaken for
-    // "your machine is offline" when the chat pane isn't being used.
-    chatModelEl.innerHTML = '<option value="">— OLLAMA NOT RUNNING —</option>';
-    chatTagEl.textContent = '—';
-    setChatStatus('OLLAMA · NOT RUNNING', '');
-  }
-}
-
-function buildChatSystemPrompt() {
-  const now = new Date();
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const lines = [
-    'You are a helpful assistant embedded in a desktop dashboard.',
-    `Today's local date and time is ${now.toLocaleString(undefined, {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
-    })} (${tz}).`,
-    `ISO timestamp: ${now.toISOString()}.`,
-  ];
-  if (typeof activeLocation === 'object' && activeLocation?.name) {
-    const region = [activeLocation.admin1, activeLocation.country].filter(Boolean).join(', ');
-    lines.push(`Primary weather location: ${activeLocation.name}${region ? ', ' + region : ''}.`);
-  }
-  if (typeof altLocation === 'object' && altLocation?.name) {
-    lines.push(`Alt zone 1: ${altLocation.name} (${altLocation.timezone}).`);
-  }
-  if (typeof altLocation2 === 'object' && altLocation2?.name) {
-    lines.push(`Alt zone 2: ${altLocation2.name} (${altLocation2.timezone}).`);
-  }
-  lines.push('When the user asks about the current time, date, or weather location, use the values above directly — they are accurate.');
-  return lines.join('\n');
-}
-
-async function sendChat() {
-  if (chatBusy) return;
-  const prompt = chatInputEl.value.trim();
-  if (!prompt) return;
-
-  chatHistory.push({ role: 'user', content: prompt });
-  chatHistory.push({ role: 'assistant', content: '' });
-  chatInputEl.value = '';
-  chatBusy = true;
-  chatSendBtn.disabled = true;
-  setChatStatus('THINKING…', 'amber');
-  renderMessages();
-
-  chatAbort = new AbortController();
-  try {
-    const messages = [
-      { role: 'system', content: buildChatSystemPrompt() },
-      ...chatHistory.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
-    ];
-    if (chatProvider === 'azure') {
-      await streamAzure(messages, chatAbort.signal);
-    } else {
-      await streamOllama(messages, chatAbort.signal);
-    }
-    setChatStatus('READY', 'ok');
-  } catch (err) {
-    chatHistory[chatHistory.length - 1].content += `\n[error: ${err.message}]`;
-    renderMessages();
-    setChatStatus(`ERROR · ${err.message}`.toUpperCase(), 'red');
-  } finally {
-    chatBusy = false;
-    chatSendBtn.disabled = false;
-    chatAbort = null;
-  }
-}
-
-// Ollama: NDJSON stream — one JSON object per line in res.body.
-async function streamOllama(messages, signal) {
-  const model = chatModelEl.value;
-  if (!model) throw new Error('SELECT A MODEL');
-  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: true }),
-    signal,
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  if (!res.body) throw new Error('no stream');
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const obj = JSON.parse(line);
-        if (obj.message?.content) {
-          chatHistory[chatHistory.length - 1].content += obj.message.content;
-          renderMessages();
-        }
-      } catch {}
-    }
-  }
-  if (window.dash?.setConfig) window.dash.setConfig({ chatModel: model });
-}
-
-// Azure OpenAI: SSE stream — `data: {json}\n\n` events; ends with `data: [DONE]`.
-async function streamAzure(messages, signal) {
-  const cfg = readAzureConfig();
-  if (!cfg.endpoint || !cfg.deployment || !cfg.key) {
-    throw new Error('AZURE NEEDS ENDPOINT, DEPLOYMENT, KEY');
-  }
-  const url = `${cfg.endpoint.replace(/\/$/, '')}/openai/deployments/${encodeURIComponent(cfg.deployment)}/chat/completions?api-version=${encodeURIComponent(cfg.apiVersion || AZURE_DEFAULT_API_VERSION)}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'api-key': cfg.key,
-    },
-    body: JSON.stringify({ messages, stream: true }),
-    signal,
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status} ${errText.slice(0, 80)}`);
-  }
-  if (!res.body) throw new Error('no stream');
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const events = buf.split('\n\n');
-    buf = events.pop() || '';
-    for (const event of events) {
-      // each event line set may have multiple `data: ...` lines or comments
-      for (const line of event.split('\n')) {
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
-        try {
-          const obj = JSON.parse(data);
-          const delta = obj.choices?.[0]?.delta?.content;
-          if (delta) {
-            chatHistory[chatHistory.length - 1].content += delta;
-            renderMessages();
-          }
-        } catch {}
-      }
-    }
-  }
-}
-
-function readAzureConfig() {
-  return {
-    endpoint:   (azureEndpointEl?.value   || '').trim(),
-    deployment: (azureDeploymentEl?.value || '').trim(),
-    key:        (azureKeyEl?.value        || '').trim(),
-    apiVersion: (azureVersionEl?.value    || '').trim(),
-  };
-}
-
-async function saveAzureConfig() {
-  if (!window.dash?.setConfig) return;
-  await window.dash.setConfig({ azure: readAzureConfig() });
-}
-
-function applyProvider(p) {
-  chatProvider = p === 'azure' ? 'azure' : 'ollama';
-  if (chatProviderEl) chatProviderEl.value = chatProvider;
-  // Model dropdown only meaningful for Ollama; hide for Azure.
-  if (chatModelEl) chatModelEl.style.display = chatProvider === 'azure' ? 'none' : '';
-  // Azure config block is hidden by default; gear ⚙ toggles it.
-  if (azureConfigEl) {
-    azureConfigEl.hidden = !azureConfigVisible;
-  }
-}
-
-chatSendBtn?.addEventListener('click', sendChat);
-chatInputEl?.addEventListener('keydown', (e) => {
-  // Enter to send, Shift+Enter for newline
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendChat();
-  }
-});
-chatClearBtn?.addEventListener('click', () => {
-  if (chatAbort) chatAbort.abort();
-  chatHistory = [];
-  renderMessages();
-  setChatStatus('CLEARED', 'ok');
-});
-
-chatProviderEl?.addEventListener('change', async () => {
-  applyProvider(chatProviderEl.value);
-  if (window.dash?.setConfig) await window.dash.setConfig({ chatProvider });
-  if (chatProvider === 'ollama') {
-    await loadOllamaModels();
-  } else {
-    setChatStatus(readyAzure() ? 'READY' : 'CONFIGURE AZURE', readyAzure() ? 'ok' : 'amber');
-  }
-});
-
-chatAutoBtn?.addEventListener('click', async () => {
-  if (!window.dash?.azureAutoConfig) {
-    setChatStatus('AUTO REQUIRES APP RESTART · CLOSE EXE & RUN Dashboard.bat', 'red');
-    return;
-  }
-  setChatStatus('AUTO-CONFIG · QUERYING az CLI…', 'amber');
-  chatAutoBtn.disabled = true;
-  try {
-    const cfg = await window.dash.azureAutoConfig();
-    if (!cfg || cfg.error) {
-      setChatStatus(`AUTO FAILED · ${(cfg?.error || 'NO RESPONSE')}`.toUpperCase(), 'red');
-      return;
-    }
-    if (azureEndpointEl)   azureEndpointEl.value   = cfg.endpoint   || '';
-    if (azureDeploymentEl) azureDeploymentEl.value = cfg.deployment || '';
-    if (azureVersionEl)    azureVersionEl.value    = cfg.apiVersion || '';
-    if (azureKeyEl)        azureKeyEl.value        = cfg.key        || '';
-    await saveAzureConfig();
-
-    // Switch to Azure since we just configured it.
-    chatProviderEl.value = 'azure';
-    applyProvider('azure');
-    if (window.dash?.setConfig) await window.dash.setConfig({ chatProvider: 'azure' });
-
-    if (cfg.warning) {
-      setChatStatus(`PARTIAL · ${cfg.warning}`.toUpperCase(), 'amber');
-    } else {
-      setChatStatus(
-        `READY · ${cfg.resourceName || 'AZURE'} · ${cfg.deploymentCount} DEPLOY`.toUpperCase(),
-        'ok'
-      );
-    }
-  } catch (err) {
-    setChatStatus(`AUTO FAILED · ${err.message}`.toUpperCase(), 'red');
-  } finally {
-    chatAutoBtn.disabled = false;
-  }
-});
-
-// Save Azure fields on blur so they persist even if user doesn't switch providers.
-[azureEndpointEl, azureDeploymentEl, azureVersionEl, azureKeyEl].forEach(el => {
-  el?.addEventListener('change', () => saveAzureConfig());
-  el?.addEventListener('blur',   () => saveAzureConfig());
-});
-
-function readyAzure() {
-  const c = readAzureConfig();
-  return !!(c.endpoint && c.deployment && c.key);
-}
-
-// ── Multi-source chat plumbing ──────────────────────────────────────
-// The CHAT pane displays one of several sources:
-//   ollama / azure  — LLM conversation (existing flow)
-//   discord         — mirrored DM/mention notifications from the
-//                     STREAM tab's Discord BrowserView
-//   all             — union view (LLM history + Discord, time-sorted)
-// `chatSource` drives the visible UI; `chatProvider` still drives the
-// LLM call site, so existing LLM logic stays unchanged.
-let chatSource = 'ollama';
-// Per-kind message buffers + dedupe sets. Adding a new stream kind
-// is one entry in each map. The chat-source dropdown decides which
-// (or all) get rendered.
-const _streamMessages = { discord: [], facebook: [] };
-const _streamSeenIds  = { discord: new Set(), facebook: new Set() };
-const STREAM_MAX_BUFFER = 200;
-// Back-compat aliases for any code that still references the old
-// Discord-only names (kept short — full removal can come later).
-const _discordMessages = _streamMessages.discord;
-const DISCORD_MAX_BUFFER = STREAM_MAX_BUFFER;
-const chatSourceEl   = document.getElementById('chat-source');
-const chatPaneEl     = document.querySelector('.combo-pane-chat');
-const chatInputRowEl = document.querySelector('.chat-input-row');
-
-function renderStreamSource(kindToShow) {
-  // Generic per-kind renderer. 'discord' / 'facebook' show only that
-  // buffer. 'all' (handled by renderAllSources) is separate.
-  if (!chatMessagesEl) return;
-  const buf = _streamMessages[kindToShow] || [];
-  if (!buf.length) {
-    const label = (kindToShow || '').toUpperCase();
-    chatMessagesEl.innerHTML =
-      '<div class="chat-empty">NO ' + label + ' MESSAGES YET<br><br>OPEN STREAM TAB · CLICK INTO THE CONVERSATION YOU WANT TO MIRROR · NEW MESSAGES THERE WILL SYNC HERE LIVE</div>';
-    return;
-  }
-  // Chronological sort — backfilled history can arrive in any order
-  // (initial DOM sweep is in source order, lazy-loaded older
-  // messages get prepended on scroll-up). 200-row cap keeps it cheap.
-  buf.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-  const html = buf.map((m) => {
-    const t = new Date(m.timestamp);
-    const stamp = String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
-    return '<div class="chat-msg chat-msg-discord">'
-      + '<div class="chat-msg-head"><span class="chat-msg-source">DISCORD</span><span class="chat-msg-stamp">' + stamp + '</span></div>'
-      + '<div class="chat-msg-title">' + _escHtml(m.title || '(no title)') + '</div>'
-      + (m.body ? '<div class="chat-msg-body">' + _escHtml(m.body) + '</div>' : '')
-      + '</div>';
-  }).join('');
-  chatMessagesEl.innerHTML = html;
-  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-}
-function renderAllSources() {
-  // Merge LLM history with every stream-kind buffer, time-sorted.
-  if (!chatMessagesEl) return;
-  const llmEntries = (chatHistory || []).map((m, i) => ({
-    kind: 'llm', role: m.role, content: m.content, idx: i, timestamp: m.__ts || (i * 1),
-  }));
-  const streamEntries = [];
-  for (const k of Object.keys(_streamMessages)) {
-    for (const m of _streamMessages[k]) streamEntries.push({ ...m, kind: k });
-  }
-  const merged = llmEntries.concat(streamEntries);
-  merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-  if (!merged.length) {
-    chatMessagesEl.innerHTML = '<div class="chat-empty">NO MESSAGES YET</div>';
-    return;
-  }
-  const html = merged.map((m) => {
-    if (m.kind === 'discord' || m.kind === 'facebook') {
-      const t = new Date(m.timestamp);
-      const stamp = String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
-      const srcLabel = m.kind.toUpperCase();
-      return '<div class="chat-msg chat-msg-' + m.kind + '">'
-        + '<div class="chat-msg-head"><span class="chat-msg-source">' + srcLabel + '</span><span class="chat-msg-stamp">' + stamp + '</span></div>'
-        + '<div class="chat-msg-title">' + _escHtml(m.title || '(no title)') + '</div>'
-        + (m.body ? '<div class="chat-msg-body">' + _escHtml(m.body) + '</div>' : '')
-        + '</div>';
-    }
-    // LLM message — reuse the existing message style classes.
-    return '<div class="chat-msg chat-msg-' + (m.role === 'assistant' ? 'asst' : 'user') + '">'
-      + _escHtml(m.content || '')
-      + '</div>';
-  }).join('');
-  chatMessagesEl.innerHTML = html;
-  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-}
-function _escHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-}
-function applySource(src) {
-  const VALID = ['ollama','azure','discord','facebook','all'];
-  chatSource = VALID.includes(src) ? src : 'ollama';
-  if (chatPaneEl) chatPaneEl.dataset.chatSource = chatSource;
-  if (chatSourceEl) chatSourceEl.value = chatSource;
-  // Hide LLM-specific chrome when viewing a non-LLM source.
-  const isLLM    = (chatSource === 'ollama' || chatSource === 'azure');
-  const isStream = !!_streamMessages[chatSource];
-  if (chatModelEl)    chatModelEl.style.display    = (isLLM && chatSource === 'ollama') ? '' : 'none';
-  if (chatAutoBtn)    chatAutoBtn.style.display    = isLLM ? '' : 'none';
-  if (azureConfigEl)  azureConfigEl.hidden         = !(isLLM && chatProvider === 'azure' && azureConfigVisible);
-  // Hide the LLM input row for stream-only sources (you can't type
-  // back at Discord/Facebook from here). ALL keeps it so you can
-  // still chat with the LLM while seeing the mirror inline.
-  if (chatInputRowEl) chatInputRowEl.style.display = isStream ? 'none' : '';
-  // Mirror LLM-source selection into the legacy chat-provider element
-  // so all the LLM call sites still work without changes.
-  if (isLLM) applyProvider(chatSource);
-  // Repaint with the new view.
-  if (isStream)                      renderStreamSource(chatSource);
-  else if (chatSource === 'all')     renderAllSources();
-  else                                renderMessages();
-}
-chatSourceEl?.addEventListener('change', async () => {
-  applySource(chatSourceEl.value);
-  if (window.dash?.setConfig) await window.dash.setConfig({ chatSource });
-});
-// Subscribe to mirrored Discord notifications. Buffer + render if
-// currently viewing a source that includes them. The console.log is
-// intentional — diagnoses the renderer-side hop for the mirror.
-// Track whether a stream embed drove the webcam ON, so we only
-// stopWebcam() on the OFF event if WE started it (don't kill a
-// manually-started dashboard webcam preview).
-let _discordDroveWebcam = false;
-if (window.dash?.onStreamNotification) {
-  window.dash.onStreamNotification((payload) => {
-    console.log('[stream:notification] renderer ←', payload);
-    // Camera-state events from any stream embed → drive the
-    // dashboard's webcam. startWebcam routes the stream into the
-    // profile-pic slot via setProfilePicLive.
-    if (payload && payload.kind === 'camera-state') {
-      if (payload.state === 'on') {
-        if (typeof startWebcam === 'function') {
-          _discordDroveWebcam = true;
-          startWebcam().catch?.(() => { _discordDroveWebcam = false; });
-        }
-      } else if (payload.state === 'off') {
-        if (_discordDroveWebcam && typeof stopWebcam === 'function') {
-          stopWebcam();
-          _discordDroveWebcam = false;
-        }
-      }
-      return;
-    }
-    if (!payload) return;
-    const k = String(payload.kind || '');
-    // Only known stream kinds get a buffer slot. Other kinds (or
-    // missing) silently drop so a stray event can't poison the buffer.
-    if (!_streamMessages[k]) return;
-    // Dedupe by messageId when present (live DOM mirror). The
-    // MutationObserver in each embed may fire repeatedly for the
-    // same row on re-render. Each kind has its own seen-set.
-    const seen = _streamSeenIds[k];
-    if (payload.messageId) {
-      if (seen.has(payload.messageId)) return;
-      seen.add(payload.messageId);
-      if (seen.size > 2000) {
-        const arr = Array.from(seen);
-        for (let i = 0; i < 1000; i++) seen.delete(arr[i]);
-      }
-    }
-    _streamMessages[k].push({
-      kind:  k,
-      type:  String(payload.type || 'notification'),
-      title: String(payload.title || ''),
-      body:  String(payload.body  || ''),
-      timestamp: Number(payload.timestamp) || Date.now(),
-    });
-    while (_streamMessages[k].length > STREAM_MAX_BUFFER) _streamMessages[k].shift();
-    if (chatSource === k)            renderStreamSource(chatSource);
-    else if (chatSource === 'all')   renderAllSources();
-  });
-}
-
-// ── Discord pipeline test buttons (visible when source is discord/all)
-const chatDiscordFetchBtn    = document.getElementById('chat-discord-fetch');
-const chatDiscordTestBtn     = document.getElementById('chat-discord-test');
-const chatDiscordDevToolsBtn = document.getElementById('chat-discord-devtools');
-// FETCH: ask the Discord embed to re-sweep its DOM and emit any
-// messages we haven't seen yet. Useful when the auto-sweep on
-// install missed something (e.g., user navigated to a new channel
-// after the embed loaded). Reports back whether the DOM even has
-// message rows — if rowsInDom is 0, the user hasn't opened any
-// conversation yet and there's nothing to mirror.
-// Helper — the embed kind to target with FETCH/TEST/DEV. When the
-// source is a specific stream (discord/facebook), target that. For
-// 'all' we default to discord (most common live-mirror target).
-function _activeStreamKind() {
-  if (_streamMessages[chatSource]) return chatSource;
-  return 'discord';
-}
-chatDiscordFetchBtn?.addEventListener('click', async () => {
-  const k = _activeStreamKind();
-  setChatStatus('FETCHING ' + k.toUpperCase() + '…', 'amber');
-  try {
-    const r = await window.dash?.streamRescan?.(k);
-    if (!r?.ok) {
-      setChatStatus('FETCH FAILED · ' + (r?.error || 'unknown'), 'red');
-      return;
-    }
-    if (r.rowsInDom === 0) {
-      setChatStatus('NO MESSAGES IN DOM · OPEN A CONVERSATION IN THE STREAM TAB FIRST', 'amber');
-    } else if (r.newlyEmitted === 0) {
-      setChatStatus(`ALREADY IN SYNC · ${r.rowsInDom} ROWS VISIBLE · ${(_streamMessages[k] || []).length} MIRRORED HERE`, 'ok');
-    } else {
-      setChatStatus(`FETCHED · ${r.newlyEmitted} NEW MESSAGES (${r.rowsInDom} VISIBLE IN EMBED)`, 'ok');
-    }
-  } catch (err) {
-    setChatStatus('FETCH ERR · ' + err.message, 'red');
-  }
-});
-chatDiscordTestBtn?.addEventListener('click', async () => {
-  setChatStatus('FIRING PIPELINE SELF-TEST…', 'amber');
-  try {
-    const r = await window.dash?.streamSelfTest?.(_activeStreamKind());
-    if (r?.ok) {
-      setChatStatus('TEST FIRED · IF MIRROR WORKS, A "SELF-TEST" ENTRY APPEARS BELOW', 'ok');
-    } else {
-      setChatStatus('TEST FAILED · ' + (r?.error || r?.result || 'unknown'), 'red');
-    }
-  } catch (err) {
-    setChatStatus('TEST ERR · ' + err.message, 'red');
-  }
-});
-chatDiscordDevToolsBtn?.addEventListener('click', async () => {
-  try {
-    const r = await window.dash?.streamOpenDevTools?.(_activeStreamKind());
-    if (!r?.ok) setChatStatus('DEVTOOLS FAILED · ' + (r?.error || 'unknown'), 'red');
-  } catch (err) {
-    setChatStatus('DEVTOOLS ERR · ' + err.message, 'red');
-  }
-});
-
-function initChat(cfg) {
-  // Restore Azure config fields (so user doesn't have to retype every launch).
-  if (cfg?.azure) {
-    if (azureEndpointEl)   azureEndpointEl.value   = cfg.azure.endpoint   || '';
-    if (azureDeploymentEl) azureDeploymentEl.value = cfg.azure.deployment || '';
-    if (azureVersionEl)    azureVersionEl.value    = cfg.azure.apiVersion || '';
-    if (azureKeyEl)        azureKeyEl.value        = cfg.azure.key        || '';
-  }
-  // Source defaults to cfg.chatSource (or cfg.chatProvider for legacy
-  // installs that predate the source picker). Falls back to ollama.
-  applySource(cfg?.chatSource || cfg?.chatProvider || 'ollama');
-  if (chatProvider === 'ollama') {
-    loadOllamaModels();
-  } else {
-    setChatStatus(readyAzure() ? 'READY' : 'CONFIGURE AZURE', readyAzure() ? 'ok' : 'amber');
-    chatTagEl.textContent = readyAzure() ? 'AZ' : '!!';
-  }
-}
-
-renderMessages();
-
 // ── Panel resize (4 corner handles — both axes, anchor follows cursor) ─────
 const PANEL_MIN_W = 280;
 const PANEL_MIN_H = 120;
@@ -5050,14 +4461,11 @@ function attachDrag(panel) {
         nx = resolved.left;
         ny = resolved.top;
       }
-      // The PRODUCTIVITY (combo) panel must never slide under the topbar —
-      // its header would end up unreachable behind it (which feels like the
-      // panel is "locked"). Clamp its top to the topbar's bottom edge — this
-      // applies even when Alt bypasses the grid snap.
+      // The PRODUCTIVITY (combo) panel carries the fused control bar as
+      // its first child — its own top edge IS the topbar — so just clamp
+      // to the viewport top so the control bar can't slide off-screen.
       if (panel.classList.contains('panel-combo')) {
-        const topbar = document.querySelector('.topbar-controls');
-        const minTop = topbar ? Math.round(topbar.getBoundingClientRect().bottom) : 0;
-        if (ny < minTop) ny = minTop;
+        if (ny < 0) ny = 0;
       }
       panel.style.left = `${nx}px`;
       panel.style.top  = `${ny}px`;
@@ -5198,9 +4606,9 @@ function attachComboFoldButtons(panel) {
     if (Number.isFinite(inlineTop)) {
       top = inlineTop;
     } else {
-      const topbar = document.querySelector('.topbar-controls');
-      const topbarBottom = topbar ? topbar.getBoundingClientRect().bottom : 60;
-      top = Math.round(topbarBottom + GAP);
+      // The control bar is fused into this panel — no separate topbar
+      // strip to sit beneath. Just inset from the viewport top by GAP.
+      top = GAP;
     }
     panel.style.setProperty('--combo-fold-top',   `${top}px`);
     panel.style.setProperty('--combo-fold-left',  `${Math.round(leftMax + GAP)}px`);
@@ -5292,7 +4700,8 @@ function attachComboFoldButtons(panel) {
 
 document.querySelectorAll('.panel-combo').forEach(attachComboFoldButtons);
 
-// ── Combo panel (Notes / Chat mode toggle) ──────────────────────────────────
+// ── Combo (Productivity) panel — mode switcher across notes, paper,
+//     explore, rec-room, browser, tasks, music, stream. ─────────────
 const comboPanel = document.querySelector('.panel-combo');
 if (comboPanel) {
   const titleEl       = comboPanel.querySelector('#combo-title');
@@ -5300,9 +4709,7 @@ if (comboPanel) {
   const tagEl         = comboPanel.querySelector('#combo-tag');
   const footerLabelEl = comboPanel.querySelector('#combo-footer-label');
   const notesPane     = comboPanel.querySelector('.combo-pane-notes');
-  const chatPane      = comboPanel.querySelector('.combo-pane-chat');
   const notesTabCount = document.getElementById('notes-tab-count');
-  const chatTagSrc    = document.getElementById('chat-tag');
 
   const paperPane    = comboPanel.querySelector('.combo-pane-paper');
   const paperStatsEl = document.getElementById('paper-stats');
@@ -5370,12 +4777,20 @@ if (comboPanel) {
         ? (window._bgmState.genre || '—').toUpperCase()
         : 'IDLE';
       footerLabelEl.textContent = 'MUSIC STATUS';
+    } else if (mode === 'stream') {
+      titleEl.innerHTML = 'PRODUCTIVITY <em>S1</em>';
+      codeEl.textContent = 'STREAM · EMBEDS';
+      tagEl.textContent = '—';
+      footerLabelEl.textContent = 'STREAM STATUS';
     } else {
-      titleEl.innerHTML = 'PRODUCTIVITY <em>X1</em>';
-      const provider = document.getElementById('chat-provider')?.value;
-      codeEl.textContent = `CHAT · ${provider === 'azure' ? 'AZURE' : 'OLLAMA'}`;
-      tagEl.textContent = chatTagSrc?.textContent || '—';
-      footerLabelEl.textContent = 'CHAT STATUS';
+      // Unknown mode — fall back to notes header so the chrome doesn't
+      // strand with a stale label. setComboMode validates the input
+      // against VALID before dispatch, so this branch should be
+      // unreachable in practice.
+      titleEl.innerHTML = 'PRODUCTIVITY <em>N1</em>';
+      codeEl.textContent = 'NOTES · SCRATCHPAD';
+      tagEl.textContent = '—';
+      footerLabelEl.textContent = 'NOTES STATUS';
     }
   }
 
@@ -5426,11 +4841,10 @@ if (comboPanel) {
   }
 
   function setComboMode(mode, persist = true) {
-    const VALID = new Set(['notes', 'chat', 'paper', 'explore', 'visualizer', 'browser', 'tasks', 'music', 'stream']);
+    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'browser', 'tasks', 'music', 'stream']);
     if (!VALID.has(mode)) mode = 'notes';
     comboPanel.dataset.mode = mode;
     notesPane     ?.classList.toggle('is-visible', mode === 'notes');
-    chatPane      ?.classList.toggle('is-visible', mode === 'chat');
     paperPane     ?.classList.toggle('is-visible', mode === 'paper');
     explorePane   ?.classList.toggle('is-visible', mode === 'explore');
     visualizerPane?.classList.toggle('is-visible', mode === 'visualizer');
@@ -5537,11 +4951,9 @@ if (comboPanel) {
   }
 
   // Keep the visible tag/code chip in sync with whichever mode is active —
-  // the underlying notes/chat code keeps writing to the original hidden IDs.
+  // the underlying notes code keeps writing to the original hidden IDs.
   if (notesTabCount) new MutationObserver(paintComboHeader).observe(notesTabCount, { childList: true, characterData: true, subtree: true });
-  if (chatTagSrc)    new MutationObserver(paintComboHeader).observe(chatTagSrc,    { childList: true, characterData: true, subtree: true });
   if (paperStatsEl)  new MutationObserver(paintComboHeader).observe(paperStatsEl,  { childList: true, characterData: true, subtree: true });
-  document.getElementById('chat-provider')?.addEventListener('change', paintComboHeader);
 
   // ── EXPLORE tab ──────────────────────────────────────────────────────
   // Lazy combo pane — code lives in features/explore.js, loaded on first
@@ -5666,7 +5078,7 @@ if (paperEditorEl && paperToolbarEl) {
 // Per-element strobe staggering — each meter/row/cell gets a random phase.
 const STROBE_SELECTOR =
   '.meter, .time-row, .temp-row, .storage-row, .net-row, .gpu-mem-row, ' +
-  '.note-tab, .chat-msg, .weather-left, .weather-right';
+  '.note-tab, .weather-left, .weather-right';
 
 function randomStrobeDelay() {
   return `-${(Math.random() * 7).toFixed(2)}s`;
@@ -5682,7 +5094,7 @@ function staggerStrobeAll(root = document) {
 }
 
 // Watch for dynamically-added strobe targets (storage rows, gpu mem rows,
-// chat messages, note tabs) and assign each a random phase.
+// note tabs) and assign each a random phase.
 const _strobeObserver = new MutationObserver((mutations) => {
   for (const m of mutations) {
     for (const node of m.addedNodes) {
@@ -5813,7 +5225,6 @@ staggerStrobeAll();
   }
 
   initNotes(cfg);
-  initChat(cfg);
 
   if (cfg?.altCity)  applyAltLocation(cfg.altCity);
   // cfg.altCity2 ignored — alt-zone 2 row was removed from the clock.
@@ -5926,9 +5337,10 @@ document.querySelector('#recall-panels-btn')?.addEventListener('click', async ()
 async function applyStartupLayout() {
   const vpW = window.innerWidth;
   const vpH = window.innerHeight;
-  // Panels start flush below the fixed topbar.
-  const topbar = document.querySelector('.topbar-controls');
-  const top = topbar ? Math.round(topbar.getBoundingClientRect().bottom) : 0;
+  // The topbar is now fused into the Productivity panel as its first
+  // child, so there's no separate strip to sit beneath — every panel
+  // tiles from the viewport top.
+  const top = 0;
   const availH = vpH - top;
 
   // Side columns: ~21% of the width each, flush to the screen edges;
@@ -7468,9 +6880,6 @@ profilePicCamToggleBtn?.addEventListener('click', (ev) => {
   // stream as "camera is live right now". Toggle accordingly.
   if (_webcamStream) {
     if (typeof stopWebcam === 'function') stopWebcam();
-    // If Discord drove the cam, clear that flag so when Discord
-    // turns off later we don't try to stop an already-stopped cam.
-    _discordDroveWebcam = false;
   } else {
     if (typeof startWebcam === 'function') startWebcam().catch?.(() => {});
   }

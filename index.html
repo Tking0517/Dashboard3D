@@ -194,163 +194,6 @@
         </div>
       </div>
 
-      <div class="topbar-controls">
-        <!-- ── Theme / appearance group ─────────────────────────────── -->
-        <span id="user-name-chip" class="theme-name user-name-chip" title="Logged-in user" hidden>—</span>
-        <button id="setup-btn" class="topbar-btn" type="button" title="Run guided setup" aria-label="Run guided setup">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 0 1-4 0v-.08a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06A2 2 0 1 1 4.13 17l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 0 1 0-4h.08A1.7 1.7 0 0 0 4.65 9 1.7 1.7 0 0 0 4.31 7.13l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01A1.7 1.7 0 0 0 10 3.08V3a2 2 0 0 1 4 0v.08a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 0 1 0 4h-.08a1.7 1.7 0 0 0-1.56 1.03Z"/>
-          </svg>
-        </button>
-        <span id="version-chip" class="theme-name version-chip" title="Dashboard3D version">v—</span>
-
-        <button id="bg-pattern-btn" class="topbar-btn" type="button" title="Background pattern" aria-label="Background pattern">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="7" height="7"/>
-            <circle cx="17.5" cy="6.5" r="3.5"/>
-            <path d="M3 17 L7 13 L11 17 Z"/>
-            <path d="M14 14 L21 14 L21 21 L14 21 Z M14 17.5 L21 17.5"/>
-          </svg>
-        </button>
-
-        <div class="hz-control" id="hz-control" data-no-drag="true" title="Global refresh rate · 5 Hz step · 10–200 Hz">
-          <button id="hz-down" class="topbar-btn hz-btn" type="button" aria-label="Slower">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 10 L12 16 L17 10 Z"/></svg>
-          </button>
-          <span id="hz-value" class="theme-name hz-value">10 Hz</span>
-          <button id="hz-up" class="topbar-btn hz-btn" type="button" aria-label="Faster">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14 L12 8 L17 14 Z"/></svg>
-          </button>
-        </div>
-
-        <div class="theme-picker" id="theme-picker" data-no-drag="true">
-          <button id="theme-cat-cyber" class="theme-cat-btn" type="button" title="Cyber themes">CYBER</button>
-          <button id="theme-cat-matte" class="theme-cat-btn" type="button" title="Matte themes">MATTE</button>
-          <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next colour" aria-label="Next theme colour">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12 A9 9 0 1 1 12 3"/>
-              <polyline points="21,3 21,9 15,9"/>
-            </svg>
-          </button>
-          <span id="theme-name" class="theme-name" title="Current theme">DEFAULT</span>
-        </div>
-
-        <span id="font-name" class="theme-name">DEFAULT</span>
-        <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 19 L9 5 L13 19"/>
-            <path d="M6.5 14 H11.5"/>
-            <path d="M16 19 V9"/>
-            <path d="M14 11.5 Q16 9 18 11.5"/>
-          </svg>
-        </button>
-
-        <button id="invert-btn" class="topbar-btn" type="button" title="Invert colors" aria-label="Invert colors">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="9"/>
-            <path d="M12 3 A 9 9 0 0 1 12 21 Z" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-
-        <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
-
-        <!-- ── Panel debug group ────────────────────────────────────── -->
-        <button id="recall-panels-btn" class="topbar-btn" type="button" title="Recall panels (snap any off-screen panel back into the viewport)" aria-label="Recall panels">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="6" y="6" width="12" height="12"/>
-            <path d="M2 6 L6 6 L6 2"/>
-            <path d="M22 6 L18 6 L18 2"/>
-            <path d="M2 18 L6 18 L6 22"/>
-            <path d="M22 18 L18 18 L18 22"/>
-          </svg>
-        </button>
-
-        <!-- Auto-orient — recomputes the panel layout to fit the current
-             viewport: left + right side columns, productivity centered,
-             audio grids at the bottom of each column. Same code path as
-             the first-launch side-arrange, just on demand. -->
-        <button id="auto-orient-btn" class="topbar-btn" type="button" title="Auto-orient — re-fit all panels to the current window (left/right columns, productivity centered, audio at bottom)" aria-label="Auto-orient panels">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2"  y="3"  width="4"  height="18"/>
-            <rect x="8"  y="3"  width="8"  height="14"/>
-            <rect x="18" y="3"  width="4"  height="18"/>
-            <path d="M8 19 L16 19" stroke-dasharray="2 2"/>
-          </svg>
-        </button>
-
-        <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
-
-        <!-- ── Mode + system group ──────────────────────────────────── -->
-        <button id="lock-ui-btn" class="topbar-btn" type="button" title="Lock UI (prevents panel drag, resize, and topbar reorder)" aria-label="Lock UI">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="5" y="11" width="14" height="9" rx="1"/>
-            <path d="M8 11 V7 a4 4 0 0 1 8 0 V11"/>
-            <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-
-        <button id="diag-btn" class="topbar-btn" type="button" title="Toggle diagnostics overlay" aria-label="Toggle diagnostics overlay">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18"/>
-            <path d="M3 9 H21 M9 3 V21"/>
-            <circle cx="6" cy="6" r="0.8" fill="currentColor"/>
-          </svg>
-        </button>
-
-        <button id="flush-ram-btn" class="topbar-btn" type="button" title="Flush RAM (drops working sets to standby for every accessible process)" aria-label="Flush RAM">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="8" width="18" height="9" rx="1"/>
-            <path d="M7 8 V6 M11 8 V6 M15 8 V6 M19 8 V6"/>
-            <path d="M7 17 V19 M11 17 V19 M15 17 V19 M19 17 V19"/>
-            <path d="M6 12 H10 M14 12 H18"/>
-          </svg>
-        </button>
-
-        <button id="sleep-btn" class="topbar-btn" type="button" title="Sleep — suspend this PC to RAM (asks to confirm)" aria-label="Sleep">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 13 A9 9 0 1 1 11 3 A7 7 0 0 0 21 13 Z"/>
-          </svg>
-        </button>
-
-        <button id="power-btn" class="topbar-btn" type="button" title="Power — power off, restart, or sleep this PC" aria-label="Power menu">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3 V11"/>
-            <path d="M7.5 6.5 A7 7 0 1 0 16.5 6.5"/>
-          </svg>
-        </button>
-
-        <button id="gamemode-btn" class="topbar-btn" type="button" title="Game Mode — launch Steam Big Picture" aria-label="Game Mode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M7 11 H11 M9 9 V13"/>
-            <circle cx="15.5" cy="10.5" r="0.6" fill="currentColor"/>
-            <circle cx="17.5" cy="13" r="0.6" fill="currentColor"/>
-            <path d="M6.5 7 H15 A4.5 4.5 0 0 1 19.5 11.5 L20 15 A2.4 2.4 0 0 1 15.6 16.4 L14 14 H10 L8.4 16.4 A2.4 2.4 0 0 1 4 15 L4.6 11 A4.5 4.5 0 0 1 6.5 7 Z"/>
-          </svg>
-        </button>
-
-        <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
-          <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
-            <path d="M16 9 Q18 12 16 15"/>
-            <path d="M19 7 Q22 12 19 17"/>
-          </svg>
-          <svg class="sfx-icon-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
-            <path d="M16 9 L22 15"/>
-            <path d="M22 9 L16 15"/>
-          </svg>
-        </button>
-
-        <span id="topbar-div-3" class="topbar-divider" title="Drag to reposition divider"></span>
-
-        <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M6 6 L18 18"/>
-            <path d="M18 6 L6 18"/>
-          </svg>
-        </button>
-      </div>
 
       <div class="hud">
 
@@ -672,6 +515,163 @@
           <!-- Combined NOTES + CHAT panel — middle of row 2.
                One panel with a mode toggle so each retains its own UI. -->
           <section class="panel panel-combo" data-mode="notes">
+      <div class="topbar-controls">
+        <!-- ── Theme / appearance group ─────────────────────────────── -->
+        <span id="user-name-chip" class="theme-name user-name-chip" title="Logged-in user" hidden>—</span>
+        <button id="setup-btn" class="topbar-btn" type="button" title="Run guided setup" aria-label="Run guided setup">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 0 1-4 0v-.08a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06A2 2 0 1 1 4.13 17l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 0 1 0-4h.08A1.7 1.7 0 0 0 4.65 9 1.7 1.7 0 0 0 4.31 7.13l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01A1.7 1.7 0 0 0 10 3.08V3a2 2 0 0 1 4 0v.08a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 0 1 0 4h-.08a1.7 1.7 0 0 0-1.56 1.03Z"/>
+          </svg>
+        </button>
+        <span id="version-chip" class="theme-name version-chip" title="Dashboard3D version">v—</span>
+
+        <button id="bg-pattern-btn" class="topbar-btn" type="button" title="Background pattern" aria-label="Background pattern">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7"/>
+            <circle cx="17.5" cy="6.5" r="3.5"/>
+            <path d="M3 17 L7 13 L11 17 Z"/>
+            <path d="M14 14 L21 14 L21 21 L14 21 Z M14 17.5 L21 17.5"/>
+          </svg>
+        </button>
+
+        <div class="hz-control" id="hz-control" data-no-drag="true" title="Global refresh rate · 5 Hz step · 10–200 Hz">
+          <button id="hz-down" class="topbar-btn hz-btn" type="button" aria-label="Slower">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 10 L12 16 L17 10 Z"/></svg>
+          </button>
+          <span id="hz-value" class="theme-name hz-value">10 Hz</span>
+          <button id="hz-up" class="topbar-btn hz-btn" type="button" aria-label="Faster">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 14 L12 8 L17 14 Z"/></svg>
+          </button>
+        </div>
+
+        <div class="theme-picker" id="theme-picker" data-no-drag="true">
+          <button id="theme-cat-cyber" class="theme-cat-btn" type="button" title="Cyber themes">CYBER</button>
+          <button id="theme-cat-matte" class="theme-cat-btn" type="button" title="Matte themes">MATTE</button>
+          <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next colour" aria-label="Next theme colour">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12 A9 9 0 1 1 12 3"/>
+              <polyline points="21,3 21,9 15,9"/>
+            </svg>
+          </button>
+          <span id="theme-name" class="theme-name" title="Current theme">DEFAULT</span>
+        </div>
+
+        <span id="font-name" class="theme-name">DEFAULT</span>
+        <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 19 L9 5 L13 19"/>
+            <path d="M6.5 14 H11.5"/>
+            <path d="M16 19 V9"/>
+            <path d="M14 11.5 Q16 9 18 11.5"/>
+          </svg>
+        </button>
+
+        <button id="invert-btn" class="topbar-btn" type="button" title="Invert colors" aria-label="Invert colors">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 3 A 9 9 0 0 1 12 21 Z" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
+        <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
+
+        <!-- ── Panel debug group ────────────────────────────────────── -->
+        <button id="recall-panels-btn" class="topbar-btn" type="button" title="Recall panels (snap any off-screen panel back into the viewport)" aria-label="Recall panels">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="6" width="12" height="12"/>
+            <path d="M2 6 L6 6 L6 2"/>
+            <path d="M22 6 L18 6 L18 2"/>
+            <path d="M2 18 L6 18 L6 22"/>
+            <path d="M22 18 L18 18 L18 22"/>
+          </svg>
+        </button>
+
+        <!-- Auto-orient — recomputes the panel layout to fit the current
+             viewport: left + right side columns, productivity centered,
+             audio grids at the bottom of each column. Same code path as
+             the first-launch side-arrange, just on demand. -->
+        <button id="auto-orient-btn" class="topbar-btn" type="button" title="Auto-orient — re-fit all panels to the current window (left/right columns, productivity centered, audio at bottom)" aria-label="Auto-orient panels">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2"  y="3"  width="4"  height="18"/>
+            <rect x="8"  y="3"  width="8"  height="14"/>
+            <rect x="18" y="3"  width="4"  height="18"/>
+            <path d="M8 19 L16 19" stroke-dasharray="2 2"/>
+          </svg>
+        </button>
+
+        <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
+
+        <!-- ── Mode + system group ──────────────────────────────────── -->
+        <button id="lock-ui-btn" class="topbar-btn" type="button" title="Lock UI (prevents panel drag, resize, and topbar reorder)" aria-label="Lock UI">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="5" y="11" width="14" height="9" rx="1"/>
+            <path d="M8 11 V7 a4 4 0 0 1 8 0 V11"/>
+            <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
+        <button id="diag-btn" class="topbar-btn" type="button" title="Toggle diagnostics overlay" aria-label="Toggle diagnostics overlay">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18"/>
+            <path d="M3 9 H21 M9 3 V21"/>
+            <circle cx="6" cy="6" r="0.8" fill="currentColor"/>
+          </svg>
+        </button>
+
+        <button id="flush-ram-btn" class="topbar-btn" type="button" title="Flush RAM (drops working sets to standby for every accessible process)" aria-label="Flush RAM">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="8" width="18" height="9" rx="1"/>
+            <path d="M7 8 V6 M11 8 V6 M15 8 V6 M19 8 V6"/>
+            <path d="M7 17 V19 M11 17 V19 M15 17 V19 M19 17 V19"/>
+            <path d="M6 12 H10 M14 12 H18"/>
+          </svg>
+        </button>
+
+        <button id="sleep-btn" class="topbar-btn" type="button" title="Sleep — suspend this PC to RAM (asks to confirm)" aria-label="Sleep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 13 A9 9 0 1 1 11 3 A7 7 0 0 0 21 13 Z"/>
+          </svg>
+        </button>
+
+        <button id="power-btn" class="topbar-btn" type="button" title="Power — power off, restart, or sleep this PC" aria-label="Power menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3 V11"/>
+            <path d="M7.5 6.5 A7 7 0 1 0 16.5 6.5"/>
+          </svg>
+        </button>
+
+        <button id="gamemode-btn" class="topbar-btn" type="button" title="Game Mode — launch Steam Big Picture" aria-label="Game Mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 11 H11 M9 9 V13"/>
+            <circle cx="15.5" cy="10.5" r="0.6" fill="currentColor"/>
+            <circle cx="17.5" cy="13" r="0.6" fill="currentColor"/>
+            <path d="M6.5 7 H15 A4.5 4.5 0 0 1 19.5 11.5 L20 15 A2.4 2.4 0 0 1 15.6 16.4 L14 14 H10 L8.4 16.4 A2.4 2.4 0 0 1 4 15 L4.6 11 A4.5 4.5 0 0 1 6.5 7 Z"/>
+          </svg>
+        </button>
+
+        <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
+          <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
+            <path d="M16 9 Q18 12 16 15"/>
+            <path d="M19 7 Q22 12 19 17"/>
+          </svg>
+          <svg class="sfx-icon-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
+            <path d="M16 9 L22 15"/>
+            <path d="M22 9 L16 15"/>
+          </svg>
+        </button>
+
+        <span id="topbar-div-3" class="topbar-divider" title="Drag to reposition divider"></span>
+
+        <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 6 L18 18"/>
+            <path d="M18 6 L6 18"/>
+          </svg>
+        </button>
+      </div>
             <header class="panel-header">
               <span class="panel-title" id="combo-title">PRODUCTIVITY <em>N1</em></span>
               <span class="panel-code" id="combo-code">NOTES · SCRATCHPAD</span>
@@ -679,7 +679,6 @@
             </header>
             <div class="combo-mode-tabs">
               <button type="button" class="combo-mode-tab is-active" data-mode="notes">NOTES</button>
-              <button type="button" class="combo-mode-tab" data-mode="chat">CHAT</button>
               <button type="button" class="combo-mode-tab" data-mode="paper">PAPER</button>
               <button type="button" class="combo-mode-tab" data-mode="explore">EXPLORE</button>
               <button type="button" class="combo-mode-tab" data-mode="visualizer">REC ROOM</button>
@@ -698,63 +697,6 @@
                   spellcheck="false"
                   placeholder="START TYPING…"
                 ></textarea>
-              </div>
-
-              <!-- CHAT pane -->
-              <div class="combo-pane combo-pane-chat" data-chat-source="ollama">
-                <div class="chat-toolbar">
-                  <!-- SOURCE picker: which chat stream the pane displays.
-                       OLLAMA/AZURE are LLM providers (existing); DISCORD
-                       mirrors DM/mention notifications from the STREAM
-                       tab's Discord BrowserView; ALL is a merged view
-                       (for when more sources land). The provider/model
-                       dropdowns hide for non-LLM sources via the
-                       [data-chat-source=…] selector. -->
-                  <select id="chat-source" class="chat-select chat-select-narrow" title="Chat source">
-                    <option value="ollama">OLLAMA</option>
-                    <option value="azure">AZURE</option>
-                    <option value="discord">DISCORD</option>
-                    <option value="facebook">FACEBOOK</option>
-                    <option value="all">ALL</option>
-                  </select>
-                  <!-- Hidden legacy provider select — kept so existing
-                       chat.js logic that reads its value still works.
-                       Mirrored from #chat-source by chat init code. -->
-                  <select id="chat-provider" class="chat-select chat-select-narrow" hidden>
-                    <option value="ollama">OLLAMA</option>
-                    <option value="azure">AZURE</option>
-                  </select>
-                  <select id="chat-model" class="chat-select">
-                    <option value="">— LOADING —</option>
-                  </select>
-                  <button id="chat-auto" class="chat-clear chat-auto" type="button" title="Auto-config Azure via az CLI">AUTO</button>
-                  <!-- Discord-only debug + sync controls. Visible when
-                       chat-source is 'discord' or 'all'.
-                         FETCH — manual re-sweep of the embed's current DOM
-                                 (whatever channel/DM is open in Discord).
-                         TEST  — fires __dash3dSelfTest through the bridge
-                                 → main relay → renderer to verify pipeline.
-                         DEV   — opens DevTools on the Discord BrowserView. -->
-                  <button id="chat-discord-fetch" class="chat-clear chat-discord-debug" type="button" title="Re-sweep the Discord embed's DOM for messages now">FETCH</button>
-                  <button id="chat-discord-test" class="chat-clear chat-discord-debug" type="button" title="Fire a pipeline self-test through the Discord embed">TEST</button>
-                  <button id="chat-discord-devtools" class="chat-clear chat-discord-debug" type="button" title="Open DevTools on the Discord BrowserView">DEV</button>
-                  <button id="chat-clear" class="chat-clear" type="button" title="Clear chat">×</button>
-                </div>
-                <div class="chat-azure-config" id="chat-azure-config" hidden>
-                  <input id="azure-endpoint" class="chat-input-line" type="text" placeholder="ENDPOINT · https://YOUR-RESOURCE.openai.azure.com" spellcheck="false" autocomplete="off" />
-                  <div class="chat-azure-row">
-                    <input id="azure-deployment" class="chat-input-line" type="text" placeholder="DEPLOYMENT NAME" spellcheck="false" autocomplete="off" />
-                    <input id="azure-version" class="chat-input-line chat-input-narrow" type="text" placeholder="API VERSION" spellcheck="false" autocomplete="off" />
-                  </div>
-                  <input id="azure-key" class="chat-input-line" type="password" placeholder="API KEY" spellcheck="false" autocomplete="off" />
-                </div>
-                <div class="chat-messages" id="chat-messages">
-                  <div class="chat-empty">CHAT IS EMPTY · TYPE BELOW TO START</div>
-                </div>
-                <div class="chat-input-row">
-                  <textarea id="chat-input" class="chat-input" placeholder="ASK ANYTHING…" spellcheck="false" rows="1"></textarea>
-                  <button id="chat-send" class="chat-send" type="button">SEND</button>
-                </div>
               </div>
 
               <!-- PAPER pane (basic word processor) -->
@@ -1662,11 +1604,9 @@
             <footer class="panel-footer">
               <span class="footer-label" id="combo-footer-label">NOTES STATUS</span>
               <span class="footer-readout combo-footer-notes" id="notes-status">—</span>
-              <span class="footer-readout combo-footer-chat"  id="chat-footer">CONNECTING…</span>
             </footer>
           </section>
           <span id="notes-tab-count" hidden>—</span>
-          <span id="chat-tag" hidden>—</span>
 
           <!-- Storage stacked above Thermal -->
           <div class="panel-stack">
