@@ -198,7 +198,25 @@ contextBridge.exposeInMainWorld('dash', {
   // fully opaque (default), 0.4 = 60% transparent. Mirrors what the
   // YouTube popout does via BrowserWindow.setOpacity, but for the
   // in-pane browser which has no native window-level opacity.
-  browserSetOpacity:    (o) => ipcRenderer.invoke('browser-set-opacity', o),
+  // Browser focus mode — inject CSS into the active BV that dims +
+  // blurs everything except video elements. Boolean argument enables
+  // or disables. Pairs with the FOCUS button in the browser pane.
+  browserSetFocus:      (on) => ipcRenderer.invoke('browser-set-focus', !!on),
+  // Browser audio-only mode helpers. The renderer extracts an audio-
+  // only stream URL via yt-dlp, pauses + hides the BV's <video>, and
+  // plays the audio from an in-renderer <audio> element.
+  browserGetActiveState: ()   => ipcRenderer.invoke('browser-get-active-state'),
+  browserPauseVideo:     ()   => ipcRenderer.invoke('browser-pause-video'),
+  browserResumeVideo:    (t)  => ipcRenderer.invoke('browser-resume-video', t),
+  ytGetAudioStream:      (u)  => ipcRenderer.invoke('yt:get-audio-stream', u),
+  // Subscribe to "user clicked inside the BV while focus was armed."
+  // Main awaits a mousedown via executeJavaScript and pushes this
+  // event when it fires; renderer responds by tearing focus mode down.
+  onBrowserFocusClicked: (fn) => {
+    const handler = () => { try { fn(); } catch {} };
+    ipcRenderer.on('browser-focus-clicked', handler);
+    return () => ipcRenderer.removeListener('browser-focus-clicked', handler);
+  },
   // Visualizer "mirror active video" — returns { id, name } of the
   // desktopCapturer source most likely showing the active video right
   // now (YT popout if open, else dashboard window, else first screen).
@@ -294,5 +312,26 @@ contextBridge.exposeInMainWorld('dash', {
     const handler = (_e, url) => callback(url);
     ipcRenderer.on('browser-newtab-request', handler);
     return () => ipcRenderer.removeListener('browser-newtab-request', handler);
+  },
+
+  // STEAM pane — dedicated BrowserView for the Steam web store/library.
+  // Game launches use the steam://run/<appid> URL protocol so the native
+  // Steam client takes over. FULLSCREEN minimises this window.
+  steamBounds:    (rect)  => ipcRenderer.invoke('steam-bounds', rect),
+  steamShow:      ()      => ipcRenderer.invoke('steam-show'),
+  steamHide:      ()      => ipcRenderer.invoke('steam-hide'),
+  steamBack:      ()      => ipcRenderer.invoke('steam-back'),
+  steamForward:   ()      => ipcRenderer.invoke('steam-forward'),
+  steamReload:    ()      => ipcRenderer.invoke('steam-reload'),
+  steamHome:      ()      => ipcRenderer.invoke('steam-home'),
+  steamLibrary:   ()      => ipcRenderer.invoke('steam-library'),
+  steamNavigate:  (url)   => ipcRenderer.invoke('steam-navigate', url),
+  steamGetState:  ()      => ipcRenderer.invoke('steam-get-state'),
+  steamLaunch:    (appid) => ipcRenderer.invoke('steam-launch', appid),
+  steamMinimizeDashboard: () => ipcRenderer.invoke('steam-minimize-dashboard'),
+  onSteamEvent: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on('steam-event', handler);
+    return () => ipcRenderer.removeListener('steam-event', handler);
   },
 });

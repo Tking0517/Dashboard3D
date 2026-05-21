@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.9.0-alpha.3] — 2026-05-20
+
+**EDIT ROOM cut page, BROWSER focus/audio modes, STEAM pane, theme glyph fix, USB flasher, dead-code sweep.**
+
+### EDIT ROOM (new combo-pane)
+- New PRODUCTIVITY tab `EDIT` — DaVinci-Cut-flavored video editor: bins · viewer · inspect (3-col), 2 video + 1 audio tracks, JKL transport, I/O markers, snap-to-edges, razor tool, drag-to-move clips with a 4 px click/drag dead-band so a single click on a clip scrubs the playhead.
+- Dedicated ruler scrub: clicking + dragging on the ruler moves the red playhead and live-scrubs the viewer (`_onRulerMouseDown` + `_scrubToClick`).
+- HTTP Range support on the `dash3d-file://` protocol handler — required for HTML5 `<video>` seek. Returns `206 Partial Content` with `Content-Range`/`Accept-Ranges: bytes` for ranged requests, full content otherwise.
+- CSS `zoom: calc(1 / 1.2)` on `.combo-pane-edit` counters the `.combo-body` ancestor's `zoom: 1.2` so `clientX` and `getBoundingClientRect()` agree — fixes a 131 px click-offset that had razor cuts and playhead drops landing in the wrong place.
+- REC ROOM hand-off: the EDIT button in the visualizer re-enabled and now passes the playing clip path to EDIT ROOM via `window._editHandoff` + `setComboMode('edit')`.
+
+### BROWSER pane
+- **FOCUS mode**: replaces the old `100%` / `SEETHRU` buttons with a single `FOCUS` button. Dims the entire screen except the video by injecting a 4-panel spotlight around the video's rect (top/bottom/left/right), kept in sync with scroll + resize. Survives YouTube's nested stacking contexts (a z-index lift won't escape them). Click anywhere in the BV or press Escape to exit. BV scrollbars hidden during focus via `insertCSS`. Works in dashboard fullscreen too.
+- **AUDIO-only mode**: a `♪` button pauses the BV video and pipes just the audio stream (extracted via `yt-dlp -f bestaudio/best -g`) through a hidden `<audio>` element so CPU/GPU drop. Auto-enables on browser tab switch. Resume re-plays the video from the captured timestamp.
+- **REFRESH button** in the topbar near sleep/power — global app refresh.
+- **`dash3d-file://` Range support** (see EDIT ROOM above) also unlocks seeking for any future BV-side video that uses the custom protocol.
+
+### STEAM pane (new combo-pane)
+- New PRODUCTIVITY tab `STEAM` — a single dedicated BrowserView pointed at `store.steampowered.com` with its own `persist:dash-steam` partition so Steam logins don't mix with the regular BROWSER pane.
+- Nav row: BACK / FWD / RELOAD / HOME / LIB / URL field / AppID field / LAUNCH / FULLSCREEN.
+- URL field doubles as a Steam search field (bare queries route to `/search/?term=…`).
+- LAUNCH fires `steam://run/<appid>` via `shell.openExternal` — the native Steam client takes over the actual process spawn. AppID auto-fills when navigating to a `/app/<id>/` store page; manual override via the AppID input. Enter on either field triggers launch.
+- FULLSCREEN minimises the dashboard window so the launched game (a separate native process owned by Steam) takes the whole screen.
+- `steam://` links found inside the embedded BV are intercepted and handed off to the external client too.
+
+### Theme consistency
+- `font-variant-emoji: text` on `html, body` + every glyph-bearing button class (`.edit-transport-btn`, `.edit-tool-btn`, `.browser-navbtn`, `.steam-navbtn`, etc.) — forces ambiguous Unicode (▶ ⏸ ✂ ⚡ ♪) into text presentation so they pick up the theme's `currentColor` instead of OS emoji rendering as fixed blue/colorful.
+
+### Linux appliance / ISO
+- New `linux-kiosk/flash-usb.ps1` — elevated PowerShell raw-writer that flashes the latest ISO to a specific `Get-Disk` number after verifying `FriendlyName -like "*Flash Drive*"` and `IsBoot/IsSystem` are false. Force-dismounts every volume on the target then `Clear-Disk -RemoveData -RemoveOEM`s the partition table before opening `\\.\PhysicalDriveN`, otherwise Windows volume manager re-enumerates the device mid-stream and the write dies around 88% with "The device is not ready."
+
+### Cleanup — dead code sweep
+- Removed `browser-set-opacity` IPC handler + `_applyBvOpacity` helper + 3 state vars in `main.js` (~46 lines) — legacy backend for the deleted 100%/SEETHRU buttons, zero callers.
+- Removed `browserSetOpacity` bridge in `preload.js`.
+- Removed orphan `<div id="edit-tl-grid">` markup left over from the deleted grid overlay.
+- Removed unused `id="fr-title"` attribute from the GUIDED SETUP card title.
+- Verified zero callers across IPC channels, preload bridges, dynamic `dash[name]` lookups, and CSS selectors before deletion.
+
 ## [0.9.0-alpha.2] — 2026-05-15
 
 **Performance overhaul, zen-mode rewrite, browser scraper + filter chips, inline media viewer, sleep button, theme/sensor polish.**

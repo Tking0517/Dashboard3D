@@ -1363,6 +1363,13 @@ html, body {
   overflow: hidden;
   user-select: none;
   -webkit-font-smoothing: antialiased;
+  /* Default ALL unicode glyphs (▶ ⏸ ✂ ⚡ ↔ ⤓ ♪ etc.) to TEXT
+     presentation so they inherit the theme's `color` token instead of
+     being rendered as full-color emoji by the OS. Without this,
+     transport buttons and tool icons stayed blue regardless of which
+     theme was active. Any element that genuinely wants emoji can
+     override with `font-variant-emoji: emoji`. */
+  font-variant-emoji: text;
 }
 
 #app { position: relative; width: 100vw; height: 100vh; }
@@ -2070,6 +2077,15 @@ body[data-bg-pattern="radial"] .bg-grid::after {
 .panel-combo > .panel-header,
 .panel-combo > .combo-mode-tabs,
 .panel-combo > .combo-body { zoom: 1.2; }
+/* CRITICAL — undo the 1.2× zoom on the EDIT pane only. Chromium's CSS
+   `zoom` makes mouse events and getBoundingClientRect report in
+   inconsistent coordinate systems (clientX scales by 1.2, rect.left
+   doesn't), which produced a 0.2 × rect.left offset on every click in
+   the timeline. The EDIT pane does pixel-precise math (clip rendering,
+   playhead positioning, drag-drop) so it CANNOT inherit `zoom`. Other
+   panes (notes, paper, browser) keep the 1.2× — they don't read mouse
+   coords manually, so they were fine. */
+.combo-pane-edit { zoom: calc(1 / 1.2); }
 /* Reorder feedback: dragged item fades to half-opacity while others stay
    visible so the user can see the slot they're dropping into. The browser
    draws the standard ghost preview at the cursor automatically. */
@@ -7598,6 +7614,9 @@ body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-edit-pane {
   cursor: pointer;
   flex: 0 0 auto;
   padding: 0;
+  /* Text-presentation for any unicode glyphs (e.g. ♪ on the AUDIO chip)
+     so they pick up the theme's currentColor instead of OS emoji. */
+  font-variant-emoji: text;
 }
 .browser-navbtn svg { width: 14px; height: 14px; }
 .browser-navbtn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
@@ -7934,21 +7953,101 @@ body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-edit-pane {
   color: var(--amber);
 }
 
-/* Opacity-toggle buttons — text labels instead of icons, narrow so they
-   sit alongside the SVG-icon nav buttons without ballooning the row. */
-.browser-opacity-btn {
+/* FOCUS / AUDIO buttons — text labels instead of icons. Toggle body-
+   level modes: focus dims everything except video; audio plays just
+   the audio track and saves CPU/GPU on the video pipeline. */
+.browser-focus-btn,
+.browser-audio-btn {
   font-family: var(--font-tech);
   font-size: 10px;
   letter-spacing: 0.08em;
-  padding: 0 7px;
-  min-width: 48px;
+  padding: 0 9px;
+  min-width: 56px;
   width: auto;
 }
-.browser-opacity-btn.is-active {
+.browser-focus-btn.is-active,
+.browser-audio-btn.is-active {
   border-color: var(--accent);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--bg, #000);
+  background: var(--accent);
+  font-weight: 700;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
 }
+.browser-audio-btn.is-loading {
+  /* While yt-dlp is resolving the audio stream URL. Subtle pulse
+     so the user knows the click registered. */
+  border-color: var(--amber, #ffcc66);
+  color: var(--amber, #ffcc66);
+  animation: browser-audio-pulse 0.9s ease-in-out infinite;
+}
+@keyframes browser-audio-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+/* Status chip — bottom-right of the BV stage, shows "♪ TITLE" when
+   audio-only is on. Lets the user see what's playing without the
+   video being visible. */
+.browser-audio-chip {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 30;
+  padding: 6px 12px;
+  background: color-mix(in srgb, #000 80%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  backdrop-filter: blur(4px);
+  /* ♪ glyph picks up the accent color instead of OS emoji palette. */
+  font-variant-emoji: text;
+}
+.browser-audio-chip[hidden] { display: none; }
+
+/* Focus-mode renderer overlay. A real DIV (not ::after) so it can
+   capture clicks to exit. Covers the whole renderer viewport at 92%
+   black + 12px backdrop-blur. The BrowserView is an OS-level overlay
+   rendered above the renderer DOM, so the BV's webpage (including the
+   video and main-side 4-panel spotlight) still shows through this
+   overlay. `overflow:hidden` on body kills any phantom scrollbar
+   focus mode might otherwise introduce. */
+body.is-browser-focus-mode { overflow: hidden; }
+.browser-focus-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);   /* 20% lighter than the original 0.92 */
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 999999;
+  pointer-events: auto;       /* capture clicks → exit focus mode */
+  cursor: pointer;
+}
+/* The Escape key hint that pops up to remind the user how to exit. */
+.focus-mode-hint {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 999999;
+  padding: 8px 16px;
+  background: color-mix(in srgb, #000 70%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.focus-mode-hint.is-shown { opacity: 1; }
 .browser-results {
   /* Scroll the WHOLE results overlay rather than the grid internally —
      LOAD MORE just extends the column so the user scrolls naturally. */
@@ -9556,4 +9655,586 @@ body.is-booting #audio-in-grid:not(.info-on)  .audio-bars-row {
 }
 .stream-status.is-error { color: #f06868; }
 
+/* ════════════════════════════════════════════════════════════════════
+   §combo-pane-steam ── STEAM (web store / library + native launch)
+   Single dedicated BrowserView pointed at store.steampowered.com so the
+   user can sign in and browse like a normal browser tab. Games launch
+   via the steam://run/<appid> protocol — Steam handles the actual
+   process spawn; we just minimise the dashboard out of the way.
+   ════════════════════════════════════════════════════════════════════ */
+
+.combo-pane-steam {
+  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-tech);
+}
+.steam-navrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.steam-navbtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  height: 24px;
+  min-width: 24px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  font-variant-emoji: text;
+}
+.steam-navbtn svg { width: 14px; height: 14px; }
+.steam-navbtn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.steam-navbtn:disabled { opacity: 0.3; cursor: not-allowed; }
+.steam-launch-btn { color: var(--accent); border-color: var(--accent); }
+.steam-launch-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.steam-fullscreen-btn { letter-spacing: 0.1em; }
+.steam-url {
+  flex: 1 1 auto;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  background: rgba(8, 10, 14, 0.6);
+  color: var(--text);
+  border: 1px solid var(--rule-dim);
+  border-radius: 12px;
+  padding: 4px 12px;
+  outline: none;
+  min-width: 0;
+}
+.steam-url:focus { border-color: var(--accent); background: rgba(0, 0, 0, 0.8); }
+.steam-appid {
+  flex: 0 0 80px;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  background: rgba(8, 10, 14, 0.6);
+  color: var(--text);
+  border: 1px solid var(--rule-dim);
+  border-radius: 12px;
+  padding: 4px 10px;
+  outline: none;
+  text-align: center;
+}
+.steam-appid:focus { border-color: var(--accent); background: rgba(0, 0, 0, 0.8); }
+.steam-stage {
+  flex: 1 1 auto;
+  position: relative;
+  background: #0a0a0a;
+  border: 1px solid var(--rule-dim);
+  min-height: 0;
+  overflow: hidden;
+}
+.steam-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px;
+  transition: opacity 220ms ease;
+}
+.steam-status.is-hidden { opacity: 0; pointer-events: none; }
+
+/* ════════════════════════════════════════════════════════════════════
+   §combo-pane-edit ── EDIT ROOM (Phase 1A · DaVinci-Cut-page flavor)
+   2V+1A timeline · bin · viewer · fast-add toolbar · tool modes ·
+   JKL transport · I/O markers · snap-to-edges. CSS-only; behavior in
+   features/edit.js.
+   ════════════════════════════════════════════════════════════════════ */
+
+.combo-pane-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-tech);
+}
+
+/* ── Top row: bins · viewer · inspect (3-col grid) ─────────────── */
+.edit-top {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 200px 1fr 180px;
+  gap: 6px;
+}
+
+.edit-section-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+/* ── BINS panel ────────────────────────────────────────────────── */
+.edit-bins {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 80%, #000);
+}
+.edit-bins-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rule-dim);
+}
+.edit-bins-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.edit-bins-empty {
+  padding: 14px 10px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  text-align: center;
+}
+.edit-bin-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 50%, transparent);
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+.edit-bin-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); }
+.edit-bin-row.is-selected { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); border-left: 2px solid var(--accent); padding-left: 6px; }
+.edit-bin-row-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 auto; min-width: 0;
+}
+.edit-bin-row-dur {
+  font-size: 10px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+/* ── VIEWER panel ──────────────────────────────────────────────── */
+.edit-viewer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--rule-dim);
+  background: #000;
+}
+.edit-viewer-modes {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: color-mix(in srgb, var(--panel-bg) 85%, #000);
+  border-bottom: 1px solid var(--rule-dim);
+}
+.edit-viewer-mode {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  padding: 3px 10px;
+  cursor: pointer;
+  border-radius: 0;
+}
+.edit-viewer-mode:hover { color: var(--accent); border-color: var(--accent); }
+.edit-viewer-mode.is-active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.edit-viewer-tc {
+  margin-left: auto;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  color: var(--amber);
+  letter-spacing: 0.12em;
+}
+.edit-viewer-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+.edit-viewer-video {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.edit-viewer-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  pointer-events: none;
+}
+.edit-viewer-empty.is-hidden { display: none; }
+.edit-viewer-transport {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px;
+  background: color-mix(in srgb, var(--panel-bg) 85%, #000);
+  border-top: 1px solid var(--rule-dim);
+}
+.edit-transport-btn {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 0;
+  min-width: 28px;
+  text-align: center;
+  /* Force unicode symbols (▶ ⏸ ◀ ⏭ ⤓ ⤒) into TEXT presentation so they
+     inherit the CSS color token instead of the OS emoji palette
+     (which is what made transport buttons look blue regardless of
+     theme). Same fix below for tool / fast-add buttons. */
+  font-variant-emoji: text;
+}
+.edit-transport-btn:hover { border-color: var(--accent); color: var(--accent); }
+.edit-transport-marker { color: var(--amber); }
+.edit-transport-marker:hover { color: var(--amber); border-color: var(--amber); }
+.edit-transport-rate {
+  margin: 0 6px;
+  font-family: var(--font-tech);
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  min-width: 36px;
+  text-align: center;
+}
+
+/* ── INSPECT panel ─────────────────────────────────────────────── */
+.edit-inspect {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 80%, #000);
+  font-size: 10px;
+}
+.edit-inspect-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.edit-inspect-k {
+  font-family: var(--font-display);
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+.edit-inspect-v {
+  font-family: var(--font-tech);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
+}
+
+/* ── Fast-add bar ──────────────────────────────────────────────── */
+.edit-fastadd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--panel-bg) 85%, #000);
+  border: 1px solid var(--rule-dim);
+}
+
+/* ── Tools bar (modes + snap + zoom + status) ──────────────────── */
+.edit-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--panel-bg) 85%, #000);
+  border: 1px solid var(--rule-dim);
+}
+.edit-tool-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--rule-dim);
+  margin: 0 4px;
+}
+.edit-tools-spacer { flex: 1 1 auto; }
+.edit-tools-status {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.edit-tools-status.is-ok    { color: var(--ok, #5fe39a); }
+.edit-tools-status.is-error { color: var(--red, #ff5f6e); }
+.edit-tool-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+.edit-tool-zoom input[type="range"] {
+  width: 140px;
+  accent-color: var(--accent);
+}
+
+/* Toolbar buttons (shared by fast-add + bin refresh) and tool-mode buttons */
+.edit-toolbar-btn,
+.edit-tool-btn {
+  background: transparent;
+  border: 1px solid var(--rule-dim);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: 0;
+  /* Force ✂ ⚡ ▼ ↔ ↕ into TEXT presentation (otherwise the OS renders
+     them as full-color emoji and they ignore the CSS color token). */
+  font-variant-emoji: text;
+}
+.edit-toolbar-btn:hover,
+.edit-tool-btn:hover { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+/* Active state — bold solid fill so the user can ALWAYS see which tool
+   is armed. Subtle tints were unreadable at a glance. */
+.edit-tool-btn.is-active {
+  border-color: var(--accent);
+  color: var(--bg, #000);
+  background: var(--accent);
+  font-weight: 700;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.edit-tool-btn.is-active:hover { color: var(--bg, #000); }
+/* EDIT pane is a positioning context for absolutely-positioned children
+   (the timeline playhead, grid, etc.). */
+.combo-pane-edit { position: relative; }
+
+/* Diagnostic readout — always shows the live state of the editor so the
+   user can troubleshoot without opening DevTools. */
+.edit-tools-readout {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  color: var(--accent);
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  white-space: nowrap;
+}
+
+/* ── Timeline (left label column + scrollable ruler/tracks column) ─
+   Labels live OUTSIDE the scroller so they don't pan with horizontal
+   scroll. Each label's height matches its corresponding lane so
+   the rows visually align. */
+.edit-tl {
+  flex: 0 0 auto;
+  display: flex;       /* lays labels-col next to scroll-col */
+  flex-direction: row;
+  min-height: 220px;
+  max-height: 38vh;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--panel-bg) 70%, #000);
+  overflow: hidden;
+}
+.edit-tl-labels {
+  flex: 0 0 56px;
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--panel-bg) 85%, #000);
+  border-right: 1px solid var(--rule-dim);
+}
+.edit-tl-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 50%, transparent);
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--text);
+}
+.edit-tl-label:last-child       { border-bottom: none; }
+.edit-tl-label.is-audio         { color: var(--amber); }
+.edit-tl-label-ruler            { height: 22px; }   /* matches .edit-tl-ruler */
+.edit-tl-label[data-track="V2"] { height: 56px; }   /* matches .edit-tl-track */
+.edit-tl-label[data-track="V1"] { height: 56px; }
+.edit-tl-label[data-track="A1"] { height: 44px; }   /* matches .edit-tl-track.is-audio */
+.edit-tl-label-id {
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+.edit-tl-label-meta {
+  font-family: var(--font-tech);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-left: auto;
+}
+.edit-tl-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  position: relative;
+}
+.edit-tl-content {
+  position: relative;
+  /* width is set by JS to fit the project duration; min-width gives
+     the empty-project state a usable surface even at zoom=20px/s */
+  min-width: 100%;
+}
+.edit-tl-content.tool-razor { cursor: crosshair; }
+.edit-tl-content.tool-trim  { cursor: ew-resize; }
+.edit-tl-ruler {
+  position: relative;
+  height: 22px;
+  background: color-mix(in srgb, var(--panel-bg) 90%, #000);
+  border-bottom: 1px solid var(--rule-dim);
+  cursor: ew-resize;        /* signal: this row is the scrub handle */
+  user-select: none;
+}
+.edit-tl-ruler:hover {
+  background: color-mix(in srgb, var(--accent) 8%, color-mix(in srgb, var(--panel-bg) 90%, #000));
+}
+.edit-tl-ruler-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 6px;
+  background: var(--rule-dim);
+}
+.edit-tl-ruler-tick.is-major {
+  height: 12px;
+  background: var(--accent);
+  opacity: 0.6;
+}
+.edit-tl-ruler-label {
+  position: absolute;
+  top: 2px;
+  transform: translateX(2px);
+  font-family: var(--font-tech);
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+.edit-tl-track {
+  position: relative;
+  height: 56px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule-dim) 60%, transparent);
+  background: color-mix(in srgb, var(--panel-bg) 60%, #000);
+}
+.edit-tl-track:last-of-type     { border-bottom: none; }
+.edit-tl-track.is-audio {
+  height: 44px;
+  background: color-mix(in srgb, var(--amber) 4%, color-mix(in srgb, var(--panel-bg) 60%, #000));
+}
+/* Soft hover affordance so users see the lane is droppable. */
+.edit-tl-track.is-drop-hover {
+  background: color-mix(in srgb, var(--accent) 12%, color-mix(in srgb, var(--panel-bg) 60%, #000));
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
+}
+.edit-tl-clip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, color-mix(in srgb, var(--panel-bg) 70%, #000));
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+}
+.edit-tl-track[data-track="V2"] .edit-tl-clip { border-color: var(--amber); background: color-mix(in srgb, var(--amber) 22%, color-mix(in srgb, var(--panel-bg) 70%, #000)); }
+.edit-tl-track.is-audio   .edit-tl-clip { border-color: var(--muted); background: color-mix(in srgb, var(--muted) 22%, color-mix(in srgb, var(--panel-bg) 70%, #000)); }
+.edit-tl-clip.is-selected { box-shadow: 0 0 0 2px var(--accent) inset; }
+.edit-tl-clip-name {
+  flex: 1 1 auto;
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.edit-tl-clip-resize {
+  width: 6px;
+  height: 100%;
+  cursor: ew-resize;
+  background: transparent;
+  flex: 0 0 auto;
+}
+.edit-tl-clip-resize:hover { background: var(--accent); }
+.edit-tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--red, #ff5f6e);
+  pointer-events: none;
+  box-shadow: 0 0 4px var(--red, #ff5f6e);
+  z-index: 4;
+}
+/* When razor is the active tool, the playhead = where the cut will land.
+   Pulse it + boost its glow so the user can see exactly where their
+   next click will cut. The cursor crosshair is on the click target;
+   this complements it by marking the cut target. */
+.edit-tl-content.tool-razor .edit-tl-playhead {
+  background: #ffd23f;
+  box-shadow: 0 0 10px #ffd23f, 0 0 18px color-mix(in srgb, #ffd23f 60%, transparent);
+  animation: edit-razor-pulse 1.2s ease-in-out infinite;
+}
+@keyframes edit-razor-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
 

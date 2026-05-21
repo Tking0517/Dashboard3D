@@ -188,6 +188,13 @@ export function init(deps) {
     _browserUpdateChrome();
     _browserApplyStageMode();
     _browserRenderResults();
+    // Audio-only mode is "sticky" across tab switches per the user's
+    // request: switching tabs auto-enables it. _browserActivateAudioOnly
+    // waits a tick so the BV has time to load + start the new video,
+    // then snapshots state and swaps audio. If audio-only was already
+    // on, we still re-trigger it for the new tab so the audio stream
+    // matches the visible page.
+    if (typeof _browserKickAudioOnly === 'function') _browserKickAudioOnly();
   }
 
   async function _browserCloseTab(id) {
@@ -1281,25 +1288,191 @@ export function init(deps) {
     fire();
   });
 
-  // ── Browser opacity toggle (zen-mode see-through) ────────────────
-  // Mirrors the YT popout's OPAQUE / SEE THRU buttons. SEE THRU drops
-  // the active BV's page opacity to 0.4 + transparent BV background so
-  // the zen dashboard panels render through the dimmed page. OPAQUE
-  // restores the dark BV bg and pulls the injected CSS back out.
-  const browserOpaqueBtn   = document.getElementById('browser-opaque-btn');
-  const browserSeethruBtn  = document.getElementById('browser-seethru-btn');
-  function _browserSetOpacityState(opaque) {
-    browserOpaqueBtn?.classList.toggle('is-active',  opaque);
-    browserSeethruBtn?.classList.toggle('is-active', !opaque);
+  // ── Focus mode ─────────────────────────────────────────────────
+  // Single FOCUS button. Spotlight on the playing video — dim + blur
+  // everything else (dashboard chrome AND the surrounding webpage).
+  // Two layers cooperate:
+  //   1. Renderer overlay (this file) — dims the dashboard chrome.
+  //   2. BV-injected 4-panel spotlight (main.js) — dims the page
+  //      around the video without touching the video itself.
+  // Either layer's click → exit. Escape → exit.
+  const browserFocusBtn = document.getElementById('browser-focus-btn');
+  let _browserFocusOn  = false;
+  let _focusOverlayEl  = null;
+  let _focusHintEl     = null;
+  function _showFocusHint(text) {
+    if (!_focusHintEl) {
+      _focusHintEl = document.createElement('div');
+      _focusHintEl.className = 'focus-mode-hint';
+      document.body.appendChild(_focusHintEl);
+    }
+    _focusHintEl.textContent = text;
+    _focusHintEl.classList.add('is-shown');
+    clearTimeout(_focusHintEl._t);
+    _focusHintEl._t = setTimeout(() => _focusHintEl.classList.remove('is-shown'), 2500);
   }
-  browserOpaqueBtn?.addEventListener('click', async () => {
-    try { await window.dash?.browserSetOpacity?.(1.0); } catch {}
-    _browserSetOpacityState(true);
+  async function _setBrowserFocus(on) {
+    if (!!on === _browserFocusOn) return; // idempotent
+    _browserFocusOn = !!on;
+    document.body.classList.toggle('is-browser-focus-mode', _browserFocusOn);
+    browserFocusBtn?.classList.toggle('is-active', _browserFocusOn);
+    if (_browserFocusOn) {
+      // Drop in the renderer overlay. A real DIV so it captures clicks.
+      if (!_focusOverlayEl) {
+        _focusOverlayEl = document.createElement('div');
+        _focusOverlayEl.className = 'browser-focus-overlay';
+        _focusOverlayEl.addEventListener('mousedown', (ev) => {
+          ev.preventDefault();
+          _setBrowserFocus(false);
+        });
+        document.body.appendChild(_focusOverlayEl);
+      }
+      _showFocusHint('FOCUS MODE · ESC OR CLICK TO EXIT');
+    } else {
+      // Tear down the renderer overlay.
+      if (_focusOverlayEl) {
+        _focusOverlayEl.remove();
+        _focusOverlayEl = null;
+      }
+    }
+    try { await window.dash?.browserSetFocus?.(_browserFocusOn); } catch {}
+  }
+  browserFocusBtn?.addEventListener('click', () => _setBrowserFocus(!_browserFocusOn));
+  // Escape exits focus mode globally (works in fullscreen too).
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && _browserFocusOn) {
+      ev.preventDefault();
+      _setBrowserFocus(false);
+    }
   });
-  browserSeethruBtn?.addEventListener('click', async () => {
-    try { await window.dash?.browserSetOpacity?.(0.4); } catch {}
-    _browserSetOpacityState(false);
+  // Main → renderer: a click happened inside the BV while focus was
+  // armed. Exit focus mode. Implemented by main awaiting the next
+  // mousedown inside the BV via executeJavaScript and pushing this
+  // event when it fires.
+  window.dash?.onBrowserFocusClicked?.(() => {
+    if (_browserFocusOn) _setBrowserFocus(false);
   });
+
+  // ── Audio-only mode ─────────────────────────────────────────────
+  // Pauses the BV's <video>, hides it (display:none → no GPU decode),
+  // and plays the audio-only stream extracted by yt-dlp in a hidden
+  // <audio> element. Toggling off seeks the BV video to the audio
+  // element's currentTime and resumes. Auto-enables on tab switch
+  // because the user wants tabs to default to audio-only.
+  const browserAudioBtn  = document.getElementById('browser-audio-btn');
+  const browserAudioEl   = document.getElementById('browser-audio-only-el');
+  let   _browserAudioOn  = false;
+  let   _browserAudioGen = 0; // token to invalidate stale async work
+  let   _browserAudioChip = null;
+  function _setAudioChip(text) {
+    if (!text) { if (_browserAudioChip) _browserAudioChip.hidden = true; return; }
+    if (!_browserAudioChip) {
+      _browserAudioChip = document.createElement('div');
+      _browserAudioChip.className = 'browser-audio-chip';
+      // Drop the chip onto the browser stage so it follows the pane.
+      const stage = document.getElementById('browser-stage') || document.querySelector('.combo-pane-browser') || document.body;
+      stage.appendChild(_browserAudioChip);
+    }
+    _browserAudioChip.hidden = false;
+    _browserAudioChip.textContent = text;
+  }
+  // Snapshot active-tab state, extract audio URL via yt-dlp, pause the
+  // BV's video, and start the audio element. Generation token prevents
+  // stale promises (from a previous tab switch) from clobbering the
+  // current playback.
+  async function _enterAudioOnly() {
+    const gen = ++_browserAudioGen;
+    browserAudioBtn?.classList.add('is-loading');
+    _setAudioChip('♪ EXTRACTING AUDIO…');
+    // Bail early if the preload bridge isn't loaded — that means main
+    // wasn't restarted after the IPC changes shipped. Tell the user
+    // explicitly so they restart instead of staring at silence.
+    if (!window.dash?.browserGetActiveState || !window.dash?.ytGetAudioStream) {
+      console.warn('[audio-only] IPC bridge missing — restart Electron (run Dashboard.bat)');
+      _setAudioChip('♪ NOT WIRED · RESTART ELECTRON (Dashboard.bat)');
+      browserAudioBtn?.classList.remove('is-loading');
+      _browserAudioOn = false;
+      browserAudioBtn?.classList.remove('is-active');
+      setTimeout(() => { if (gen === _browserAudioGen) _setAudioChip(''); }, 5000);
+      return;
+    }
+    let state;
+    try { state = await window.dash.browserGetActiveState(); }
+    catch (err) { console.warn('[audio-only] browserGetActiveState threw:', err); }
+    if (!state?.ok || !state.url) {
+      if (gen === _browserAudioGen) {
+        browserAudioBtn?.classList.remove('is-loading');
+        _setAudioChip('♪ NO ACTIVE TAB');
+        _browserAudioOn = false;
+        browserAudioBtn?.classList.remove('is-active');
+        setTimeout(() => { if (gen === _browserAudioGen) _setAudioChip(''); }, 3000);
+      }
+      return;
+    }
+    console.log('[audio-only] extracting audio for', state.url, 'at t=', state.videoTime);
+    const startT = state.videoTime || 0;
+    let stream;
+    try { stream = await window.dash.ytGetAudioStream(state.url); }
+    catch (err) { console.warn('[audio-only] ytGetAudioStream threw:', err); }
+    if (gen !== _browserAudioGen) return; // superseded
+    if (!stream?.ok || !stream.url) {
+      const reason = stream?.error || 'unknown';
+      console.warn('[audio-only] yt-dlp failed:', reason);
+      browserAudioBtn?.classList.remove('is-loading');
+      _setAudioChip('♪ UNAVAILABLE · ' + reason.slice(0, 80));
+      _browserAudioOn = false;
+      browserAudioBtn?.classList.remove('is-active');
+      setTimeout(() => { if (gen === _browserAudioGen) _setAudioChip(''); }, 5000);
+      return;
+    }
+    try { await window.dash.browserPauseVideo(); } catch {}
+    if (gen !== _browserAudioGen) return;
+    browserAudioEl.src = stream.url;
+    try { browserAudioEl.currentTime = startT; } catch {}
+    try { await browserAudioEl.play(); }
+    catch (err) {
+      console.warn('[audio-only] audio.play() rejected:', err);
+      _setAudioChip('♪ PLAY BLOCKED · ' + (err?.message || err?.name || 'unknown'));
+      browserAudioBtn?.classList.remove('is-loading');
+      _browserAudioOn = false;
+      browserAudioBtn?.classList.remove('is-active');
+      return;
+    }
+    browserAudioBtn?.classList.remove('is-loading');
+    _setAudioChip('♪ ' + (stream.title || 'AUDIO ONLY'));
+    _browserAudioOn = true;
+    browserAudioBtn?.classList.add('is-active');
+    console.log('[audio-only] playing', stream.title || '(untitled)');
+  }
+  async function _exitAudioOnly() {
+    _browserAudioGen++;
+    const t = browserAudioEl.currentTime || 0;
+    try { browserAudioEl.pause(); } catch {}
+    browserAudioEl.removeAttribute('src');
+    try { browserAudioEl.load(); } catch {}
+    try { await window.dash?.browserResumeVideo?.(t); } catch {}
+    _browserAudioOn = false;
+    browserAudioBtn?.classList.remove('is-active');
+    browserAudioBtn?.classList.remove('is-loading');
+    _setAudioChip('');
+  }
+  browserAudioBtn?.addEventListener('click', () => {
+    if (_browserAudioOn) _exitAudioOnly();
+    else _enterAudioOnly();
+  });
+  // Tab-switch hook (called from _browserActivateTab). Wait a tick so
+  // the BV has begun loading the new tab's page, then enter audio-only.
+  // If audio-only was already running, kill the previous audio first.
+  function _browserKickAudioOnly() {
+    _browserAudioGen++;
+    try { browserAudioEl.pause(); browserAudioEl.removeAttribute('src'); browserAudioEl.load(); } catch {}
+    // Debounce — give the new tab's <video> a chance to attach so
+    // browserGetActiveState can read its currentTime.
+    setTimeout(() => _enterAudioOnly(), 600);
+  }
+  // `function _browserKickAudioOnly` above is hoisted to the top of the
+  // enclosing init() scope, so _browserActivateTab (defined earlier in
+  // the same scope) can call it directly.
 
   // Clear-data — confirm, fire IPC, refresh history overlay if open.
   // Keeps cookies + localStorage + IndexedDB on the main-side handler so

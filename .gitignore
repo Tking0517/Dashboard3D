@@ -13,3 +13,7 @@ tools/
 gallery/
 userdata/
 archive/
+
+# LibreHardwareMonitor stores runtime UI state (window position, sensor
+# logging toggles, etc.) in this config file. Not source.
+vendor/lhm/LibreHardwareMonitor.config

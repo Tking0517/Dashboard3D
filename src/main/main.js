@@ -1099,51 +1099,156 @@ app.whenReady().then(() => {
     }
   `;
 
-  // ── Browser opacity (zen-mode see-through) ─────────────────────
-  // BrowserView lives inside the dashboard window so it can't use
-  // BrowserWindow.setOpacity() the way the YouTube popout does. Closest
-  // equivalent: CSS-inject `opacity` onto the page + set the BV's own
-  // background to transparent so the zen dashboard behind shows through
-  // the dimmed page content. State is tracked per-BV so the choice
-  // sticks when the user re-enters zen or switches tabs.
-  let _bvOpacityCssKey = null;
-  let _bvOpacityTabId  = null;
-  let _bvLastOpacity   = 1.0;
-  async function _applyBvOpacity(view, opacity) {
-    if (!view) return;
-    const wc = view.webContents;
-    // Clear any prior injection first.
-    if (_bvOpacityCssKey) {
-      try { await wc.removeInsertedCSS(_bvOpacityCssKey); } catch {}
-      _bvOpacityCssKey = null;
-    }
-    if (opacity >= 1) {
-      // Fully opaque — restore the BV's default dark background.
-      try { view.setBackgroundColor('#0a0a0a'); } catch {}
-      return;
-    }
-    // Transparent — make the BV's surface alpha so the dashboard zen
-    // overlay can render through, then dim the page content via CSS.
-    try { view.setBackgroundColor('#00000000'); } catch {}
-    try {
-      _bvOpacityCssKey = await wc.insertCSS(
-        `html, body { opacity: ${opacity} !important; background: transparent !important; }`,
-      );
-    } catch {}
-  }
-  ipcMain.handle('browser-set-opacity', async (_e, opacity) => {
-    const o = Math.max(0.1, Math.min(1, Number(opacity)));
-    if (!Number.isFinite(o)) return { ok: false };
-    _bvLastOpacity = o;
-    // Apply to whichever BV is currently shown: the zen-mode tab if zen
-    // is active, otherwise the active tab.
+  // Focus mode — "spotlight on the video" effect. Can't use a single
+  // backdrop overlay + z-index on the video (pages like YouTube have
+  // nested positioned containers that trap the video inside their own
+  // stacking contexts — z-index can't escape). Instead inject a script
+  // that places FOUR dim panels around the video's rect (top, bottom,
+  // left, right) and keeps them in sync as the page scrolls / resizes
+  // / the video changes size. The video element is never touched.
+  //
+  // Click-to-exit: a separate executeJavaScript awaits the next
+  // mousedown anywhere in the BV's page. When it fires, the renderer
+  // is notified via webContents.send('browser-focus-clicked') and
+  // tears focus mode down. Token-guarded so stale waiters from a
+  // previous focus session can't trigger a fresh one.
+  let _bvFocusToken = 0;
+  let _bvFocusScrollCssKey = null;
+  ipcMain.handle('browser-set-focus', async (_e, on) => {
     const targetId = _bvZenTabId != null ? _bvZenTabId : _bvActiveId;
     const t = targetId != null ? _bvTabs.get(targetId) : null;
-    if (t) {
-      _bvOpacityTabId = targetId;
-      await _applyBvOpacity(t.view, o);
+    const wc = t?.view?.webContents;
+    if (!wc) return { ok: false };
+    if (!on) {
+      // Tear-down — remove the spotlight container and detach listeners.
+      // Bump the token so any in-flight click-waiter from this session
+      // won't trigger a stale notification.
+      _bvFocusToken++;
+      // Remove the scrollbar-hiding CSS we injected on enable.
+      if (_bvFocusScrollCssKey != null) {
+        try { await wc.removeInsertedCSS(_bvFocusScrollCssKey); } catch {}
+        _bvFocusScrollCssKey = null;
+      }
+      try {
+        await wc.executeJavaScript(`(function(){
+          var c = document.getElementById('__dash3d-focus-spotlight');
+          if (c) c.remove();
+          if (window.__dash3dFocusUpdate) {
+            window.removeEventListener('scroll', window.__dash3dFocusUpdate, true);
+            window.removeEventListener('resize', window.__dash3dFocusUpdate);
+            window.__dash3dFocusUpdate = null;
+          }
+          if (window.__dash3dFocusPoll) {
+            clearInterval(window.__dash3dFocusPoll);
+            window.__dash3dFocusPoll = null;
+          }
+          return true;
+        })();`, true);
+      } catch {}
+      return { ok: true, on: false };
     }
-    return { ok: true, opacity: o };
+    // Inject CSS to hide the page's scrollbar while focus is on. The
+    // page's own overflow stays — we just hide the visible track/thumb
+    // so it doesn't poke through the dim panels. Restored on tear-down.
+    try {
+      _bvFocusScrollCssKey = await wc.insertCSS(`
+        html::-webkit-scrollbar,
+        body::-webkit-scrollbar,
+        *::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+        html, body, * { scrollbar-width: none !important; }
+      `);
+    } catch {}
+    // Enable — pick the most-prominent video and wrap it in a spotlight.
+    // Prefer a playing video; fall back to the largest. Render 4 dim
+    // panels around it and poll every 250ms in case the video resizes
+    // (e.g. theater-mode toggle, page reflow). Scroll + resize hooked
+    // directly for snappier updates.
+    try {
+      const ok = await wc.executeJavaScript(`(function(){
+        // Pick the best video to spotlight.
+        var vids = Array.from(document.querySelectorAll('video'));
+        if (!vids.length) return false;
+        var playing = vids.find(function(v){ return !v.paused && v.currentTime > 0 && v.readyState >= 2; });
+        var video = playing || vids.reduce(function(a,b){
+          var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+          return (ra.width * ra.height) >= (rb.width * rb.height) ? a : b;
+        });
+        if (!video) return false;
+
+        // Container with 4 dim panels — top/bottom/left/right of the
+        // video. Hard rectangle around the video; no glow.
+        var c = document.getElementById('__dash3d-focus-spotlight');
+        if (!c) {
+          c = document.createElement('div');
+          c.id = '__dash3d-focus-spotlight';
+          c.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;';
+          for (var i = 0; i < 4; i++) {
+            var p = document.createElement('div');
+            // 0.72 = original 0.92 lightened ~20%.
+            p.style.cssText = 'position:fixed;background:rgba(0,0,0,0.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);transition:none;';
+            c.appendChild(p);
+          }
+          document.documentElement.appendChild(c);
+        }
+
+        function update() {
+          var v = document.querySelector('video');
+          if (!v) return;
+          // If the current video was removed, fall back.
+          if (!document.contains(video)) video = v;
+          var r = video.getBoundingClientRect();
+          var vw = window.innerWidth, vh = window.innerHeight;
+          // Clamp panel sizes to non-negative so off-screen videos still
+          // render a sensible dim layer (avoids panels with negative
+          // dimensions when the rect is outside the viewport).
+          var top = Math.max(0, r.top), bot = Math.max(0, vh - r.bottom);
+          var lft = Math.max(0, r.left), rgt = Math.max(0, vw - r.right);
+          var ch = c.children;
+          // Top panel
+          ch[0].style.cssText += ';top:0;left:0;width:'+vw+'px;height:'+top+'px;';
+          // Bottom panel
+          ch[1].style.cssText += ';top:'+Math.max(0, r.bottom)+'px;left:0;width:'+vw+'px;height:'+bot+'px;';
+          // Left panel
+          ch[2].style.cssText += ';top:'+top+'px;left:0;width:'+lft+'px;height:'+(vh - top - bot)+'px;';
+          // Right panel
+          ch[3].style.cssText += ';top:'+top+'px;left:'+Math.max(0, r.right)+'px;width:'+rgt+'px;height:'+(vh - top - bot)+'px;';
+        }
+
+        update();
+        window.__dash3dFocusUpdate = update;
+        window.addEventListener('scroll', update, true);
+        window.addEventListener('resize', update);
+        // Poll for layout shifts the events don't catch (CSS transitions,
+        // theater-mode toggle, programmatic resize). 250ms is plenty.
+        window.__dash3dFocusPoll = setInterval(update, 250);
+        return true;
+      })();`, true);
+      if (!ok) return { ok: false };
+      // Fire off the click-waiter. A separate promise that resolves on
+      // the next mousedown anywhere in the BV. When it resolves, we
+      // signal the renderer so it can tear focus mode down (both
+      // sides — renderer overlay + BV spotlight).
+      const myToken = ++_bvFocusToken;
+      wc.executeJavaScript(`
+        new Promise((resolve) => {
+          const handler = () => {
+            document.removeEventListener('mousedown', handler, true);
+            resolve(true);
+          };
+          document.addEventListener('mousedown', handler, true);
+        });
+      `, true).then(() => {
+        // Stale waiter? Don't notify — another focus session may have
+        // already taken over.
+        if (myToken !== _bvFocusToken) return;
+        if (_mainWin && !_mainWin.isDestroyed()) {
+          _mainWin.webContents.send('browser-focus-clicked');
+        }
+      }).catch(() => {});
+      return { ok: true, on: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
   });
 
   ipcMain.handle('browser-set-zen-mode', async (_e, on) => {
@@ -1622,6 +1727,171 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
+  // ── STEAM pane ─────────────────────────────────────────────────────
+  // A single dedicated BrowserView pointed at the Steam web store/library
+  // so the user can log in and browse just like a normal browser tab —
+  // but isolated to its own partition so Steam cookies don't mix with the
+  // BROWSER pane and persist across launches. Game launches hand off to
+  // the native Steam client via the steam://run/<appid> protocol; the
+  // dashboard can minimise itself out of the way for full-screen play.
+  const _STEAM_PARTITION = 'persist:dash-steam';
+  const _STEAM_HOME = 'https://store.steampowered.com/';
+  const _STEAM_LIBRARY = 'https://store.steampowered.com/account/licenses/';
+  let _steamView = null;
+  let _steamBounds = { x: 0, y: 0, width: 0, height: 0 };
+  let _steamVisible = false;
+
+  function _applySteamBounds() {
+    if (!_steamView || !_mainWin || _mainWin.isDestroyed()) return;
+    const cb = _mainWin.getContentBounds();
+    try {
+      _steamView.setBounds({
+        x: Math.round(cb.width  * (_steamBounds.x      || 0)),
+        y: Math.round(cb.height * (_steamBounds.y      || 0)),
+        width:  Math.max(0, Math.round(cb.width  * (_steamBounds.width  || 0))),
+        height: Math.max(0, Math.round(cb.height * (_steamBounds.height || 0))),
+      });
+    } catch {}
+  }
+  function _ensureSteamView() {
+    if (_steamView) return _steamView;
+    _steamView = new BrowserView({
+      webPreferences: {
+        partition: _STEAM_PARTITION,
+        contextIsolation: true,
+        nodeIntegration: false,
+        autoplayPolicy: 'document-user-activation-required',
+        javascript: true,
+        webSecurity: true,
+        spellcheck: false,
+        enableWebSQL: false,
+        backgroundThrottling: true,
+      },
+    });
+    _steamView.setBackgroundColor('#0a0a0a');
+    _applySteamBounds();
+    const wc = _steamView.webContents;
+    // Forward nav state + title back to the renderer so the chrome can
+    // reflect back/forward button enablement and the URL field.
+    const sendState = (eventType) => {
+      if (!_mainWin || _mainWin.isDestroyed()) return;
+      try {
+        _mainWin.webContents.send('steam-event', {
+          type: eventType,
+          url: wc.getURL(),
+          title: wc.getTitle(),
+          canBack: wc.canGoBack(),
+          canFwd: wc.canGoForward(),
+          loading: wc.isLoading(),
+        });
+      } catch {}
+    };
+    wc.on('did-start-loading',  () => sendState('loading'));
+    wc.on('did-stop-loading',   () => sendState('loaded'));
+    wc.on('did-navigate',       () => sendState('navigate'));
+    wc.on('did-navigate-in-page', () => sendState('navigate-in-page'));
+    wc.on('page-title-updated', () => sendState('title'));
+    // Treat steam:// links in the embedded view as a launch request — the
+    // BV can't load them itself so without this they'd just error.
+    wc.setWindowOpenHandler(({ url }) => {
+      if (/^steam:\/\//i.test(url)) {
+        try { shell.openExternal(url); } catch {}
+        return { action: 'deny' };
+      }
+      // Pop-outs aren't supported in this pane — load in-place instead.
+      if (/^https?:\/\//i.test(url)) {
+        wc.loadURL(url).catch(() => {});
+      }
+      return { action: 'deny' };
+    });
+    wc.on('will-navigate', (e, url) => {
+      if (/^steam:\/\//i.test(url)) {
+        e.preventDefault();
+        try { shell.openExternal(url); } catch {}
+      }
+    });
+    wc.loadURL(_STEAM_HOME).catch(() => {});
+    return _steamView;
+  }
+  function _showSteamView() {
+    if (!_mainWin || _mainWin.isDestroyed()) return;
+    _ensureSteamView();
+    try { _mainWin.addBrowserView(_steamView); } catch {}
+    try { _steamView.webContents.setAudioMuted(false); } catch {}
+    _applySteamBounds();
+    _steamVisible = true;
+  }
+  function _hideSteamView() {
+    if (!_steamView || !_mainWin || _mainWin.isDestroyed()) return;
+    try { _mainWin.removeBrowserView(_steamView); } catch {}
+    try { _steamView.webContents.setAudioMuted(true); } catch {}
+    _steamVisible = false;
+  }
+
+  ipcMain.handle('steam-bounds', (_e, rect) => {
+    _steamBounds = rect || _steamBounds;
+    if (_steamVisible) _applySteamBounds();
+    return { ok: true };
+  });
+  ipcMain.handle('steam-show', () => { _showSteamView(); return { ok: true }; });
+  ipcMain.handle('steam-hide', () => { _hideSteamView(); return { ok: true }; });
+  ipcMain.handle('steam-back', () => { try { _steamView?.webContents.goBack(); } catch {} return { ok: true }; });
+  ipcMain.handle('steam-forward', () => { try { _steamView?.webContents.goForward(); } catch {} return { ok: true }; });
+  ipcMain.handle('steam-reload', () => { try { _steamView?.webContents.reload(); } catch {} return { ok: true }; });
+  ipcMain.handle('steam-home', () => {
+    try { _ensureSteamView().webContents.loadURL(_STEAM_HOME); } catch {}
+    return { ok: true };
+  });
+  ipcMain.handle('steam-library', () => {
+    try { _ensureSteamView().webContents.loadURL(_STEAM_LIBRARY); } catch {}
+    return { ok: true };
+  });
+  ipcMain.handle('steam-navigate', (_e, url) => {
+    if (!url || typeof url !== 'string') return { ok: false };
+    let target = url.trim();
+    if (!/^https?:\/\//i.test(target)) {
+      // Bare query → Steam search; bare host → assume https.
+      if (/\s/.test(target) || !/\./.test(target)) {
+        target = `https://store.steampowered.com/search/?term=${encodeURIComponent(target)}`;
+      } else {
+        target = `https://${target}`;
+      }
+    }
+    try { _ensureSteamView().webContents.loadURL(target); } catch {}
+    return { ok: true };
+  });
+  ipcMain.handle('steam-get-state', () => {
+    if (!_steamView) return { url: '', title: '', canBack: false, canFwd: false, loading: false };
+    const wc = _steamView.webContents;
+    return {
+      url: wc.getURL(),
+      title: wc.getTitle(),
+      canBack: wc.canGoBack(),
+      canFwd: wc.canGoForward(),
+      loading: wc.isLoading(),
+    };
+  });
+  // Launch a game: spawns the native Steam client via the steam://run/<id>
+  // protocol. Returns ok:false if the AppID looks invalid (digits only,
+  // 1–10 chars) so the renderer can keep the typo visible to the user.
+  ipcMain.handle('steam-launch', (_e, appid) => {
+    const id = String(appid || '').trim();
+    if (!/^\d{1,10}$/.test(id)) return { ok: false, reason: 'bad-appid' };
+    try { shell.openExternal(`steam://run/${id}`); } catch (e) { return { ok: false, reason: String(e?.message || e) }; }
+    return { ok: true, appid: id };
+  });
+  // FULLSCREEN — minimise the dashboard so the game (a separate native
+  // window owned by Steam) takes the whole screen. Cheap, reliable, and
+  // doesn't need any platform-specific window-foreground hack.
+  ipcMain.handle('steam-minimize-dashboard', () => {
+    if (!_mainWin || _mainWin.isDestroyed()) return { ok: false };
+    try {
+      if (_mainWin.isFullScreen()) _mainWin.setFullScreen(false);
+      _mainWin.minimize();
+    } catch {}
+    return { ok: true };
+  });
+
   // History — get returns the most-recent N entries (newest first);
   // clear wipes both the in-memory list and the on-disk file.
   ipcMain.handle('browser-history-get', (_e, limit = 100) => {
@@ -1888,15 +2158,61 @@ app.whenReady().then(() => {
       return new Response('forbidden', { status: 403 });
     }
     try {
-      const data = fs.readFileSync(abs);
       const ext = path.extname(abs).toLowerCase();
       const mime = _DASH_MIME[ext] || 'application/octet-stream';
+      const stat = fs.statSync(abs);
+      const size = stat.size;
+      // HTTP Range request support — required for HTML5 <video> to
+      // seek. Without this, the browser can only play the file
+      // linearly from start, and setting currentTime= silently fails
+      // (which manifested as "video stays on first frame during
+      // timeline scrub" in the EDIT pane).
+      const rangeHeader = request.headers.get('range');
+      if (rangeHeader) {
+        const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (m) {
+          let start = parseInt(m[1], 10);
+          let end   = m[2] ? parseInt(m[2], 10) : size - 1;
+          if (Number.isFinite(start) && Number.isFinite(end) && start <= end && start < size) {
+            if (end >= size) end = size - 1;
+            const chunkSize = end - start + 1;
+            const buf = Buffer.alloc(chunkSize);
+            const fd  = fs.openSync(abs, 'r');
+            try { fs.readSync(fd, buf, 0, chunkSize, start); } finally { fs.closeSync(fd); }
+            return new Response(buf, {
+              status: 206,
+              headers: {
+                'Content-Type':   mime,
+                'Content-Length': String(chunkSize),
+                'Content-Range':  `bytes ${start}-${end}/${size}`,
+                'Accept-Ranges':  'bytes',
+                'Access-Control-Allow-Origin': '*',
+              },
+            });
+          }
+          // Range syntactically valid but unsatisfiable.
+          return new Response('range not satisfiable', {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${size}` },
+          });
+        }
+      }
+      // No range header → full file. Still advertise Accept-Ranges so
+      // the browser knows to use ranges for any follow-up requests
+      // (this is the path the <video> element takes for its initial
+      // metadata probe).
+      const data = fs.readFileSync(abs);
       // ACAO so the music player can route audio through a
       // MediaElementAudioSourceNode without the graph going silent on a
       // cross-origin taint (dash3d-file:// is a different origin than the
       // app page).
       return new Response(data, {
-        headers: { 'Content-Type': mime, 'Access-Control-Allow-Origin': '*' },
+        headers: {
+          'Content-Type':   mime,
+          'Content-Length': String(size),
+          'Accept-Ranges':  'bytes',
+          'Access-Control-Allow-Origin': '*',
+        },
       });
     } catch (err) {
       console.warn('[dash3d-file] read failed:', abs, err.message);
@@ -5861,6 +6177,125 @@ while ($true) {
   ipcMain.handle('yt:search-general', ytHandler('results', (q, o) => yt.searchGeneral(q, o || {})));
   ipcMain.handle('yt:get-stream',     ytHandler('stream',  (u) => yt.getStreamUrl(u)));
   ipcMain.handle('yt:get-metadata',   ytHandler('meta',    (u) => yt.getMetadata(u)));
+
+  // yt:get-audio-stream — audio-only stream URL for the browser's
+  // AUDIO ONLY mode. yt-client's getStreamUrl picks combined a+v;
+  // we need a direct `bestaudio` URL so we can play just the audio
+  // and skip downloading/decoding the video stream entirely.
+  // Returns { ok, url, title?, duration? }. Title comes from a
+  // parallel --dump-json call so the renderer can show a status chip.
+  ipcMain.handle('yt:get-audio-stream', async (_e, url) => {
+    if (!url) return { ok: false, error: 'no url' };
+    let bin;
+    try { bin = yt.resolveBin ? yt.resolveBin() : null; } catch (err) { return { ok: false, error: err.message }; }
+    if (!bin) return { ok: false, error: 'yt-dlp binary not found' };
+    const run = (args) => new Promise((resolve) => {
+      const proc = spawn(bin, args, { windowsHide: true });
+      let stdout = '', stderr = '';
+      proc.stdout.on('data', (b) => { stdout += b.toString('utf8'); });
+      proc.stderr.on('data', (b) => { stderr += b.toString('utf8'); });
+      proc.on('error', (err) => resolve({ code: -1, err: err.message }));
+      proc.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+    // Run the URL fetch and metadata fetch in parallel.
+    const [stream, meta] = await Promise.all([
+      run(['-f', 'bestaudio/best', '-g', '--no-warnings', '--no-call-home', url]),
+      run(['--dump-json', '--no-warnings', '--no-call-home', '--skip-download', url]),
+    ]);
+    if (stream.code !== 0 || !stream.stdout?.trim()) {
+      return { ok: false, error: stream.stderr?.trim().slice(-300) || 'yt-dlp failed' };
+    }
+    let title, duration;
+    try {
+      const j = JSON.parse(meta.stdout.split('\n').find(l => l.trim().startsWith('{')) || '{}');
+      title    = j.title    || undefined;
+      duration = j.duration || undefined;
+    } catch {}
+    return { ok: true, url: stream.stdout.trim(), title, duration };
+  });
+
+  // Active-tab probe — for the renderer's AUDIO ONLY mode. Returns the
+  // current URL + currentTime of the playing video, so the renderer
+  // can extract the audio stream and start it at the same offset.
+  ipcMain.handle('browser-get-active-state', async () => {
+    const id = _bvActiveId;
+    if (id == null) return { ok: false, error: 'no active tab' };
+    const t = _bvTabs.get(id);
+    const wc = t?.view?.webContents;
+    if (!wc) return { ok: false, error: 'no webContents' };
+    const url = (() => { try { return wc.getURL(); } catch { return ''; } })();
+    let videoTime = 0, hasVideo = false;
+    try {
+      const r = await wc.executeJavaScript(`(function(){
+        var v = document.querySelector('video');
+        if (!v) return { hasVideo: false, t: 0 };
+        return { hasVideo: true, t: v.currentTime || 0 };
+      })();`, true);
+      hasVideo  = !!r?.hasVideo;
+      videoTime = Number(r?.t) || 0;
+    } catch {}
+    return { ok: true, url, hasVideo, videoTime };
+  });
+
+  // Pause + hide the BV's video so the GPU stops decoding frames.
+  // `display:none` on the <video> element prevents Chromium from
+  // painting and skips the decode pipeline; `pause()` halts the
+  // media element's network/CPU work entirely. Returns the currentTime
+  // so the caller can sync an external audio source.
+  ipcMain.handle('browser-pause-video', async () => {
+    const id = _bvActiveId;
+    if (id == null) return { ok: false };
+    const t = _bvTabs.get(id);
+    const wc = t?.view?.webContents;
+    if (!wc) return { ok: false };
+    try {
+      const r = await wc.executeJavaScript(`(function(){
+        var v = document.querySelector('video');
+        if (!v) return { t: 0 };
+        var t = v.currentTime || 0;
+        try { v.pause(); } catch (e) {}
+        // Save original display so we can restore on resume.
+        if (v.dataset.__dash3dOrigDisplay === undefined) {
+          v.dataset.__dash3dOrigDisplay = v.style.display || '';
+        }
+        v.style.display = 'none';
+        return { t: t };
+      })();`, true);
+      return { ok: true, t: Number(r?.t) || 0 };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+  // Inverse — restore the video's display, seek to the given time,
+  // and resume playback. If `t` is provided we seek there first so
+  // the video picks up where the audio left off.
+  ipcMain.handle('browser-resume-video', async (_e, t) => {
+    const id = _bvActiveId;
+    if (id == null) return { ok: false };
+    const tab = _bvTabs.get(id);
+    const wc = tab?.view?.webContents;
+    if (!wc) return { ok: false };
+    const seekTo = Number.isFinite(Number(t)) ? Number(t) : null;
+    try {
+      await wc.executeJavaScript(`(function(){
+        var v = document.querySelector('video');
+        if (!v) return false;
+        if (v.dataset.__dash3dOrigDisplay !== undefined) {
+          v.style.display = v.dataset.__dash3dOrigDisplay;
+          delete v.dataset.__dash3dOrigDisplay;
+        } else {
+          v.style.display = '';
+        }
+        ${seekTo != null ? `try { v.currentTime = ${seekTo}; } catch (e) {}` : ''}
+        try { v.play(); } catch (e) {}
+        return true;
+      })();`, true);
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
 
   // yt:scrape-page — point yt-dlp at any URL and have it enumerate every
   // video on / linked from that page (works for YouTube channels,

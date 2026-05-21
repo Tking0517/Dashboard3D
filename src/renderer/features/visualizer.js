@@ -1562,13 +1562,16 @@ export function init(deps) {
     }
   }
   function _refreshEditBtn() {
-    // Editor disabled for now — diagnosing CPU spikes attributed to the
-    // rec-room editor. Button stays hidden so it can't be triggered. The
-    // editor pane / state / wiring all stay in place so re-enabling is a
-    // one-line change here (remove the early return).
+    // The OLD inline editor here (the disabled _openEditor below) is
+    // dead code now — replaced by the standalone EDIT ROOM combo-pane
+    // (see features/edit.js). This button now hands the currently-
+    // playing video off to EDIT ROOM via window._editHandoff and a
+    // combo-mode switch. The button is enabled whenever a playable
+    // video is loaded in the REC ROOM player.
     if (!editBtn) return;
-    editBtn.hidden = true;
-    editBtn.disabled = true;
+    const hasVideo = _visualizerCurrent && _VIDEO_RENDER_RE.test(_visualizerCurrent);
+    editBtn.hidden = false;
+    editBtn.disabled = !hasVideo;
   }
   // Open editor on the current playing video or image.
   function _openEditor() {
@@ -2128,7 +2131,16 @@ export function init(deps) {
     }
   });
   // Buttons
-  editBtn?.addEventListener('click', () => { _openEditor(); playSfx?.('click'); });
+  editBtn?.addEventListener('click', () => {
+    // EDIT ROOM handoff: stash the current clip's path so EDIT ROOM's
+    // activate() can pick it up out of the bin and load it in the
+    // viewer. setComboMode comes from app.js's _paneDeps.
+    if (!_visualizerCurrent || !_VIDEO_RENDER_RE.test(_visualizerCurrent)) return;
+    const name = _visualizerCurrent.split(/[\\/]/).pop();
+    window._editHandoff = { path: _visualizerCurrent, name };
+    try { deps?.setComboMode?.('edit'); } catch (err) { console.warn('[visualizer] setComboMode failed:', err?.message || err); }
+    playSfx?.('click');
+  });
   editCloseBtn?.addEventListener('click', () => { _closeEditor(); playSfx?.('click'); });
   // Manual playhead tick — used when there's no real <video> driving
   // playback (e.g. V1 anchor is an image, or the user wants the

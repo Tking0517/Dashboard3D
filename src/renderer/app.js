@@ -4715,10 +4715,12 @@ if (comboPanel) {
   const paperStatsEl = document.getElementById('paper-stats');
   const explorePane     = comboPanel.querySelector('.combo-pane-explore');
   const visualizerPane  = comboPanel.querySelector('.combo-pane-visualizer');
+  const editPane        = comboPanel.querySelector('.combo-pane-edit');
   const browserPane     = comboPanel.querySelector('.combo-pane-browser');
   const tasksPane       = comboPanel.querySelector('.combo-pane-tasks');
   const musicPane       = comboPanel.querySelector('.combo-pane-music');
   const streamPane      = comboPanel.querySelector('.combo-pane-stream');
+  const steamPane       = comboPanel.querySelector('.combo-pane-steam');
 
   function paintComboHeader() {
     // Bail while the OFFLINE → STANDBY → ONLINE state machine is using
@@ -4758,6 +4760,13 @@ if (comboPanel) {
       codeEl.textContent = 'REC ROOM · CAPTURE STUDIO';
       tagEl.textContent = '—';
       footerLabelEl.textContent = 'CAPTURE';
+    } else if (mode === 'edit') {
+      titleEl.innerHTML = 'PRODUCTIVITY <em>D1</em>';
+      codeEl.textContent = 'EDIT ROOM · CUT';
+      tagEl.textContent = window._editProject?.duration
+        ? `${Math.round(window._editProject.duration)}s`
+        : '—';
+      footerLabelEl.textContent = 'EDIT STATUS';
     } else if (mode === 'browser') {
       titleEl.innerHTML = 'PRODUCTIVITY <em>B1</em>';
       codeEl.textContent = 'BROWSER · PRIVATE';
@@ -4782,6 +4791,11 @@ if (comboPanel) {
       codeEl.textContent = 'STREAM · EMBEDS';
       tagEl.textContent = '—';
       footerLabelEl.textContent = 'STREAM STATUS';
+    } else if (mode === 'steam') {
+      titleEl.innerHTML = 'PRODUCTIVITY <em>G1</em>';
+      codeEl.textContent = 'STEAM · GAME LIBRARY';
+      tagEl.textContent = '—';
+      footerLabelEl.textContent = 'STEAM STATUS';
     } else {
       // Unknown mode — fall back to notes header so the chrome doesn't
       // strand with a stale label. setComboMode validates the input
@@ -4804,7 +4818,9 @@ if (comboPanel) {
     explore:    () => import('./features/explore.js'),
     browser:    () => import('./features/browser.js'),
     visualizer: () => import('./features/visualizer.js'),
+    edit:       () => import('./features/edit.js'),
     music:      () => import('./features/music.js'),
+    steam:      () => import('./features/steam.js'),
   };
   const _lazyPaneState = {};   // mode -> loaded module
   // Seeded here (not in visualizer.js) so file deletes made in EXPLORE
@@ -4822,6 +4838,10 @@ if (comboPanel) {
       window._visualizerUndoStack.push({ batch, at: Date.now() });
       try { window._visualizerRefreshUndoBtn?.(); } catch {}
     },
+    // Lets a pane switch the combo to another mode — used by REC ROOM's
+    // EDIT button on a capture row to bounce the user into EDIT ROOM
+    // with the clicked clip as the source.
+    setComboMode: (mode) => setComboMode(mode),
   };
 
   function activateLazyPane(mode) {
@@ -4841,17 +4861,19 @@ if (comboPanel) {
   }
 
   function setComboMode(mode, persist = true) {
-    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'browser', 'tasks', 'music', 'stream']);
+    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'edit', 'browser', 'tasks', 'music', 'stream', 'steam']);
     if (!VALID.has(mode)) mode = 'notes';
     comboPanel.dataset.mode = mode;
     notesPane     ?.classList.toggle('is-visible', mode === 'notes');
     paperPane     ?.classList.toggle('is-visible', mode === 'paper');
     explorePane   ?.classList.toggle('is-visible', mode === 'explore');
     visualizerPane?.classList.toggle('is-visible', mode === 'visualizer');
+    editPane      ?.classList.toggle('is-visible', mode === 'edit');
     browserPane   ?.classList.toggle('is-visible', mode === 'browser');
     tasksPane     ?.classList.toggle('is-visible', mode === 'tasks');
     musicPane     ?.classList.toggle('is-visible', mode === 'music');
     streamPane    ?.classList.toggle('is-visible', mode === 'stream');
+    steamPane     ?.classList.toggle('is-visible', mode === 'steam');
     // Music meter visibility — drives whether the rAF redraw chain runs
     // (see _bgmDrawMeter + window._bgmMaybeStartMeter in the music init
     // block). When music tab isn't visible we skip canvas work entirely;
@@ -5843,6 +5865,17 @@ document.querySelector('#flush-ram-btn')?.addEventListener('click', async () => 
   } finally {
     btn?.classList.remove('is-busy');
   }
+});
+
+// Refresh button — full renderer reload. Useful when the user has
+// applied dev changes (CSS, new build via Dashboard.bat) and wants to
+// pick them up without restarting Electron. Equivalent to Ctrl+R.
+document.querySelector('#refresh-btn')?.addEventListener('click', () => {
+  playSfx?.('click');
+  // Brief visual feedback before the reload tears the DOM down.
+  const btn = document.querySelector('#refresh-btn');
+  btn?.classList.add('is-busy');
+  setTimeout(() => window.location.reload(), 80);
 });
 
 // Sleep button — asks main to put the PC into suspend. Main shows a
