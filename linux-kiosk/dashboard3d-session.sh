@@ -41,7 +41,9 @@ echo "DRM     : $(ls /dev/dri/ 2>/dev/null | tr '\n' ' ')"
 echo "seat    : seat=${XDG_SEAT:-UNSET} vt=${XDG_VTNR:-UNSET} session=${XDG_SESSION_ID:-UNSET}"
 echo "runtime : ${XDG_RUNTIME_DIR:-UNSET}"
 echo "====================================================="
-echo ">>> Press  g  for GAME MODE (Steam),  i  to INSTALL to a disk,"
+echo ">>> Press  g  for GAME MODE (Steam, full boost),"
+echo ">>>        m  for MOBILE GAME MODE (Steam, CPU boost off + quiet profile),"
+echo ">>>        i  to INSTALL to a disk,"
 echo ">>> or press Enter / wait 12s for the Dashboard."
 read -t 12 -r -n 1 _key || true
 echo
@@ -57,9 +59,17 @@ if [[ "${_key:-}" == [iI] ]]; then
 fi
 
 # 'g' -> Game Mode (also reachable from the in-app button, which drops
-# the same flag file).
+# the same flag file with the same 'normal' content).
 if [[ "${_key:-}" == [gG] ]]; then
-  : > "$GAMEMODE_FLAG"
+  echo normal > "$GAMEMODE_FLAG"
+fi
+
+# 'm' -> Mobile Game Mode: same gamescope+Steam launch but with CPU
+# boost disabled and the ACPI platform_profile dropped to low-power /
+# quiet for the duration. Restores both on exit so the dashboard
+# session that comes back up isn't stuck in quiet mode.
+if [[ "${_key:-}" == [mM] ]]; then
+  echo quiet > "$GAMEMODE_FLAG"
 fi
 
 if [[ ! -x "$APP_BIN" ]]; then
@@ -70,13 +80,27 @@ fi
 # Main session loop.
 while true; do
   if [[ -f "$GAMEMODE_FLAG" ]]; then
+    # Read the mode marker (empty/normal/quiet) before deleting the flag.
+    _gm_mode="$(cat "$GAMEMODE_FLAG" 2>/dev/null | tr -d '[:space:]')"
     rm -f "$GAMEMODE_FLAG"
-    echo "Entering Game Mode ..."
-    if [[ -x "$GAMEMODE_SCRIPT" ]]; then
-      "$GAMEMODE_SCRIPT"
-    else
-      echo "Game Mode script missing: $GAMEMODE_SCRIPT"; sleep 3
-    fi
+    case "$_gm_mode" in
+      quiet)
+        echo "Entering Mobile Game Mode (CPU boost off, quiet profile) ..."
+        if [[ -x "$GAMEMODE_SCRIPT" ]]; then
+          "$GAMEMODE_SCRIPT" --quiet
+        else
+          echo "Game Mode script missing: $GAMEMODE_SCRIPT"; sleep 3
+        fi
+        ;;
+      *)
+        echo "Entering Game Mode ..."
+        if [[ -x "$GAMEMODE_SCRIPT" ]]; then
+          "$GAMEMODE_SCRIPT"
+        else
+          echo "Game Mode script missing: $GAMEMODE_SCRIPT"; sleep 3
+        fi
+        ;;
+    esac
     continue
   fi
 

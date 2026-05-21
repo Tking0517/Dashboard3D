@@ -8,15 +8,55 @@
 #
 # Self-diagnosing: waits for the network, relaunches across Steam's
 # first-run restart, and on failure prints one photographable screen.
+#
+# Modes:
+#   (default)   full Game Mode — CPU boost stays on, performance profile
+#   --quiet     Mobile Game Mode — CPU boost OFF + ACPI platform_profile
+#               low-power / quiet, so a laptop on the couch doesn't spin
+#               up to jet-engine for a CPU-light title. Both knobs are
+#               restored to performance/boost-on when Game Mode exits.
 
 set -u
 
+QUIET=0
+case "${1:-}" in
+  --quiet|-q) QUIET=1 ;;
+  '' ) ;;
+  * )
+    echo "Usage: dashboard3d-gamemode [--quiet]" >&2
+    exit 2
+    ;;
+esac
+
 LOG=/tmp/gamemode.log
 DIAG=/tmp/gamemode-diag.txt
+POWER=/usr/local/bin/dashboard3d-power
 : > "$LOG"
 
+# Mobile mode hooks. The power helper runs via NOPASSWD sudo (see the
+# /etc/sudoers.d/dashboard3d rule). EXIT-trap restores defaults on any
+# exit path — failure report, max attempts, or user ending the session —
+# so we never strand the system in low-power on the dashboard's way back.
+apply_quiet() {
+  (( QUIET )) || return 0
+  echo ">>> Mobile Game Mode: lowering CPU boost + platform profile ..."
+  sudo -n "$POWER" boost off    2>&1 | sed 's/^/    /'
+  sudo -n "$POWER" profile quiet 2>&1 | sed 's/^/    /'
+}
+restore_quiet() {
+  (( QUIET )) || return 0
+  echo ">>> Mobile Game Mode: restoring CPU boost + performance profile ..."
+  sudo -n "$POWER" boost on          2>&1 | sed 's/^/    /'
+  sudo -n "$POWER" profile performance 2>&1 | sed 's/^/    /'
+}
+trap restore_quiet EXIT
+
 echo
-echo "================== Dashboard3D Game Mode =================="
+if (( QUIET )); then
+  echo "============= Dashboard3D Mobile Game Mode ================"
+else
+  echo "================== Dashboard3D Game Mode =================="
+fi
 
 # --- wait for the network -------------------------------------------
 # Steam's first run downloads its client; with no internet it quits.
@@ -49,6 +89,7 @@ if [[ "$NET" == OFFLINE ]]; then
   echo
   echo ">>> WARNING: no internet — Steam's first run will likely fail."
 fi
+apply_quiet
 echo
 echo "launching gamescope + Steam ..."
 echo "(first run downloads the Steam client — several minutes; the"

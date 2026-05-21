@@ -1,0 +1,15 @@
+[Unit]
+Description=Dashboard3D media-key daemon (XF86AudioRaise/Lower/Mute -> wpctl)
+After=pipewire.service wireplumber.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/dashboard3d-media-keys
+Restart=always
+RestartSec=2
+# Keep the daemon alive across gamescope/Steam restarts; it only depends
+# on /dev/input and wpctl, both of which persist.
+
+[Install]
+WantedBy=default.target

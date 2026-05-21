@@ -94,12 +94,31 @@ install -Dm755 "$REPO/linux-kiosk/dashboard3d-prep.sh" \
 install -Dm644 "$REPO/linux-kiosk/dashboard3d-prep.service" \
   "$PROFILE/airootfs/etc/systemd/system/dashboard3d-prep.service"
 
+echo "==> installing power helper (CPU boost + ACPI platform_profile)"
+install -Dm755 "$REPO/linux-kiosk/dashboard3d-power.sh" \
+  "$PROFILE/airootfs/usr/local/bin/dashboard3d-power"
+
+echo "==> installing media-key daemon (XF86Audio* -> wpctl)"
+install -Dm755 "$REPO/linux-kiosk/dashboard3d-media-keys.py" \
+  "$PROFILE/airootfs/usr/local/bin/dashboard3d-media-keys"
+install -Dm644 "$REPO/linux-kiosk/dashboard3d-media-keys.service" \
+  "$PROFILE/airootfs/etc/systemd/user/dashboard3d-media-keys.service"
+# Enable the user service for every user via the user-level
+# default.target.wants. systemctl --user --global enable does the same
+# thing as creating this symlink, but the symlink is the only thing that
+# survives mkarchiso reliably.
+mkdir -p "$PROFILE/airootfs/etc/systemd/user/default.target.wants"
+ln -sf /etc/systemd/user/dashboard3d-media-keys.service \
+       "$PROFILE/airootfs/etc/systemd/user/default.target.wants/dashboard3d-media-keys.service"
+
 # A Windows->container bind mount can drop the executable bit; set it
 # explicitly on everything that must run.
 chmod 755 "$PROFILE/airootfs/usr/local/bin/dashboard3d-session"
 chmod 755 "$PROFILE/airootfs/usr/local/bin/dashboard3d-gamemode"
 chmod 755 "$PROFILE/airootfs/usr/local/bin/dashboard3d-install"
 chmod 755 "$PROFILE/airootfs/usr/local/bin/dashboard3d-prep"
+chmod 755 "$PROFILE/airootfs/usr/local/bin/dashboard3d-power"
+chmod 755 "$PROFILE/airootfs/usr/local/bin/dashboard3d-media-keys"
 chmod 755 "$PROFILE/airootfs/opt/dashboard3d/dashboard3d"
 
 # --- 6. enable services -----------------------------------------------------
@@ -136,10 +155,15 @@ ExecStart=
 ExecStart=-/usr/bin/agetty --autologin root --noclear %I $TERM
 EOF
 
-# Let 'gamer' run the disk installer as root (the 'i' boot-prompt key).
-echo "==> installing the sudoers rule for the installer"
+# Let 'gamer' run the disk installer + the power helper as root
+# without a password. The power helper is invoked by Mobile Game Mode
+# to toggle CPU boost and the ACPI platform_profile; both /sys writes
+# are root-only. Scope is narrow on purpose — both binaries accept only
+# a small whitelist of arg shapes (see their headers).
+echo "==> installing the sudoers rule for the installer + power helper"
 install -Dm440 /dev/stdin "$PROFILE/airootfs/etc/sudoers.d/dashboard3d" <<'EOF'
 gamer ALL=(root) NOPASSWD: /usr/local/bin/dashboard3d-install
+gamer ALL=(root) NOPASSWD: /usr/local/bin/dashboard3d-power
 EOF
 
 # Stamp a build id so the running appliance can be matched to a build.
@@ -164,6 +188,8 @@ file_permissions+=(
   ["/usr/local/bin/dashboard3d-gamemode"]="0:0:0755"
   ["/usr/local/bin/dashboard3d-install"]="0:0:0755"
   ["/usr/local/bin/dashboard3d-prep"]="0:0:0755"
+  ["/usr/local/bin/dashboard3d-power"]="0:0:0755"
+  ["/usr/local/bin/dashboard3d-media-keys"]="0:0:0755"
   ["/etc/sudoers.d/dashboard3d"]="0:0:0440"
 )
 EOF

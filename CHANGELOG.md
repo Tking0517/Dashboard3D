@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.0-alpha.4] — 2026-05-21
+
+**Mobile Game Mode (quiet CPU profile), media-key daemon for volume in Big Picture.**
+
+### Linux appliance — Mobile Game Mode
+- New `m` keypress at the boot menu, parallel to `g`: launches gamescope + Steam **with CPU boost disabled and the ACPI platform_profile dropped to low-power / quiet**. Restores both on exit via an EXIT trap so the dashboard session that comes back up isn't stuck in quiet mode.
+- New root helper `/usr/local/bin/dashboard3d-power` exposes two narrow subcommands: `boost on|off` (handles both AMD `cpufreq/boost` and Intel `intel_pstate/no_turbo`, with the inverted semantics) and `profile quiet|balanced|performance` (writes `/sys/firmware/acpi/platform_profile` with vendor-name fallbacks). Invoked via NOPASSWD sudo from the unprivileged `gamer` session.
+- `dashboard3d-session.sh` now writes a `normal` / `quiet` marker into the gamemode flag file so the loop can dispatch to the right mode.
+
+### Linux appliance — media-key daemon
+- New `dashboard3d-media-keys.py` Python evdev daemon listens for `KEY_VOLUMEUP` / `KEY_VOLUMEDOWN` / `KEY_MUTE` on every input device that advertises them and calls `wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+/-` (or `set-mute … toggle`). Catches keyboard volume keys inside gamescope, Steam Big Picture, and individual games — the appliance has no DE to do this, so wiring it explicitly is the only way it works.
+- Runs as a systemd-user service (`dashboard3d-media-keys.service`) enabled for every user via `etc/systemd/user/default.target.wants/`. Restart=always picks up Bluetooth keyboards paired after launch.
+- New packages baked into the ISO: `python`, `python-evdev`.
+
+### ISO build wiring
+- `iso-build/container-build.sh` installs the two new scripts + the user-service unit, expands the sudoers rule to include the power helper, and expands `file_permissions` so the squashfs preserves the executable bits.
+
 ## [0.9.0-alpha.3] — 2026-05-20
 
 **EDIT ROOM cut page, BROWSER focus/audio modes, STEAM pane, theme glyph fix, USB flasher, dead-code sweep.**

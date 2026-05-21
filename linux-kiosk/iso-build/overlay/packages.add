@@ -50,6 +50,11 @@ lib32-gamemode
 mangohud
 lib32-mangohud
 
+# --- input / media-key daemon (volume keys -> wpctl in Big Picture
+#     and inside games; appliance has no DE to do this for us) ---
+python
+python-evdev
+
 # --- fonts ---
 noto-fonts
 ttf-dejavu
