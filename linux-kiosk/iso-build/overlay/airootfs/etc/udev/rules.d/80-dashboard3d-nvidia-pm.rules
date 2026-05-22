@@ -1,0 +1,31 @@
+# Dashboard3D — NVIDIA RTD3 runtime power management.
+#
+# Enables PCI runtime power management on the NVIDIA dGPU and every
+# sibling function in its PCI device group (audio, USB-C host, UCSI).
+# ALL functions in the group must be runtime-PM-enabled or the kernel
+# cannot put the group into D3cold — one awake function pins the whole
+# rail on. With these rules + NVreg_DynamicPowerManagement=0x02 (set in
+# modprobe.d/dashboard3d.conf) the dGPU sleeps to ~0W when idle.
+#
+# nvidia-utils ships an equivalent 80-nvidia-pm.rules; this file is our
+# explicit appliance copy so the behavior is deterministic regardless
+# of packaging changes. Re-applying power/control=auto is idempotent.
+
+# --- on driver bind: allow the kernel to runtime-suspend the device ---
+# VGA controller (class 0x030000)
+ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="auto"
+# 3D controller (class 0x030200) — laptops usually expose the dGPU here
+ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="auto"
+# NVIDIA HDA audio function (class 0x040300)
+ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x040300", TEST=="power/control", ATTR{power/control}="auto"
+# NVIDIA USB xHCI host controller (class 0x0c0330)
+ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c0330", TEST=="power/control", ATTR{power/control}="auto"
+# NVIDIA USB Type-C UCSI controller (class 0x0c8000)
+ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c8000", TEST=="power/control", ATTR{power/control}="auto"
+
+# --- on driver unbind: pin the device on so it can't get stuck asleep ---
+ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x040300", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c0330", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c8000", TEST=="power/control", ATTR{power/control}="on"

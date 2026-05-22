@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('dash', {
   platform:   process.platform,
   systemInfo: () => ipcRenderer.invoke('system-info'),
+  batteryInfo: () => ipcRenderer.invoke('battery-info'),
   storageInfo: () => ipcRenderer.invoke('storage-info'),
   tempsInfo:   () => ipcRenderer.invoke('temps-info'),
   netInfo:     () => ipcRenderer.invoke('net-info'),
@@ -159,7 +160,10 @@ contextBridge.exposeInMainWorld('dash', {
   launcherRun:     (appDef) => ipcRenderer.invoke('launcher-run', appDef),
   // Game Mode (Linux appliance) — quit to Steam Big Picture; the session
   // script loops back to the dashboard when Steam exits.
-  enterGameMode:   () => ipcRenderer.invoke('game-mode'),
+  // opts: { quiet?: boolean, appid?: string }. Both optional; with no
+  // opts the call still behaves like the topbar Game Mode button (drops
+  // straight into Steam Big Picture, full boost).
+  enterGameMode:   (opts) => ipcRenderer.invoke('game-mode', opts || {}),
 
   // Set Windows power-scheme processor min/max state (used to throttle CPU
   // during zen mode and restore performance on resume).
@@ -314,24 +318,4 @@ contextBridge.exposeInMainWorld('dash', {
     return () => ipcRenderer.removeListener('browser-newtab-request', handler);
   },
 
-  // STEAM pane — dedicated BrowserView for the Steam web store/library.
-  // Game launches use the steam://run/<appid> URL protocol so the native
-  // Steam client takes over. FULLSCREEN minimises this window.
-  steamBounds:    (rect)  => ipcRenderer.invoke('steam-bounds', rect),
-  steamShow:      ()      => ipcRenderer.invoke('steam-show'),
-  steamHide:      ()      => ipcRenderer.invoke('steam-hide'),
-  steamBack:      ()      => ipcRenderer.invoke('steam-back'),
-  steamForward:   ()      => ipcRenderer.invoke('steam-forward'),
-  steamReload:    ()      => ipcRenderer.invoke('steam-reload'),
-  steamHome:      ()      => ipcRenderer.invoke('steam-home'),
-  steamLibrary:   ()      => ipcRenderer.invoke('steam-library'),
-  steamNavigate:  (url)   => ipcRenderer.invoke('steam-navigate', url),
-  steamGetState:  ()      => ipcRenderer.invoke('steam-get-state'),
-  steamLaunch:    (appid) => ipcRenderer.invoke('steam-launch', appid),
-  steamMinimizeDashboard: () => ipcRenderer.invoke('steam-minimize-dashboard'),
-  onSteamEvent: (callback) => {
-    const handler = (_e, data) => callback(data);
-    ipcRenderer.on('steam-event', handler);
-    return () => ipcRenderer.removeListener('steam-event', handler);
-  },
 });

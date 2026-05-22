@@ -1,55 +1,78 @@
 #!/usr/bin/env bash
 #
-# Dashboard3D appliance session.
+# Dashboard3D appliance session — overlay architecture.
 #
-# Runs as the unprivileged 'gamer' user, auto-logged-in on tty1. Because
-# gamescope, the dashboard and Steam all run under this one uid, Steam
-# can reach the display gamescope owns — which the old root/gamer split
-# could not do.
+# Runs as the unprivileged 'gamer' user, auto-logged-in on tty1.
 #
-# Root-only hardware setup (GPU driver, thermal, fans) is done earlier,
-# at boot, by dashboard3d-prep.service.
+# Instead of the old gamescope-per-app + handoff model (which fought
+# DRM-master arbitration every time it swapped the dashboard for Steam),
+# this starts ONE X session that runs three things concurrently:
 #
-# On any tty other than tty1 this just hands off to a normal shell, so
-# the maintenance consoles stay usable.
+#   openbox      - minimal window manager
+#   steam        - Steam Big Picture, the persistent BASE layer
+#   dashboard3d  - the Electron dashboard, a frameless always-on-top
+#                  OVERLAY that covers Steam until dismissed
+#
+# Both Steam and the dashboard stay alive the entire session. There is
+# no process kill, no compositor handoff. "Going to play a game" is just
+# the dashboard hiding its own window (Steam is right there underneath,
+# already running). "Coming back" is the dashboard re-showing itself —
+# triggered by the F13 global hotkey the Electron app registers.
+#
+# Root-only hardware setup (GPU driver, thermal, fans) ran earlier at
+# boot via dashboard3d-prep.service.
+#
+# On any tty other than tty1 this hands off to a normal shell so the
+# maintenance consoles stay usable.
 
 if [[ "$(tty)" != "/dev/tty1" ]]; then
   exec /usr/bin/bash
 fi
 
 APP_BIN="/opt/dashboard3d/dashboard3d"
-GS_LOG=/tmp/gamescope.log
-GAMEMODE_FLAG=/tmp/dashboard3d-gamemode
-GAMEMODE_SCRIPT=/usr/local/bin/dashboard3d-gamemode
 INSTALL_SCRIPT=/usr/local/bin/dashboard3d-install
+XINITRC="$HOME/.xinitrc"
+X_LOG=/tmp/dashboard3d-x.log
 
-# We are inside our own logind session on tty1 — force libseat to the
-# logind backend so gamescope takes the seat from it.
-export LIBSEAT_BACKEND=logind
-
-# Wait for the GPU device (dashboard3d-prep.service loads amdgpu).
+# Wait for the GPU DRM device (dashboard3d-prep.service loads amdgpu;
+# nvidia autoloads via udev).
 for _ in $(seq 1 75); do
   compgen -G "/dev/dri/card*" >/dev/null && break
   sleep 0.2
 done
+
+# dGPU + RTD3 state, banner only. nvidia is loaded but RTD3 keeps it in
+# D3cold until a PRIME-offloaded game wakes it.
+_dgpu_kind="none"
+if lspci -nn 2>/dev/null | grep -E 'VGA|3D' | grep -qi 'nvidia'; then
+  _dgpu_kind="nvidia"
+  for _d in /sys/bus/pci/devices/*; do
+    [[ "$(cat "$_d/vendor" 2>/dev/null)" == 0x10de ]] || continue
+    _cls=$(cat "$_d/class" 2>/dev/null)
+    [[ "$_cls" == 0x0300* || "$_cls" == 0x0302* ]] || continue
+    _dgpu_kind="nvidia (RTD3: $(cat "$_d/power/runtime_status" 2>/dev/null || echo '?'))"
+    break
+  done
+elif lspci -nn 2>/dev/null | grep -E 'VGA|3D' | grep -qi 'amd\|ati'; then
+  _dgpu_kind="amd"
+fi
 
 echo
 echo "=============== Dashboard3D appliance ==============="
 echo "build   : $(cat /etc/dashboard3d-build 2>/dev/null || echo unknown)"
 echo "user    : $(id -un) (uid $(id -u))"
 echo "DRM     : $(ls /dev/dri/ 2>/dev/null | tr '\n' ' ')"
-echo "seat    : seat=${XDG_SEAT:-UNSET} vt=${XDG_VTNR:-UNSET} session=${XDG_SESSION_ID:-UNSET}"
-echo "runtime : ${XDG_RUNTIME_DIR:-UNSET}"
+echo "dGPU    : $_dgpu_kind"
+echo "session : X11 + openbox  (Steam Big Picture + dashboard overlay)"
 echo "====================================================="
-echo ">>> Press  g  for GAME MODE (Steam, full boost),"
-echo ">>>        m  for MOBILE GAME MODE (Steam, CPU boost off + quiet profile),"
-echo ">>>        i  to INSTALL to a disk,"
-echo ">>> or press Enter / wait 12s for the Dashboard."
-read -t 12 -r -n 1 _key || true
+echo ">>> Press  i  to INSTALL to a disk,"
+echo ">>> or press Enter / wait 10s to start the appliance."
+read -t 10 -r -n 1 _key || true
 echo
 
-# 'i' -> the disk installer. It needs root, so via sudo (a NOPASSWD
-# rule for this one command is installed in /etc/sudoers.d).
+# 'i' -> disk installer (needs root; NOPASSWD sudo rule installed).
+# The installer powers off on success; if cancelled it returns here
+# and we fall through to starting the appliance.
 if [[ "${_key:-}" == [iI] ]]; then
   if [[ -x "$INSTALL_SCRIPT" ]]; then
     sudo "$INSTALL_SCRIPT"
@@ -58,63 +81,86 @@ if [[ "${_key:-}" == [iI] ]]; then
   fi
 fi
 
-# 'g' -> Game Mode (also reachable from the in-app button, which drops
-# the same flag file with the same 'normal' content).
-if [[ "${_key:-}" == [gG] ]]; then
-  echo normal > "$GAMEMODE_FLAG"
-fi
-
-# 'm' -> Mobile Game Mode: same gamescope+Steam launch but with CPU
-# boost disabled and the ACPI platform_profile dropped to low-power /
-# quiet for the duration. Restores both on exit so the dashboard
-# session that comes back up isn't stuck in quiet mode.
-if [[ "${_key:-}" == [mM] ]]; then
-  echo quiet > "$GAMEMODE_FLAG"
-fi
-
 if [[ ! -x "$APP_BIN" ]]; then
   echo "FATAL: $APP_BIN is missing or not executable."
   exec /usr/bin/bash -i
 fi
 
-# Main session loop.
-while true; do
-  if [[ -f "$GAMEMODE_FLAG" ]]; then
-    # Read the mode marker (empty/normal/quiet) before deleting the flag.
-    _gm_mode="$(cat "$GAMEMODE_FLAG" 2>/dev/null | tr -d '[:space:]')"
-    rm -f "$GAMEMODE_FLAG"
-    case "$_gm_mode" in
-      quiet)
-        echo "Entering Mobile Game Mode (CPU boost off, quiet profile) ..."
-        if [[ -x "$GAMEMODE_SCRIPT" ]]; then
-          "$GAMEMODE_SCRIPT" --quiet
-        else
-          echo "Game Mode script missing: $GAMEMODE_SCRIPT"; sleep 3
-        fi
-        ;;
-      *)
-        echo "Entering Game Mode ..."
-        if [[ -x "$GAMEMODE_SCRIPT" ]]; then
-          "$GAMEMODE_SCRIPT"
-        else
-          echo "Game Mode script missing: $GAMEMODE_SCRIPT"; sleep 3
-        fi
-        ;;
-    esac
-    continue
-  fi
+# --- write the X session startup -----------------------------------
+# Order: a forced clean keymap, then openbox (WM up before windows map),
+# then Steam (background, restart-looped) and the dashboard overlay.
+#
+# KEYBOARD: the X session's first action is to force a clean, generic
+# pc105/us keymap with setxkbmap. A laptop's auto-detected XKB model can
+# yield a keymap with redefined symbols — the X server tolerates it, but
+# the stricter keymap compiler in every Chromium-based app (the Electron
+# dashboard AND Steam's CEF UI) rejects it and the app goes keyboard-dead
+# while the kernel console and the evdev media-key daemon, which bypass
+# the X keymap, keep working. This runs alongside
+# /etc/X11/xorg.conf.d/00-keyboard.conf: the .conf fixes the map at
+# device-add time, setxkbmap guarantees it on the live server before any
+# app starts. Belt and suspenders — so the distributed image gives every
+# keyboard a clean map regardless of what the host hardware auto-detects.
+cat > "$XINITRC" <<'XINITRC_EOF'
+#!/bin/sh
+# Auto-generated by dashboard3d-session. Do not edit — regenerated each boot.
 
-  echo "Launching gamescope + Dashboard3D ..."
-  gamescope -f -- "$APP_BIN" --no-sandbox >"$GS_LOG" 2>&1
+# Force a clean, generic keyboard map before anything else starts.
+# See the keyboard note in dashboard3d-session and 00-keyboard.conf.
+setxkbmap -model pc105 -layout us 2>/dev/null
+
+# openbox: the window manager. Must be up before windows map.
+openbox &
+sleep 1
+
+# Steam Big Picture, the persistent base layer — kept alive in a restart
+# loop so that if the user picks "Exit" from Steam's menu (or Steam
+# restarts itself after an update) the base layer reappears instead of
+# leaving a blank root behind the dashboard overlay.
+( while true; do
+    steam -bigpicture -nofriendsui >/tmp/steam.log 2>&1
+    sleep 3
+  done ) &
+
+# The dashboard overlay. Launched in the background (not exec'd) so the
+# session can also run the focus assist below; the `wait` at the end
+# keeps .xinitrc alive for the dashboard's lifetime — when the dashboard
+# exits, X dies and the session loop restarts the whole thing.
+/opt/dashboard3d/dashboard3d --no-sandbox &
+_dash_pid=$!
+
+# Focus assist: a kiosk has no one to click a window into focus, and
+# openbox's focus-on-map can lose the race with a frameless always-on-top
+# window. Once the dashboard window first maps, hand it the X keyboard
+# focus explicitly. One-shot — it stops after the first success so it
+# never fights the user dismissing the overlay to reach Steam underneath.
+( for _ in $(seq 1 60); do
+    _wid=$(xdotool search --class '[Dd]ashboard' 2>/dev/null | tail -n1)
+    if [ -n "$_wid" ]; then
+      xdotool windowactivate "$_wid" 2>/dev/null
+      xdotool windowfocus  "$_wid" 2>/dev/null
+      break
+    fi
+    sleep 0.5
+  done ) &
+
+wait "$_dash_pid"
+XINITRC_EOF
+chmod +x "$XINITRC"
+
+# --- session loop --------------------------------------------------
+# startx blocks for the life of the X session. If X exits (dashboard
+# crashed, or Xorg died) we relaunch after a short pause. Ctrl-C during
+# the pause drops to a maintenance shell.
+while true; do
+  echo "Starting appliance — X11 + openbox + Steam + Dashboard ..."
+  startx -- vt1 >"$X_LOG" 2>&1
   rc=$?
   clear 2>/dev/null || true
-  # The in-app Game Mode button leaves the flag — loop to run it.
-  [[ -f "$GAMEMODE_FLAG" ]] && continue
-
-  echo "============ gamescope output (exit $rc) ============"
-  cat "$GS_LOG" 2>/dev/null
+  echo "============ X session output (exit $rc) ============"
+  tail -n 30 "$X_LOG" 2>/dev/null
   echo "====================================================="
-  echo "gamescope / Dashboard3D exited. Output above, saved at $GS_LOG."
-  break
+  echo "Appliance session ended. Restarting in 4s — Ctrl-C for a shell."
+  sleep 4 || break
 done
 exec /usr/bin/bash -i

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, Menu, clipboard, screen, session, desktopCapturer, utilityProcess, shell, protocol, net, powerMonitor } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Menu, clipboard, screen, session, desktopCapturer, utilityProcess, shell, protocol, net, powerMonitor, globalShortcut } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -90,6 +90,69 @@ function createWindow() {
 
   win.removeMenu();
 
+  // ── Linux appliance: overlay mode ──────────────────────────────────
+  // On the Linux appliance the dashboard is a frameless, fullscreen,
+  // always-on-TOP overlay sitting over Steam Big Picture. This is the
+  // opposite of the Windows build's "act as the desktop wallpaper"
+  // behavior (always-on-bottom). The controller button hides this
+  // window (revealing Steam); the F13 global hotkey shows it again.
+  if (process.platform === 'linux') {
+    // resizable:false (set in the constructor for the Windows desktop
+    // build) can block setFullScreen from taking — flip it on first.
+    win.setResizable(true);
+    win.setFullScreen(true);
+    // 'screen-saver' is the highest level — keeps the overlay above
+    // even a fullscreen game window when it's shown.
+    win.setAlwaysOnTop(true, 'screen-saver');
+    win.once('ready-to-show', () => { win.show(); win.focus(); });
+
+    // Global summon hotkey — works even while a game is focused and the
+    // dashboard is hidden.
+    //   Ctrl+Alt+D   — physically pressable on any keyboard; controller
+    //                  users map a Steam Input chord to it (D = Dashboard).
+    //
+    // Only MODIFIER-based accelerators are registered here. A bare-keysym
+    // global shortcut (we used to also register "F13") is a footgun on
+    // Linux/X11: if the running keymap has no keycode for that keysym,
+    // Electron's XGrabKey falls back to keycode 0 (AnyKey) and passively
+    // grabs EVERY unmodified key — typing then works only while some
+    // modifier is held down. The clean pc105/us appliance keymap has no
+    // F13 keycode, so F13 is dropped. The Armoury Crate key (KEY_PROG1 ->
+    // the evdev daemon -> SIGUSR2, below) is the controller/hardware summon.
+    const _toggleOverlay = () => {
+      if (!_mainWin || _mainWin.isDestroyed()) return;
+      if (_mainWin.isVisible()) {
+        _mainWin.hide();
+      } else {
+        _mainWin.show();
+        _mainWin.focus();
+      }
+    };
+    app.whenReady().then(() => {
+      for (const accel of ['Control+Alt+D']) {
+        try {
+          globalShortcut.register(accel, _toggleOverlay);
+        } catch (err) {
+          console.warn(`[overlay] hotkey ${accel} register failed:`, err.message);
+        }
+      }
+    });
+    app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch {} });
+
+    // Armoury Crate key. The hardware key emits KEY_PROG1, which X
+    // doesn't expose as a registerable accelerator — so the
+    // dashboard3d-media-keys evdev daemon catches it and sends this
+    // process SIGUSR2 to toggle the overlay (same action as F13). We
+    // drop our PID where the daemon looks for it. SIGUSR2 is unused by
+    // Node (unlike SIGUSR1, which Node reserves for the inspector).
+    try {
+      require('fs').writeFileSync('/tmp/dashboard3d-main.pid', String(process.pid));
+    } catch (err) {
+      console.warn('[overlay] PID file write failed:', err.message);
+    }
+    process.on('SIGUSR2', _toggleOverlay);
+  }
+
   // F12 → toggle DevTools (handy for diagnosing renderer errors when the
   // window is borderless and can't be right-clicked).
   // Escape during zen → force the renderer to leave zen. Goes through
@@ -161,18 +224,23 @@ function createWindow() {
   // interval. Some Windows interactions (drag-drop, restore-from-minimize,
   // app-switching) shuffle z-order without firing blur, so a 1s safety-net
   // interval catches anything the events miss.
-  win.once('ready-to-show', () => sendToBottom(win));
-  win.on('show',  () => sendToBottom(win));
-  win.on('blur',  () => sendToBottom(win));
-  win.on('focus', () => sendToBottom(win));
+  // WINDOWS ONLY — the Linux appliance build runs the dashboard as an
+  // always-on-TOP overlay (see the linux branch above); demoting it to
+  // the bottom would put it behind Steam permanently.
+  if (process.platform === 'win32') {
+    win.once('ready-to-show', () => sendToBottom(win));
+    win.on('show',  () => sendToBottom(win));
+    win.on('blur',  () => sendToBottom(win));
+    win.on('focus', () => sendToBottom(win));
 
-  // Re-assert bottom Z-order periodically in case another app changes
-  // the window order. 1s was overkill — 5s is plenty for "stay on the
-  // desktop" behavior and avoids waking the wm thread every second.
-  const _bottomInterval = setInterval(() => {
-    if (win.isDestroyed()) { clearInterval(_bottomInterval); return; }
-    sendToBottom(win);
-  }, 5000);
+    // Re-assert bottom Z-order periodically in case another app changes
+    // the window order. 1s was overkill — 5s is plenty for "stay on the
+    // desktop" behavior and avoids waking the wm thread every second.
+    const _bottomInterval = setInterval(() => {
+      if (win.isDestroyed()) { clearInterval(_bottomInterval); return; }
+      sendToBottom(win);
+    }, 5000);
+  }
 
   // Removed: setZoomFactor(1.2) in tandem with force-device-scale-factor=1.
   // That combination forced Chromium's compositor to pre-scale every layer
@@ -753,40 +821,35 @@ protocol.registerSchemesAsPrivileged([
 // terminal telemetry, FPS counter, etc.) firing at full speed even
 // when the window is hidden, which pegs CPU and spins fans.
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
-// Force Chromium's desktopCapturer onto the Windows Graphics Capture
-// (WGC) backend for both individual windows and full screens. The
-// default GDI BitBlt path cannot read DirectX / OpenGL / Vulkan
-// back-buffers, so any 3D-rendered viewport (Cinema 4D, Blender,
-// games, etc.) shows black in the capture even though the window
-// chrome captures fine. WGC reads directly from the desktop
-// compositor and sees hardware-accelerated content correctly.
-// Requires Windows 10 1903 (May 2019) or newer; older Windows just
-// falls back to GDI silently. Windows will draw a thin yellow border
-// around captured windows while WGC is active — this is OS-side and
-// doesn't appear in the recording.
-// GPU-friendly feature toggles, batched into a single switch so we
-// don't trample the WGC flags above. Effects:
-//   AllowWgcWindowCapturer / AllowWgcScreenCapturer — see comment above.
-//   CanvasOopRasterization — out-of-process canvas raster (frees
-//     renderer from rasterizing big canvases like the music
-//     visualizer / audio waveform on every frame).
-//   AcceleratedVideoDecodeLinuxGL / VaapiVideoDecodeLinuxGL — Linux
-//     hardware-decode hints (harmless on Windows).
-app.commandLine.appendSwitch('enable-features',
-  'AllowWgcWindowCapturer,AllowWgcScreenCapturer,CanvasOopRasterization,' +
-  'AcceleratedVideoDecodeLinuxGL,VaapiVideoDecodeLinuxGL,VaapiVideoEncoder');
-// NOTE: previously force-enabled ignore-gpu-blocklist + enable-gpu-rasterization
-// + enable-zero-copy + enable-accelerated-video-decode here. Those flags pushed
-// Chromium into paths that, on systems with healthy drivers, did NOT speed
-// things up — they introduced constant raster-to-GPU transfers and kept the
-// renderer busy even at idle (multiple Dashboard3D.exe processes pegged at
-// idle, fans spiking). Reverted to Chromium's auto-pick. The ffmpeg export
-// still uses NVENC / QSV / AMF as a separate process — independent of these.
-// Pin to D3D11 ANGLE backend on Windows — most stable for our mix of
-// MediaRecorder + WebGL + filter()-heavy CSS. Default ANGLE picks
-// D3D11 anyway on modern Windows, but being explicit avoids surprise
-// fallbacks on systems where the auto-pick goes to OpenGL.
-app.commandLine.appendSwitch('use-angle', 'd3d11');
+
+// Feature toggles. Most are universal; a couple are Windows-only and
+// would error or loop the GPU process on other platforms.
+//   CanvasOopRasterization — out-of-process canvas raster. Universal
+//     (frees the renderer from rasterizing big canvases like the music
+//     visualizer + audio waveform on every frame).
+//   AllowWgcWindowCapturer / AllowWgcScreenCapturer — Windows Graphics
+//     Capture. WINDOWS-ONLY. Lets desktopCapturer read hardware-
+//     accelerated (D3D/OpenGL/Vulkan) back-buffers instead of falling
+//     back to the GDI BitBlt path which captures black on 3D windows.
+//   AcceleratedVideoDecodeLinuxGL / VaapiVideoDecodeLinuxGL /
+//     VaapiVideoEncoder — Linux hardware video. Used to be in this
+//     list but they spin the GPU process at 99% CPU on NVIDIA-Optimus
+//     laptops where Mesa/VA-API has no working backend for the
+//     active GL context, which starves the IPC bus and freezes the
+//     topbar Game Mode handoff. Removed — software decode is plenty
+//     for the dashboard's needs.
+const enableFeatures = ['CanvasOopRasterization'];
+if (process.platform === 'win32') {
+  enableFeatures.push('AllowWgcWindowCapturer', 'AllowWgcScreenCapturer');
+}
+app.commandLine.appendSwitch('enable-features', enableFeatures.join(','));
+
+// ANGLE backend: was previously pinned per-platform here. Now removed
+// entirely — Chromium's default ANGLE auto-pick is correct on every
+// platform we ship to (d3d11 on Windows, gl on Linux, metal on macOS).
+// Forcing a specific backend on Linux while inheriting the Windows
+// "d3d11" line was the bug that froze the appliance: d3d11 doesn't
+// exist on Linux so the GPU process hot-looped trying to init it.
 // Per-window autoplay policy instead of a global switch — the dashboard
 // itself needs to autoplay its boot SFX before the user clicks anything
 // (otherwise the CRT power-on tone is silent on startup). The
@@ -1727,171 +1790,6 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
-  // ── STEAM pane ─────────────────────────────────────────────────────
-  // A single dedicated BrowserView pointed at the Steam web store/library
-  // so the user can log in and browse just like a normal browser tab —
-  // but isolated to its own partition so Steam cookies don't mix with the
-  // BROWSER pane and persist across launches. Game launches hand off to
-  // the native Steam client via the steam://run/<appid> protocol; the
-  // dashboard can minimise itself out of the way for full-screen play.
-  const _STEAM_PARTITION = 'persist:dash-steam';
-  const _STEAM_HOME = 'https://store.steampowered.com/';
-  const _STEAM_LIBRARY = 'https://store.steampowered.com/account/licenses/';
-  let _steamView = null;
-  let _steamBounds = { x: 0, y: 0, width: 0, height: 0 };
-  let _steamVisible = false;
-
-  function _applySteamBounds() {
-    if (!_steamView || !_mainWin || _mainWin.isDestroyed()) return;
-    const cb = _mainWin.getContentBounds();
-    try {
-      _steamView.setBounds({
-        x: Math.round(cb.width  * (_steamBounds.x      || 0)),
-        y: Math.round(cb.height * (_steamBounds.y      || 0)),
-        width:  Math.max(0, Math.round(cb.width  * (_steamBounds.width  || 0))),
-        height: Math.max(0, Math.round(cb.height * (_steamBounds.height || 0))),
-      });
-    } catch {}
-  }
-  function _ensureSteamView() {
-    if (_steamView) return _steamView;
-    _steamView = new BrowserView({
-      webPreferences: {
-        partition: _STEAM_PARTITION,
-        contextIsolation: true,
-        nodeIntegration: false,
-        autoplayPolicy: 'document-user-activation-required',
-        javascript: true,
-        webSecurity: true,
-        spellcheck: false,
-        enableWebSQL: false,
-        backgroundThrottling: true,
-      },
-    });
-    _steamView.setBackgroundColor('#0a0a0a');
-    _applySteamBounds();
-    const wc = _steamView.webContents;
-    // Forward nav state + title back to the renderer so the chrome can
-    // reflect back/forward button enablement and the URL field.
-    const sendState = (eventType) => {
-      if (!_mainWin || _mainWin.isDestroyed()) return;
-      try {
-        _mainWin.webContents.send('steam-event', {
-          type: eventType,
-          url: wc.getURL(),
-          title: wc.getTitle(),
-          canBack: wc.canGoBack(),
-          canFwd: wc.canGoForward(),
-          loading: wc.isLoading(),
-        });
-      } catch {}
-    };
-    wc.on('did-start-loading',  () => sendState('loading'));
-    wc.on('did-stop-loading',   () => sendState('loaded'));
-    wc.on('did-navigate',       () => sendState('navigate'));
-    wc.on('did-navigate-in-page', () => sendState('navigate-in-page'));
-    wc.on('page-title-updated', () => sendState('title'));
-    // Treat steam:// links in the embedded view as a launch request — the
-    // BV can't load them itself so without this they'd just error.
-    wc.setWindowOpenHandler(({ url }) => {
-      if (/^steam:\/\//i.test(url)) {
-        try { shell.openExternal(url); } catch {}
-        return { action: 'deny' };
-      }
-      // Pop-outs aren't supported in this pane — load in-place instead.
-      if (/^https?:\/\//i.test(url)) {
-        wc.loadURL(url).catch(() => {});
-      }
-      return { action: 'deny' };
-    });
-    wc.on('will-navigate', (e, url) => {
-      if (/^steam:\/\//i.test(url)) {
-        e.preventDefault();
-        try { shell.openExternal(url); } catch {}
-      }
-    });
-    wc.loadURL(_STEAM_HOME).catch(() => {});
-    return _steamView;
-  }
-  function _showSteamView() {
-    if (!_mainWin || _mainWin.isDestroyed()) return;
-    _ensureSteamView();
-    try { _mainWin.addBrowserView(_steamView); } catch {}
-    try { _steamView.webContents.setAudioMuted(false); } catch {}
-    _applySteamBounds();
-    _steamVisible = true;
-  }
-  function _hideSteamView() {
-    if (!_steamView || !_mainWin || _mainWin.isDestroyed()) return;
-    try { _mainWin.removeBrowserView(_steamView); } catch {}
-    try { _steamView.webContents.setAudioMuted(true); } catch {}
-    _steamVisible = false;
-  }
-
-  ipcMain.handle('steam-bounds', (_e, rect) => {
-    _steamBounds = rect || _steamBounds;
-    if (_steamVisible) _applySteamBounds();
-    return { ok: true };
-  });
-  ipcMain.handle('steam-show', () => { _showSteamView(); return { ok: true }; });
-  ipcMain.handle('steam-hide', () => { _hideSteamView(); return { ok: true }; });
-  ipcMain.handle('steam-back', () => { try { _steamView?.webContents.goBack(); } catch {} return { ok: true }; });
-  ipcMain.handle('steam-forward', () => { try { _steamView?.webContents.goForward(); } catch {} return { ok: true }; });
-  ipcMain.handle('steam-reload', () => { try { _steamView?.webContents.reload(); } catch {} return { ok: true }; });
-  ipcMain.handle('steam-home', () => {
-    try { _ensureSteamView().webContents.loadURL(_STEAM_HOME); } catch {}
-    return { ok: true };
-  });
-  ipcMain.handle('steam-library', () => {
-    try { _ensureSteamView().webContents.loadURL(_STEAM_LIBRARY); } catch {}
-    return { ok: true };
-  });
-  ipcMain.handle('steam-navigate', (_e, url) => {
-    if (!url || typeof url !== 'string') return { ok: false };
-    let target = url.trim();
-    if (!/^https?:\/\//i.test(target)) {
-      // Bare query → Steam search; bare host → assume https.
-      if (/\s/.test(target) || !/\./.test(target)) {
-        target = `https://store.steampowered.com/search/?term=${encodeURIComponent(target)}`;
-      } else {
-        target = `https://${target}`;
-      }
-    }
-    try { _ensureSteamView().webContents.loadURL(target); } catch {}
-    return { ok: true };
-  });
-  ipcMain.handle('steam-get-state', () => {
-    if (!_steamView) return { url: '', title: '', canBack: false, canFwd: false, loading: false };
-    const wc = _steamView.webContents;
-    return {
-      url: wc.getURL(),
-      title: wc.getTitle(),
-      canBack: wc.canGoBack(),
-      canFwd: wc.canGoForward(),
-      loading: wc.isLoading(),
-    };
-  });
-  // Launch a game: spawns the native Steam client via the steam://run/<id>
-  // protocol. Returns ok:false if the AppID looks invalid (digits only,
-  // 1–10 chars) so the renderer can keep the typo visible to the user.
-  ipcMain.handle('steam-launch', (_e, appid) => {
-    const id = String(appid || '').trim();
-    if (!/^\d{1,10}$/.test(id)) return { ok: false, reason: 'bad-appid' };
-    try { shell.openExternal(`steam://run/${id}`); } catch (e) { return { ok: false, reason: String(e?.message || e) }; }
-    return { ok: true, appid: id };
-  });
-  // FULLSCREEN — minimise the dashboard so the game (a separate native
-  // window owned by Steam) takes the whole screen. Cheap, reliable, and
-  // doesn't need any platform-specific window-foreground hack.
-  ipcMain.handle('steam-minimize-dashboard', () => {
-    if (!_mainWin || _mainWin.isDestroyed()) return { ok: false };
-    try {
-      if (_mainWin.isFullScreen()) _mainWin.setFullScreen(false);
-      _mainWin.minimize();
-    } catch {}
-    return { ok: true };
-  });
-
   // History — get returns the most-recent N entries (newest first);
   // clear wipes both the in-memory list and the on-disk file.
   ipcMain.handle('browser-history-get', (_e, limit = 100) => {
@@ -2273,6 +2171,27 @@ app.on('window-all-closed', () => {
 
 function registerIpc() {
   ipcMain.handle('system-info',     () => getSystemInfo());
+
+  // Battery / charge state — cross-platform via systeminformation.
+  // hasBattery is false on a desktop, which the renderer uses to hide
+  // the battery widget entirely. Polled on a slow cadence by the
+  // renderer (battery % moves slowly). Never throws — on any failure
+  // we report no battery so the widget just stays hidden.
+  ipcMain.handle('battery-info', async () => {
+    try {
+      const b = await si.battery();
+      return {
+        hasBattery:    !!b.hasBattery,
+        percent:       Math.max(0, Math.min(100, Math.round(b.percent || 0))),
+        isCharging:    !!b.isCharging,
+        acConnected:   !!b.acConnected,
+        timeRemaining: (typeof b.timeRemaining === 'number' && b.timeRemaining > 0)
+                         ? b.timeRemaining : null,   // minutes, or null
+      };
+    } catch {
+      return { hasBattery: false, percent: 0, isCharging: false, acConnected: false, timeRemaining: null };
+    }
+  });
 
   ipcMain.handle('storage-info', async () => {
     return await getStorageInfo();
@@ -4337,37 +4256,45 @@ function registerIpc() {
     }
   });
 
-  // Game Mode (Linux appliance) — write a flag the session script
-  // watches, then quit. When the dashboard's gamescope exits, the
-  // session loop sees the flag and launches Steam Big Picture; when
-  // Steam exits it loops back to the dashboard.
-  ipcMain.handle('game-mode', () => {
+  // Game Mode (Linux appliance) — overlay model. The dashboard and
+  // Steam Big Picture both run for the whole session; "Game Mode" is
+  // simply hiding the dashboard overlay so Steam (already running
+  // underneath) is revealed. No process is killed, no compositor is
+  // handed off. The F13 global hotkey (registered in createWindow)
+  // brings the dashboard back.
+  //
+  // win.hide() unmaps the window — Chromium then reports the document
+  // as hidden, which suspends the audio contexts and the
+  // document.hidden-gated timers in the renderer, so the dashboard
+  // goes near-idle while the user games. win.show() reverses it.
+  //
+  // opts.appid: if present, launch straight into that Steam title via
+  // a `steam steam://run/<id>` call before hiding.
+  ipcMain.handle('game-mode', (_e, opts = {}) => {
     if (process.platform !== 'linux') {
       return { ok: false, error: 'Game Mode is available on the Linux appliance only' };
     }
-    // Hand off WITHOUT relying on Electron exiting itself — app.quit(),
-    // app.exit() and process.exit() all hung under gamescope, and an
-    // external `pkill` BY NAME never reliably matched. So: drop the flag
-    // the session loop watches for, then SIGKILL this process by its own
-    // pid. SIGKILL is uncatchable and needs no name match; gamescope was
-    // launched as `gamescope -- dashboard3d`, so when this child dies
-    // gamescope exits and the session loop runs Steam Big Picture.
-    try {
-      require('fs').writeFileSync('/tmp/dashboard3d-gamemode', '1');
-    } catch (err) {
-      return { ok: false, error: 'could not arm Game Mode: ' + err.message };
+    if (!_mainWin || _mainWin.isDestroyed()) {
+      return { ok: false, error: 'main window unavailable' };
     }
-    // Delay briefly so this {ok:true} reply reaches the renderer first.
-    setTimeout(() => {
-      try {
-        // Also sweep any child Electron processes (renderer/GPU) so none
-        // linger on the GPU once gamescope is gone — best effort.
-        require('child_process')
-          .spawn('/bin/sh', ['-c', 'pkill -KILL -x dashboard3d'],
+    // Optional: jump straight into a specific title.
+    if (opts && opts.appid) {
+      const id = String(opts.appid).trim();
+      if (/^\d{1,10}$/.test(id)) {
+        try {
+          require('child_process').spawn('steam', [`steam://run/${id}`],
             { detached: true, stdio: 'ignore' }).unref();
-      } catch (_) { /* best effort */ }
-      try { process.kill(process.pid, 'SIGKILL'); } catch (_) { /* ignore */ }
-    }, 200);
+        } catch (err) {
+          return { ok: false, error: 'steam launch failed: ' + err.message };
+        }
+      }
+    }
+    // Hide the overlay — Steam Big Picture is already running underneath.
+    try {
+      _mainWin.hide();
+    } catch (err) {
+      return { ok: false, error: 'hide failed: ' + err.message };
+    }
     return { ok: true };
   });
 

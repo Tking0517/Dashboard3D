@@ -57,6 +57,55 @@ grep -vE '^\s*(#|$)' "$OVERLAY/packages.add" >> "$PROFILE/packages.x86_64"
 echo "==> applying airootfs overlay"
 cp -aT "$OVERLAY/airootfs" "$PROFILE/airootfs"
 
+# --- 4b. Steam pre-bootstrap hook -------------------------------------------
+# The steam package on Arch ships /usr/lib/steam/bootstraplinux_ubuntu12_32
+# .tar.xz — the archive Steam extracts to ~/.local/share/Steam/ on first
+# launch. Pre-extracting it into /etc/skel/.local/share/Steam during the
+# ISO build means systemd-sysusers' /etc/skel-copy step gives the gamer
+# user a fully populated Steam install at first boot. The "Setting up
+# Steam, please wait..." 1-3 minute first-run stall goes away; Steam
+# launches straight into its login screen (or last session, after that).
+#
+# Extraction has to happen INSIDE the chroot — after pacstrap installs
+# the steam package — so it lives in airootfs/root/customize_airootfs.sh,
+# the standard archiso hook mkarchiso runs in-chroot after package
+# install. releng ships a customize_airootfs.sh of its own; we append.
+echo "==> writing Steam pre-bootstrap hook into customize_airootfs.sh"
+CUSTOMIZE_SCRIPT="$PROFILE/airootfs/root/customize_airootfs.sh"
+mkdir -p "$(dirname "$CUSTOMIZE_SCRIPT")"
+[[ -f "$CUSTOMIZE_SCRIPT" ]] || { echo '#!/usr/bin/env bash' > "$CUSTOMIZE_SCRIPT"; echo 'set -e -u' >> "$CUSTOMIZE_SCRIPT"; }
+cat >> "$CUSTOMIZE_SCRIPT" <<'STEAM_HOOK'
+
+# --- Dashboard3D Steam pre-bootstrap (auto-appended by container-build.sh) ---
+_steam_tarball=/usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz
+if [[ -f "$_steam_tarball" ]]; then
+  echo "[customize_airootfs] baking Steam pre-bootstrap into /etc/skel"
+  mkdir -p /etc/skel/.local/share/Steam
+  if tar -xf "$_steam_tarball" -C /etc/skel/.local/share/Steam; then
+    echo "[customize_airootfs] Steam pre-bootstrap OK"
+  else
+    echo "[customize_airootfs] WARN: tar extraction failed; Steam will bootstrap on first run"
+  fi
+else
+  echo "[customize_airootfs] WARN: $_steam_tarball not present; Steam will bootstrap on first run"
+fi
+
+# --- Dashboard3D PipeWire user-service enablement -------------------------
+# A hand-built archiso never runs the systemd presets a normal package
+# install would, so PipeWire's per-user services aren't enabled for the
+# gamer account — PipeWire never starts, and wpctl (the volume keys'
+# backend) has nothing to talk to. `systemctl --global enable` writes
+# the enable symlinks under /etc/systemd/user so EVERY user (i.e. the
+# appliance's gamer) gets PipeWire + WirePlumber at login. It's a static
+# symlink operation, safe to run in the build chroot.
+if systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service; then
+  echo "[customize_airootfs] PipeWire user services enabled"
+else
+  echo "[customize_airootfs] WARN: PipeWire --global enable failed"
+fi
+STEAM_HOOK
+chmod +x "$CUSTOMIZE_SCRIPT"
+
 # --- 5. the app itself ------------------------------------------------------
 echo "==> installing Dashboard3D into /opt/dashboard3d"
 mkdir -p "$PROFILE/airootfs/opt/dashboard3d"

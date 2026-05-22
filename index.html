@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   </head>
-  <body class="is-booting is-boot-distorted is-boot-glowing">
+  <body class="is-booting is-boot-distorted is-boot-glowing is-calm">
     <!-- CRT static-noise overlay, only visible while body.is-booting is
          active. Canvas-rendered horizontal stripes in the active theme
          accent — composited via mix-blend-mode: screen so it brightens
@@ -657,6 +657,14 @@
           </svg>
         </button>
 
+        <button id="calm-btn" class="topbar-btn" type="button" title="Calm mode — stop the pulse animations (keeps the theme glow, runs cooler)" aria-label="Toggle calm mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 10 Q6 5 9 10 T15 10"/>
+            <path d="M15 14 H21"/>
+            <path d="M3 14 H9"/>
+          </svg>
+        </button>
+
         <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
           <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
@@ -671,6 +679,20 @@
         </button>
 
         <span id="topbar-div-3" class="topbar-divider" title="Drag to reposition divider"></span>
+
+        <!-- Battery / charge indicator. Hidden unless the host has a
+             battery (laptop). Fill width + colour set by JS; the charge
+             bolt shows when plugged in. All colours are theme vars so
+             it follows every palette. -->
+        <span id="battery-widget" class="topbar-battery" hidden aria-label="Battery">
+          <span class="battery-shell">
+            <span class="battery-fill" id="battery-fill"></span>
+            <svg class="battery-bolt" id="battery-bolt" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden>
+              <path d="M13 2 L4 14 H11 L10 22 L19 10 H12 Z"/>
+            </svg>
+          </span>
+          <span class="battery-pct" id="battery-pct">—</span>
+        </span>
 
         <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -694,7 +716,6 @@
               <button type="button" class="combo-mode-tab" data-mode="tasks">TASKS</button>
               <button type="button" class="combo-mode-tab" data-mode="music">MUSIC</button>
               <button type="button" class="combo-mode-tab" data-mode="stream">STREAM</button>
-              <button type="button" class="combo-mode-tab" data-mode="steam">STEAM</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -1737,37 +1758,6 @@
                 </div>
                 <div class="stream-stage" id="stream-stage" data-stream-tab="discord">
                   <div class="stream-status" id="stream-status">CONNECTING TO DISCORD…</div>
-                </div>
-              </div>
-
-              <!-- STEAM pane — dedicated BrowserView pointed at the Steam
-                   web store/library so the user can log in and browse.
-                   Game launches hand off to the native Steam client via
-                   the steam://run/<appid> URL handler. The dashboard
-                   minimises itself on FULLSCREEN so the launched game
-                   takes the whole screen. -->
-              <div class="combo-pane combo-pane-steam">
-                <div class="steam-navrow">
-                  <button type="button" class="steam-navbtn" id="steam-back-btn" title="Back" disabled>
-                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 6 L9 12 L15 18 V6 Z"/></svg>
-                  </button>
-                  <button type="button" class="steam-navbtn" id="steam-forward-btn" title="Forward" disabled>
-                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 6 L15 12 L9 18 V6 Z"/></svg>
-                  </button>
-                  <button type="button" class="steam-navbtn" id="steam-reload-btn" title="Reload">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12 A8 8 0 1 0 6 6.5"/><polyline points="3,3 6,6.5 9.5,5"/></svg>
-                  </button>
-                  <button type="button" class="steam-navbtn" id="steam-home-btn" title="Steam store home">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12 L12 4 L20 12"/><path d="M6 11 V20 H18 V11"/></svg>
-                  </button>
-                  <button type="button" class="steam-navbtn" id="steam-library-btn" title="Your library">LIB</button>
-                  <input id="steam-url" class="steam-url" type="text" placeholder="Search Steam or paste a store URL…" spellcheck="false" autocomplete="off" />
-                  <input id="steam-appid" class="steam-appid" type="text" placeholder="AppID" spellcheck="false" autocomplete="off" maxlength="10" title="Steam AppID — e.g. 440 for TF2. Reads from a /app/<id>/ store URL if the field is empty." />
-                  <button type="button" class="steam-navbtn steam-launch-btn" id="steam-launch-btn" title="Launch this game in the native Steam client (steam://run/<appid>)">LAUNCH</button>
-                  <button type="button" class="steam-navbtn steam-fullscreen-btn" id="steam-fullscreen-btn" title="Minimise the dashboard so the launched game takes the whole screen. Click the taskbar icon (or Win+Tab) to return.">FULLSCREEN</button>
-                </div>
-                <div class="steam-stage" id="steam-stage">
-                  <div class="steam-status" id="steam-status">CONNECTING TO STEAM…</div>
                 </div>
               </div>
 

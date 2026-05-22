@@ -744,6 +744,31 @@ body[data-theme^="retro"]::after {
   --ok:     #60a991;
 }
 
+/* ── Calm mode ────────────────────────────────────────────────────
+   Toggled by the topbar calm button (persisted as cfg.calmMode).
+   Stops the idle pulse/breathe animations on ANY theme while keeping
+   the theme's glow + colors. Rationale: a STATIC text-shadow /
+   box-shadow glow is rasterized once into a cached GPU texture and is
+   cheap. But a glowing element that PULSES forces the GPU to
+   re-rasterize the blur every frame — that re-raster is the ~20C a
+   cyber theme adds over matte. Calm mode keeps the neon look (a
+   screenshot is ~identical) and drops the continuous GPU cost.
+   Mirrors the element list the matte block freezes. */
+body.is-calm .panel,
+body.is-calm .meter,
+body.is-calm .time-row,
+body.is-calm .temp-row,
+body.is-calm .storage-row,
+body.is-calm .net-row,
+body.is-calm .gpu-mem-row,
+body.is-calm .note-tab,
+body.is-calm .weather-left,
+body.is-calm .weather-right,
+body.is-calm .bg-grid,
+body.is-calm .bg-grid::after {
+  animation: none !important;
+}
+
 /* Shared Matte structural look — applies to every matte-* variant. */
 [data-theme^="matte"],
 [data-theme^="matte"] * {
@@ -2148,10 +2173,71 @@ body[data-bg-pattern="radial"] .bg-grid::after {
 #theme-btn:hover    svg { transform: scale(1.1); }
 #invert-btn:hover   svg { transform: rotate(180deg); }
 #camera-btn.is-active,
-#terminal-btn.is-active {
+#terminal-btn.is-active,
+#calm-btn.is-active {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* ── Battery / charge indicator (topbar) ──────────────────────────────
+   Hidden until JS confirms a battery exists (laptop only). Every colour
+   is a theme var, so the widget follows the active palette — accent
+   fill, amber/red at low charge, --text for the percentage. No shadow
+   or animation, so matte themes and calm mode leave it untouched. */
+.topbar-battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+  color: var(--muted);
+  font-family: inherit;
+}
+.topbar-battery[hidden] { display: none; }
+.battery-shell {
+  position: relative;
+  width: 26px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+}
+.battery-shell::after {            /* the positive-terminal nub */
+  content: '';
+  position: absolute;
+  right: -4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2.5px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 0 1px 1px 0;
+}
+.battery-fill {
+  height: 100%;
+  width: 0%;                       /* JS sets this from the percent */
+  background: var(--accent);
+  transition: width 0.4s ease, background 0.2s;
+}
+.battery-fill.low  { background: var(--amber); }
+.battery-fill.crit { background: var(--red); }
+.battery-bolt {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 10px;
+  color: var(--ok);
+}
+.battery-bolt[hidden] { display: none; }
+.battery-pct {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  min-width: 30px;
 }
 
 /* Terminal / diagnostics overlay — styled to match the rest of the HUD
@@ -8713,56 +8799,6 @@ body.is-booting .panel.info-on [class*='bar-fill'] {
    theme accent and the panel reads as part of the same family.
    ───────────────────────────────────────────────────────────────── */
 
-/* Boot-status ticker — scrolling welcome text in the PRODUCTIVITY
-   header. Lives inside #combo-code as a single inline-block span. The
-   parent's `width` + `overflow:hidden` make it a clipping window; the
-   inner track translateX-loops forever until a mode-tab click ends
-   ticker mode. CRITICAL: the panel-header is pinned to its intrinsic
-   default height while ticker is active, AND .combo-ticker-track uses
-   `font-size: inherit` + `line-height: 1` so the larger ticker text
-   doesn't grow the header row. Without those, the header would expand
-   when the ticker turned on, pushing the mode-tab strip and everything
-   below it down — which read as "the whole bar keeps moving". */
-.panel-combo[data-boot-status="ticker"] .panel-header {
-  /* Three-column layout for ticker mode: title sizes to content (auto),
-     combo-code fills the remaining space (1fr), fold-group sits at the
-     right edge (auto). The base rule uses `1fr auto auto auto` which
-     made combo-code's explicit width-clamp crowd the fold-group out of
-     the visible area on wide panels. With 1fr on combo-code instead,
-     the fold buttons keep their natural slot at the right. */
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-}
-.panel-combo[data-boot-status="ticker"] #combo-code {
-  /* No fixed width — the grid 1fr column gives us all remaining space.
-     min-width:0 lets the cell shrink below its content (otherwise the
-     long ticker text would force the grid wider than the panel). */
-  width: auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  /* Match the header's intrinsic line height — without this, the
-     larger ticker font would push line-height taller and grow the row. */
-  line-height: 1;
-  height: 1em;
-}
-.panel-combo[data-boot-status="ticker"] #combo-tag { display: none; }
-.combo-ticker-track {
-  display: inline-block;
-  white-space: nowrap;
-  /* Inherit the panel-header's font-size so the ticker doesn't grow
-     the row. Letter-spacing + color stay distinctive. */
-  font-size: inherit;
-  letter-spacing: 0.16em;
-  color: var(--accent);
-  line-height: 1;
-}
-@keyframes combo-ticker-scroll {
-  from { transform: translateX(100%); }
-  to   { transform: translateX(-100%); }
-}
 
 /* RAM panel — 60-second memory-history grid uses amber so RAM doesn't
    stack as solid cyan beside CPU and GPU. */
@@ -9654,102 +9690,6 @@ body.is-booting #audio-in-grid:not(.info-on)  .audio-bars-row {
   padding: 20px;
 }
 .stream-status.is-error { color: #f06868; }
-
-/* ════════════════════════════════════════════════════════════════════
-   §combo-pane-steam ── STEAM (web store / library + native launch)
-   Single dedicated BrowserView pointed at store.steampowered.com so the
-   user can sign in and browse like a normal browser tab. Games launch
-   via the steam://run/<appid> protocol — Steam handles the actual
-   process spawn; we just minimise the dashboard out of the way.
-   ════════════════════════════════════════════════════════════════════ */
-
-.combo-pane-steam {
-  gap: 6px;
-  display: flex;
-  flex-direction: column;
-  font-family: var(--font-tech);
-}
-.steam-navrow {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-}
-.steam-navbtn {
-  appearance: none;
-  background: transparent;
-  border: 1px solid var(--rule-dim);
-  color: var(--muted);
-  height: 24px;
-  min-width: 24px;
-  padding: 0 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex: 0 0 auto;
-  font-family: var(--font-tech);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  font-variant-emoji: text;
-}
-.steam-navbtn svg { width: 14px; height: 14px; }
-.steam-navbtn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
-.steam-navbtn:disabled { opacity: 0.3; cursor: not-allowed; }
-.steam-launch-btn { color: var(--accent); border-color: var(--accent); }
-.steam-launch-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-.steam-fullscreen-btn { letter-spacing: 0.1em; }
-.steam-url {
-  flex: 1 1 auto;
-  font-family: var(--font-tech);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  background: rgba(8, 10, 14, 0.6);
-  color: var(--text);
-  border: 1px solid var(--rule-dim);
-  border-radius: 12px;
-  padding: 4px 12px;
-  outline: none;
-  min-width: 0;
-}
-.steam-url:focus { border-color: var(--accent); background: rgba(0, 0, 0, 0.8); }
-.steam-appid {
-  flex: 0 0 80px;
-  font-family: var(--font-tech);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  background: rgba(8, 10, 14, 0.6);
-  color: var(--text);
-  border: 1px solid var(--rule-dim);
-  border-radius: 12px;
-  padding: 4px 10px;
-  outline: none;
-  text-align: center;
-}
-.steam-appid:focus { border-color: var(--accent); background: rgba(0, 0, 0, 0.8); }
-.steam-stage {
-  flex: 1 1 auto;
-  position: relative;
-  background: #0a0a0a;
-  border: 1px solid var(--rule-dim);
-  min-height: 0;
-  overflow: hidden;
-}
-.steam-status {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-tech);
-  font-size: 11px;
-  letter-spacing: 0.16em;
-  color: var(--muted);
-  text-align: center;
-  padding: 20px;
-  transition: opacity 220ms ease;
-}
-.steam-status.is-hidden { opacity: 0; pointer-events: none; }
 
 /* ════════════════════════════════════════════════════════════════════
    §combo-pane-edit ── EDIT ROOM (Phase 1A · DaVinci-Cut-page flavor)

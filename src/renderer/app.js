@@ -385,43 +385,18 @@ let _startBootFlicker = () => {};
           try { playBootSfx('boot-ready'); } catch {}
         }, _bootEndMs);
 
-        // 1.5 s after ONLINE, swap to the scrolling welcome ticker:
-        // "GOOD MORNING · 76°F CLEAR · 02:14 PM · TUE MAY 12" looped
-        // forever. Reads live weather/time/date values at the moment
-        // the ticker fires. Stopped by any mode-tab click —
-        // paintComboHeader sees bootStatus === 'ticker' and tears it
-        // down, restoring the mode-driven subtitle.
-        const TICKER_AT       = _bootEndMs + 1500;
-        const TICKER_LOOP_MS  = 24000;
-
+        // 1.5 s after ONLINE, hand the combo header back to its normal
+        // mode-driven paint (NOTES · SCRATCHPAD, etc). A scrolling
+        // welcome ticker used to run here; it was removed because its
+        // 24s infinite loop re-rasterized the text layer on every
+        // restart and produced a recurring GPU temp spike.
         setTimeout(() => {
-          const h = new Date().getHours();
-          const greeting = h < 12 ? 'GOOD MORNING'
-                         : h < 20 ? 'GOOD AFTERNOON'
-                                  : 'GOOD EVENING';
-          const tempText = (document.querySelector('#weather-temp')?.textContent || '').trim();
-          const condText = (document.querySelector('#weather-cond')?.textContent || '').trim();
-          const tempStr  = (tempText && tempText !== '—')
-            ? `${tempText}°F${(condText && condText !== '—') ? ' ' + condText : ''}`
-            : '';
-          const now = new Date();
-          const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }).toUpperCase();
-          const dateStr = now.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
-          const parts = [greeting];
-          if (tempStr) parts.push(tempStr);
-          parts.push(timeStr, dateStr);
-          const tickerText = parts.join('  ·  ');
-
+          delete comboPanelEl.dataset.bootStatus;
           comboCodeEl.style.transition = '';
           comboCodeEl.style.opacity    = '';
           comboCodeEl.innerHTML        = '';
-          const track = document.createElement('span');
-          track.className   = 'combo-ticker-track';
-          track.textContent = tickerText;
-          track.style.animation = `combo-ticker-scroll ${TICKER_LOOP_MS}ms linear infinite`;
-          comboCodeEl.appendChild(track);
-          comboPanelEl.dataset.bootStatus = 'ticker';
-        }, TICKER_AT);
+          _paintComboHeader?.();
+        }, _bootEndMs + 1500);
       }
     };
 
@@ -1032,7 +1007,11 @@ function tickClock() {
 }
 clockTzEl.textContent = (localTz || '—').toUpperCase();
 tickClock();
-setInterval(tickClock, 1000);
+// Gated on visibility — no point reformatting the clock while the
+// dashboard is hidden. visibilitychange fires an immediate tick so the
+// clock is never visibly stale when the dashboard comes back.
+setInterval(() => { if (!document.hidden) tickClock(); }, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tickClock(); });
 
 function applyAltLocation(loc) {
   altLocation = loc;
@@ -1380,6 +1359,49 @@ async function refreshSystem() {
 
 refreshSystem();
 setInterval(() => { if (!document.hidden) refreshSystem(); }, UI_REFRESH_MS);
+
+// ── HUD: Battery ─────────────────────────────────────────────────────────────
+// Laptop-only. si.battery() reports hasBattery:false on a desktop — in
+// that case the widget stays hidden and we stop polling entirely. The
+// widget is themed purely via CSS vars (see .topbar-battery), so it
+// follows every palette. Battery % moves slowly → 30s cadence, gated
+// on document.hidden like the other HUD polls.
+const batteryWidgetEl = document.querySelector('#battery-widget');
+const batteryFillEl   = document.querySelector('#battery-fill');
+const batteryBoltEl   = document.querySelector('#battery-bolt');
+const batteryPctEl    = document.querySelector('#battery-pct');
+let _batteryTimer = null;
+
+async function refreshBattery() {
+  if (!window.dash?.batteryInfo || !batteryWidgetEl) return;
+  let b;
+  try { b = await window.dash.batteryInfo(); } catch { return; }
+  if (!b?.hasBattery) {
+    // Desktop — no battery. Hide the widget and stop polling for good.
+    batteryWidgetEl.hidden = true;
+    if (_batteryTimer) { clearInterval(_batteryTimer); _batteryTimer = null; }
+    return;
+  }
+  batteryWidgetEl.hidden = false;
+  const pct = b.percent;
+  if (batteryFillEl) {
+    batteryFillEl.style.width = pct + '%';
+    // Amber/red only while discharging — a charging battery stays accent.
+    batteryFillEl.classList.toggle('crit', pct <= 15 && !b.isCharging);
+    batteryFillEl.classList.toggle('low',  pct > 15 && pct <= 30 && !b.isCharging);
+  }
+  if (batteryBoltEl) batteryBoltEl.hidden = !b.isCharging;
+  if (batteryPctEl)  batteryPctEl.textContent = pct + '%';
+  const state = b.isCharging ? 'Charging'
+              : b.acConnected ? 'Plugged in'
+              : 'On battery';
+  const tr = b.timeRemaining
+    ? ` · ${Math.floor(b.timeRemaining / 60)}h ${String(b.timeRemaining % 60).padStart(2, '0')}m left`
+    : '';
+  batteryWidgetEl.title = `Battery ${pct}% · ${state}${tr}`;
+}
+_batteryTimer = setInterval(() => { if (!document.hidden) refreshBattery(); }, 30_000);
+refreshBattery();
 
 // ── HUD: Storage ─────────────────────────────────────────────────────────────
 const storageListEl   = document.querySelector('#storage-list');
@@ -1741,6 +1763,7 @@ function renderGridLine(container) {
 // theme switches (into and out of e-ink) without hooking each grid's
 // own paint path.
 setInterval(() => {
+  if (document.hidden) return;
   for (const el of [coreGridEl, memHistGridEl, gpuGridEl, scratchGridEl,
                     zenCoreGridEl, zenMemGridEl, zenGpuGridEl]) {
     renderGridLine(el);
@@ -2785,6 +2808,31 @@ const AUDIO_MIC_FLOOR = 24;
 // FFT band layout matches the audify worker (60 Hz – 16 kHz, log-spaced).
 const AUDIO_BAND_FMIN = 60;
 const AUDIO_BAND_FMAX = 16000;
+
+// ── Audio context suspend-on-hide ────────────────────────────────────
+// In the overlay architecture the dashboard window is HIDDEN whenever
+// the user is in Steam / a game. Chromium auto-throttles rAF + the
+// document.hidden-gated setIntervals, but an AudioContext keeps running
+// its FFT on every audio buffer regardless of window visibility. That
+// would mean the dashboard is still doing real work while "away" —
+// exactly the double-process cost we want to avoid. So: every
+// AudioContext registers here, and a visibilitychange handler suspends
+// them all when the dashboard is hidden and resumes them when it's
+// shown again. Suspended = the analyser's FFT + the sampler stop dead.
+const _audioCtxRegistry = new Set();
+function _registerAudioCtx(ctx) {
+  if (ctx && typeof ctx.suspend === 'function') {
+    _audioCtxRegistry.add(ctx);
+    // If we register while already hidden, start suspended.
+    if (document.hidden) { try { ctx.suspend(); } catch {} }
+  }
+  return ctx;
+}
+document.addEventListener('visibilitychange', () => {
+  for (const ctx of _audioCtxRegistry) {
+    try { document.hidden ? ctx.suspend() : ctx.resume(); } catch {}
+  }
+});
 // Global visualizer redraw cadence (milliseconds between sampler ticks).
 // Driven by the single topbar Hz control — the per-panel ▲/▼ arrows are
 // gone. Persisted under cfg.audioFrameMs. Range 5 ms (200 Hz) – 100 ms
@@ -3725,10 +3773,15 @@ async function tryStartOutputCapture() {
   }
 
   if (track) {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _registerAudioCtx(new (window.AudioContext || window.webkitAudioContext)());
     const src = ctx.createMediaStreamSource(stream);
     const an  = ctx.createAnalyser();
-    an.fftSize = 1024;
+    // 512 bins (was 1024). We only render 24 log-spaced bars, so even
+    // 512 averages ~21 bins/bar at the high end — still smooth. Halves
+    // the per-buffer FFT cost; the browser runs FFT at ~43 Hz on every
+    // audio buffer regardless of our 5 Hz draw rate, so this is the
+    // single biggest knob for always-on cost.
+    an.fftSize = 512;
     an.smoothingTimeConstant = 0.3;
     src.connect(an);
     audioOutViz.setAnalyserAndTrack(an, track);
@@ -3772,10 +3825,11 @@ async function startMicCapture(deviceId) {
       ? { audio: { deviceId: { exact: deviceId } }, video: false }
       : { audio: true, video: false };
     _micStream = await navigator.mediaDevices.getUserMedia(constraints);
-    _micCtx = new (window.AudioContext || window.webkitAudioContext)();
+    _micCtx = _registerAudioCtx(new (window.AudioContext || window.webkitAudioContext)());
     const src = _micCtx.createMediaStreamSource(_micStream);
     const an  = _micCtx.createAnalyser();
-    an.fftSize = 1024;
+    // See output-capture analyser above for why 512 (was 1024).
+    an.fftSize = 512;
     an.smoothingTimeConstant = 0.3;
     src.connect(an);
     audioInViz.setAnalyserAndTrack(an, _micStream.getAudioTracks()[0]);
@@ -4720,22 +4774,12 @@ if (comboPanel) {
   const tasksPane       = comboPanel.querySelector('.combo-pane-tasks');
   const musicPane       = comboPanel.querySelector('.combo-pane-music');
   const streamPane      = comboPanel.querySelector('.combo-pane-stream');
-  const steamPane       = comboPanel.querySelector('.combo-pane-steam');
 
   function paintComboHeader() {
-    // Bail while the OFFLINE → STANDBY → ONLINE state machine is using
-    // the header chrome; it'll transition us into ticker mode itself.
+    // Bail while the OFFLINE → STANDBY → ONLINE boot state machine owns
+    // the header chrome. It clears bootStatus + calls this function
+    // itself once boot settles, handing the header back to mode paint.
     if (comboPanel.dataset.bootStatus === '1') return;
-    // If the infinite welcome ticker is running, this call (typically
-    // from a mode-tab click) is the user's signal to dismiss it — tear
-    // down the ticker DOM, restore combo-tag visibility, clear inline
-    // styles, then fall through to the normal mode-driven paint.
-    if (comboPanel.dataset.bootStatus === 'ticker') {
-      delete comboPanel.dataset.bootStatus;
-      codeEl.innerHTML = '';
-      codeEl.style.width = '';
-      if (tagEl) tagEl.style.opacity = '';
-    }
     const mode = comboPanel.dataset.mode || 'notes';
     // Parent name stays "PRODUCTIVITY" across every mode — the active
     // sub-mode is reflected in the em-chip (N1/X1/P1/W1/E1/V1) and in the
@@ -4791,11 +4835,6 @@ if (comboPanel) {
       codeEl.textContent = 'STREAM · EMBEDS';
       tagEl.textContent = '—';
       footerLabelEl.textContent = 'STREAM STATUS';
-    } else if (mode === 'steam') {
-      titleEl.innerHTML = 'PRODUCTIVITY <em>G1</em>';
-      codeEl.textContent = 'STEAM · GAME LIBRARY';
-      tagEl.textContent = '—';
-      footerLabelEl.textContent = 'STEAM STATUS';
     } else {
       // Unknown mode — fall back to notes header so the chrome doesn't
       // strand with a stale label. setComboMode validates the input
@@ -4820,7 +4859,6 @@ if (comboPanel) {
     visualizer: () => import('./features/visualizer.js'),
     edit:       () => import('./features/edit.js'),
     music:      () => import('./features/music.js'),
-    steam:      () => import('./features/steam.js'),
   };
   const _lazyPaneState = {};   // mode -> loaded module
   // Seeded here (not in visualizer.js) so file deletes made in EXPLORE
@@ -4861,7 +4899,7 @@ if (comboPanel) {
   }
 
   function setComboMode(mode, persist = true) {
-    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'edit', 'browser', 'tasks', 'music', 'stream', 'steam']);
+    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'edit', 'browser', 'tasks', 'music', 'stream']);
     if (!VALID.has(mode)) mode = 'notes';
     comboPanel.dataset.mode = mode;
     notesPane     ?.classList.toggle('is-visible', mode === 'notes');
@@ -4873,7 +4911,6 @@ if (comboPanel) {
     tasksPane     ?.classList.toggle('is-visible', mode === 'tasks');
     musicPane     ?.classList.toggle('is-visible', mode === 'music');
     streamPane    ?.classList.toggle('is-visible', mode === 'stream');
-    steamPane     ?.classList.toggle('is-visible', mode === 'steam');
     // Music meter visibility — drives whether the rAF redraw chain runs
     // (see _bgmDrawMeter + window._bgmMaybeStartMeter in the music init
     // block). When music tab isn't visible we skip canvas work entirely;
@@ -5996,17 +6033,19 @@ async function initHwDiag() {
 initHwDiag();
 
 // ── GAME MODE ────────────────────────────────────────────────────────────
-// Topbar button: quits the dashboard to a Steam Big Picture (gamescope)
-// session on the Linux appliance. The session script loops back to the
-// dashboard when Steam exits. Capture-phase delegation, like the thermal
-// buttons (direct listeners proved unreliable under gamescope).
+// Topbar button: on the Linux appliance the dashboard and Steam Big
+// Picture both run for the whole session. This button just HIDES the
+// dashboard overlay — Steam is already running underneath, instantly
+// revealed. Press F13 (or the controller chord mapped to it) to bring
+// the dashboard back. No process is killed, no hand-off.
+// Capture-phase delegation, like the thermal buttons.
 function initGameMode() {
   const btn = document.getElementById('gamemode-btn');
   if (!btn) return;
-  // Big unmissable status overlay so the hand-off is visible: if it never
-  // appears the click is not reaching #gamemode-btn; if it appears but the
-  // screen stays, the app failed to quit.
-  const showOverlay = (msg, dismissable) => {
+  // Transient error surface — only used if the bridge is missing or the
+  // hide call fails. The success path shows nothing: the window just
+  // hides, and comes back clean on F13.
+  const showError = (msg) => {
     let ov = document.getElementById('gamemode-overlay-msg');
     if (!ov) {
       ov = document.createElement('div');
@@ -6017,27 +6056,25 @@ function initGameMode() {
         'display:flex;align-items:center;justify-content:center;text-align:center;padding:6vw;';
       document.body.appendChild(ov);
     }
-    ov.textContent = msg;
-    ov.onclick = dismissable ? () => ov.remove() : null;
+    ov.textContent = msg + '\n\n(tap to dismiss)';
+    ov.onclick = () => ov.remove();
   };
   document.addEventListener('click', async (ev) => {
     if (!ev.target?.closest?.('#gamemode-btn')) return;
-    showOverlay('ENTERING GAME MODE\nhanding off to Steam …', false);
     playSfx?.('click');
     if (!window.dash?.enterGameMode) {
-      showOverlay('Game Mode: the enterGameMode bridge is missing.\n\n(tap to dismiss)', true);
+      showError('Game Mode: the enterGameMode bridge is missing.');
       return;
     }
     try {
       const r = await window.dash.enterGameMode();
-      if (r?.ok) {
-        showOverlay('GAME MODE ARMED\nquitting to Steam …\n\n(if this screen stays, the app could not quit)', false);
-      } else {
-        showOverlay('Game Mode failed:\n' + (r?.error || 'unknown') + '\n\n(tap to dismiss)', true);
+      if (!r?.ok) {
+        showError('Game Mode failed:\n' + (r?.error || 'unknown'));
         playSfx?.('error');
       }
+      // On success the window is already hidden — nothing to paint.
     } catch (e) {
-      showOverlay('Game Mode exception:\n' + (e?.message || e) + '\n\n(tap to dismiss)', true);
+      showError('Game Mode exception:\n' + (e?.message || e));
       playSfx?.('error');
     }
   }, true);
@@ -6991,6 +7028,31 @@ document.querySelector('#sfx-btn')?.addEventListener('click', async () => {
 (async () => {
   const cfg = await window.dash?.getConfig?.() || {};
   if (cfg.sfxEnabled === false) setSfxEnabled(false);
+})();
+
+// ── Calm mode ────────────────────────────────────────────────────────────
+// body.is-calm freezes the idle pulse/breathe animations (see styles.css).
+// Keeps the theme glow + colors, drops the per-frame GPU re-raster that a
+// pulsing glowing element costs — cyber themes run ~20C cooler with it on.
+// Persisted as cfg.calmMode.
+function setCalmMode(on) {
+  document.body.classList.toggle('is-calm', !!on);
+  document.querySelector('#calm-btn')?.classList.toggle('is-active', !!on);
+}
+document.querySelector('#calm-btn')?.addEventListener('click', async () => {
+  const on = !document.body.classList.contains('is-calm');
+  setCalmMode(on);
+  playSfx?.('click');
+  if (window.dash?.setConfig) {
+    try { await window.dash.setConfig({ calmMode: on }); } catch {}
+  }
+});
+(async () => {
+  const cfg = await window.dash?.getConfig?.() || {};
+  // Calm mode is ON by default — body ships with .is-calm in index.html
+  // so there's no animated-then-frozen flash on boot. Only an explicit
+  // cfg.calmMode === false turns it off.
+  setCalmMode(cfg.calmMode !== false);
 })();
 
 // Version chip — pulled from package.json via the main process so the topbar
@@ -8624,7 +8686,7 @@ zenBtnEl?.addEventListener('click', (e) => {
     if (overlay && !overlay.hidden) paintLiveOverlay();
   }
   poll();
-  setInterval(poll, POLL_MS);
+  setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
 })();
 
 // ── STREAM tab ───────────────────────────────────────────────────────────

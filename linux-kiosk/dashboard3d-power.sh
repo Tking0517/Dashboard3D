@@ -23,10 +23,42 @@ set -u
 usage() {
   cat >&2 <<USAGE
 Usage:
-  dashboard3d-power boost on|off
+  dashboard3d-power boost   on|off
   dashboard3d-power profile quiet|balanced|performance
+  dashboard3d-power dgpu    on|off
 USAGE
   exit 2
+}
+
+set_dgpu() {
+  local want="$1" d ven cls have_nv=0
+  case "$want" in on|off) ;; *) usage ;; esac
+  # Skip cleanly if no NVIDIA dGPU on this PCI bus (e.g. AMD-only or
+  # iGPU-only laptops) — no modprobe to do.
+  for d in /sys/bus/pci/devices/*; do
+    cls=$(cat "$d/class" 2>/dev/null)
+    [[ "$cls" == 0x0300* || "$cls" == 0x0302* ]] || continue
+    ven=$(cat "$d/vendor" 2>/dev/null)
+    [[ "$ven" == 0x10de ]] && { have_nv=1; break; }
+  done
+  if (( ! have_nv )); then
+    echo "dgpu -> no NVIDIA on this bus, nothing to do"
+    return 0
+  fi
+  if [[ "$want" == on ]]; then
+    # Load in dependency order. modeset=1 is needed for KMS/Vulkan paths.
+    modprobe nvidia          2>&1 | sed 's/^/  /'
+    modprobe nvidia_modeset  2>&1 | sed 's/^/  /'
+    modprobe nvidia_drm modeset=1 2>&1 | sed 's/^/  /'
+    echo "dgpu -> nvidia loaded"
+  else
+    # Reverse order. Modules with open handles will refuse — that's
+    # fine, we just report what happened and stay loaded.
+    rmmod nvidia_drm     2>/dev/null || echo "  nvidia_drm still in use"
+    rmmod nvidia_modeset 2>/dev/null || echo "  nvidia_modeset still in use"
+    rmmod nvidia         2>/dev/null || echo "  nvidia still in use"
+    echo "dgpu -> rmmod attempted"
+  fi
 }
 
 ACTION="${1:-}"
@@ -85,5 +117,6 @@ set_profile() {
 case "$ACTION" in
   boost)   set_boost   "$VAL" ;;
   profile) set_profile "$VAL" ;;
+  dgpu)    set_dgpu    "$VAL" ;;
   *)       usage ;;
 esac

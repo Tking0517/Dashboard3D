@@ -50,10 +50,37 @@ lib32-gamemode
 mangohud
 lib32-mangohud
 
-# --- input / media-key daemon (volume keys -> wpctl in Big Picture
-#     and inside games; appliance has no DE to do this for us) ---
+# --- Steam-as-windowed-app session (replaces the gamescope+bigpicture
+#     path which kept hanging on DRM master / connector issues). startx
+#     brings up a minimal Xorg + openbox + Steam desktop client. Steam
+#     opens as a normal window, the user clicks Library + Launch like
+#     on any other desktop. When Steam exits, X exits, we return to
+#     the dashboard. ---
+xorg-server
+xorg-xinit
+openbox
+# X11 input driver — Xorg has NO keyboard / mouse / touchpad without it.
+# It is NOT a hard dependency of xorg-server, so it must be listed
+# explicitly or input silently fails on the appliance.
+xf86-input-libinput
+# setxkbmap — the X session forces a clean pc105/us keymap at startup
+# (see dashboard3d-session.sh and xorg.conf.d/00-keyboard.conf).
+xorg-setxkbmap
+
+# --- input / media + brightness key daemon (volume keys -> wpctl,
+#     brightness keys -> brightnessctl; the appliance has no DE to
+#     handle the Fn keys for us) ---
 python
 python-evdev
+brightnessctl
+
+# --- X session + on-device maintenance tools ---
+# xdotool is used by the X session itself (the kiosk focus assist in
+# dashboard3d-session.sh); xterm + xorg-xinput are kept for keyboard /
+# input debugging from a maintenance tty.
+xdotool
+xterm
+xorg-xinput
 
 # --- fonts ---
 noto-fonts

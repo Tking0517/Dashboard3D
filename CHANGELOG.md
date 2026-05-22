@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.9.0-alpha.5] — 2026-05-22
+
+**Linux appliance: keyboard input fixed for the Xorg overlay session.**
+
+### Linux appliance — keyboard input
+The Xorg + openbox + Steam + dashboard-overlay session had no working keyboard
+in Steam or the dashboard, while the kernel console and the evdev media-key
+daemon — both of which bypass the X input path — kept working. Four separate
+layers were missing or broken; all fixed and verified on hardware:
+
+- **X input driver** — added `xf86-input-libinput` to `iso-build/overlay/packages.add`.
+  It is not a hard dependency of `xorg-server`, so without it Xorg starts with
+  no keyboard, mouse, or touchpad at all.
+- **Keymap** — `dashboard3d-session.sh` now forces a clean generic keymap with
+  `setxkbmap -model pc105 -layout us` before Steam or the dashboard start,
+  alongside `xorg.conf.d/00-keyboard.conf`. An auto-detected laptop XKB model
+  can produce a keymap with redefined symbols that Chromium's stricter keymap
+  compiler (the Electron dashboard and Steam's CEF UI) rejects. Added
+  `xorg-setxkbmap`.
+- **Window focus** — the generated `.xinitrc` runs a one-shot `xdotool` focus
+  assist so the frameless always-on-top overlay reliably receives keyboard
+  focus under openbox.
+- **AnyKey grab** — removed the `F13` global shortcut from the Electron app.
+  `F13` has no keycode on a clean `pc105/us` keymap, so `globalShortcut`
+  resolved it to keycode 0 (`AnyKey`) and passively grabbed every unmodified
+  key — typing worked only while a modifier was held down. Only modifier-based
+  accelerators (`Ctrl+Alt+D`) are registered now; the Armoury Crate key (evdev
+  daemon → SIGUSR2) remains the hardware overlay summon.
+
 ## [0.9.0-alpha.4] — 2026-05-21
 
 **Mobile Game Mode (quiet CPU profile), media-key daemon for volume in Big Picture.**

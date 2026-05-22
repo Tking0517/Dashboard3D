@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
-"""Dashboard3D media-key daemon.
+"""Dashboard3D media + brightness key daemon.
 
-Listens for kernel KEY_VOLUMEUP / KEY_VOLUMEDOWN / KEY_MUTE events on
-every input device that advertises them and dispatches each press to
-WirePlumber's wpctl. Runs as the gamer user under a systemd-user
-service so it stays alive across gamescope sessions, Steam Big Picture
-and individual game launches — wherever the keyboard input lands, this
-catches it.
+Listens for the kernel function-key events on every input device that
+advertises them and dispatches each press:
 
-Why evdev and not a desktop hotkey daemon: the appliance has no DE.
-gamescope grabs the seat, and Steam Big Picture under it has no system
-volume UI. Anything that wants an X/Wayland keymap fails. evdev reads
-straight from /dev/input/event*, which works regardless of what
-compositor (if any) is in front. logind grants uaccess on the seat-
-owner's input devices, so no `input` group membership is required.
+  KEY_VOLUMEUP / KEY_VOLUMEDOWN / KEY_MUTE  -> WirePlumber (wpctl)
+  KEY_BRIGHTNESSUP / KEY_BRIGHTNESSDOWN     -> backlight (brightnessctl)
+  KEY_PROG1 (ASUS Armoury Crate key)        -> toggle dashboard overlay
+                                               (SIGUSR2 to the Electron app)
+
+Runs as the gamer user under a systemd-user service so it stays alive
+across the X session, Steam Big Picture and individual game launches —
+wherever the keyboard input lands, this catches it.
+
+Why evdev and not a desktop hotkey daemon: the appliance has no DE, so
+there is no settings daemon to handle the Fn media/brightness keys.
+evdev reads straight from /dev/input/event*, which works regardless of
+what compositor is in front. logind grants uaccess on the seat-owner's
+input devices, so no `input` group membership is required.
+
+brightnessctl writes /sys/class/backlight; its packaged udev rule
+chgrp's those files to `video` (mode 0664), so the gamer user needs to
+be in the `video` group (granted via the sysusers.d entry) — then no
+root is required for brightness changes either.
 
 Hot-plug isn't handled — a Bluetooth keyboard paired AFTER launch will
-not have its volume keys caught. systemd Restart=always will pick it
-up on the next launch; for now that's the simplest behaviour.
+not have its keys caught. systemd Restart=always picks it up on the
+next launch; for now that's the simplest behaviour.
 """
 
+import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -35,6 +46,14 @@ VOLUME_STEP = "5%"
 SINK = "@DEFAULT_AUDIO_SINK@"
 WPCTL = "/usr/bin/wpctl"
 
+BRIGHTNESS_STEP = "8%"
+BRIGHTNESSCTL = "/usr/bin/brightnessctl"
+
+# The Electron dashboard writes its main-process PID here at startup.
+# The Armoury Crate key (KEY_PROG1) toggles the dashboard overlay by
+# sending that process SIGUSR2 — the same action as the F13 hotkey.
+MAIN_PID_FILE = "/tmp/dashboard3d-main.pid"
+
 
 def _wpctl(*args: str) -> None:
     try:
@@ -43,10 +62,48 @@ def _wpctl(*args: str) -> None:
         print(f"wpctl {args} failed: {exc}", file=sys.stderr)
 
 
+def _brightness(delta: str) -> None:
+    # brightnessctl auto-detects the backlight class device. `set N%-`
+    # clamps at 0 (panel dark); `set N%+` clamps at max. Standard laptop
+    # behaviour — the brightness-up key always brings it back.
+    try:
+        subprocess.run([BRIGHTNESSCTL, "set", delta], check=False, timeout=2)
+    except Exception as exc:
+        print(f"brightnessctl {delta} failed: {exc}", file=sys.stderr)
+
+
+def _toggle_overlay() -> None:
+    # Armoury Crate key -> toggle the dashboard overlay. We signal the
+    # Electron main process (SIGUSR2). The PID is verified against
+    # /proc/<pid>/cmdline first so a stale PID file (recycled PID) can
+    # never deliver SIGUSR2 to an unrelated process.
+    try:
+        with open(MAIN_PID_FILE) as fh:
+            pid = int(fh.read().strip())
+    except Exception as exc:
+        print(f"overlay toggle: no dashboard PID ({exc})", file=sys.stderr)
+        return
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            if b"dashboard3d" not in fh.read():
+                print(f"overlay toggle: PID {pid} is not the dashboard", file=sys.stderr)
+                return
+        os.kill(pid, signal.SIGUSR2)
+    except (ProcessLookupError, FileNotFoundError):
+        print(f"overlay toggle: dashboard PID {pid} not running", file=sys.stderr)
+    except Exception as exc:
+        print(f"overlay toggle failed: {exc}", file=sys.stderr)
+
+
 HANDLERS = {
-    ecodes.KEY_VOLUMEUP:   lambda: _wpctl("set-volume", SINK, f"{VOLUME_STEP}+"),
-    ecodes.KEY_VOLUMEDOWN: lambda: _wpctl("set-volume", SINK, f"{VOLUME_STEP}-"),
-    ecodes.KEY_MUTE:       lambda: _wpctl("set-mute",   SINK, "toggle"),
+    ecodes.KEY_VOLUMEUP:      lambda: _wpctl("set-volume", SINK, f"{VOLUME_STEP}+"),
+    ecodes.KEY_VOLUMEDOWN:    lambda: _wpctl("set-volume", SINK, f"{VOLUME_STEP}-"),
+    ecodes.KEY_MUTE:          lambda: _wpctl("set-mute",   SINK, "toggle"),
+    ecodes.KEY_BRIGHTNESSUP:  lambda: _brightness(f"{BRIGHTNESS_STEP}+"),
+    ecodes.KEY_BRIGHTNESSDOWN:lambda: _brightness(f"{BRIGHTNESS_STEP}-"),
+    # Armoury Crate key (ASUS ROG laptops). Absent on other hardware —
+    # open_devices() simply won't bind it, so this is self-gating.
+    ecodes.KEY_PROG1:         _toggle_overlay,
 }
 
 

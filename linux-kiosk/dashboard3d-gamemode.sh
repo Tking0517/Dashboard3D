@@ -1,53 +1,84 @@
 #!/usr/bin/env bash
 #
-# Dashboard3D Game Mode — Steam Big Picture under gamescope.
+# Dashboard3D Game Mode — Steam (desktop client) under a minimal Xorg
+# session.
 #
-# Runs as the 'gamer' user, the SAME uid as the dashboard session. So
-# gamescope and Steam share one user and one XDG_RUNTIME_DIR — Steam
-# can reach the display with no cross-user permission problems.
+# Why no gamescope: every attempt to run Steam Big Picture under
+# gamescope on this Optimus laptop hit DRM master / connector errors
+# we couldn't dodge cleanly. startx + openbox + steam is the boring,
+# reliable Linux gaming kiosk pattern — Xorg owns the display, openbox
+# is a tiny stacking WM, Steam opens as a normal window.
 #
-# Self-diagnosing: waits for the network, relaunches across Steam's
-# first-run restart, and on failure prints one photographable screen.
+# Flow:
+#   1. Write a one-shot ~/.xinitrc that starts openbox (background)
+#      then exec's steam (foreground).
+#   2. startx → Xorg sources xinitrc → openbox + steam come up.
+#   3. When the user quits Steam (File > Exit), xinitrc exits → Xorg
+#      exits → session.sh's loop relaunches the dashboard.
 #
 # Modes:
-#   (default)   full Game Mode — CPU boost stays on, performance profile
-#   --quiet     Mobile Game Mode — CPU boost OFF + ACPI platform_profile
-#               low-power / quiet, so a laptop on the couch doesn't spin
-#               up to jet-engine for a CPU-light title. Both knobs are
-#               restored to performance/boost-on when Game Mode exits.
+#   (default)   regular Game Mode — platform_profile stays at boot
+#               default ('balanced' on this build)
+#   --quiet     Mobile Game Mode — CPU boost OFF + platform_profile
+#               quiet, restored to defaults on exit.
 
 set -u
 
 QUIET=0
-case "${1:-}" in
-  --quiet|-q) QUIET=1 ;;
-  '' ) ;;
-  * )
-    echo "Usage: dashboard3d-gamemode [--quiet]" >&2
-    exit 2
-    ;;
-esac
+while (( $# )); do
+  case "$1" in
+    --quiet|-q) QUIET=1 ;;
+    --app)      shift; ;;   # legacy from the gamescope/bigpicture path
+    --app=*)    ;;          # legacy
+    '')         ;;
+    *)
+      echo "Usage: dashboard3d-gamemode [--quiet]" >&2
+      exit 2
+      ;;
+  esac
+  shift || break
+done
 
 LOG=/tmp/gamemode.log
 DIAG=/tmp/gamemode-diag.txt
 POWER=/usr/local/bin/dashboard3d-power
+XINITRC="$HOME/.xinitrc"
 : > "$LOG"
 
-# Mobile mode hooks. The power helper runs via NOPASSWD sudo (see the
-# /etc/sudoers.d/dashboard3d rule). EXIT-trap restores defaults on any
-# exit path — failure report, max attempts, or user ending the session —
-# so we never strand the system in low-power on the dashboard's way back.
+# MangoHud overlay — shows GPU name + FPS in-game so we can prove
+# which GPU is actually rendering. Toggle with Shift+Right Shift+F12.
+export MANGOHUD=1
+export MANGOHUD_CONFIGFILE=/etc/MangoHud.conf
+
+# PRIME render offload. The nvidia driver is loaded (RTD3 keeps the
+# dGPU asleep at idle); these env vars tell Steam + every Vulkan/GL
+# title it launches to render on the NVIDIA dGPU. Opening the nvidia
+# device is exactly what wakes it from D3cold — RTD3 powers it back
+# down on its own once the game exits. gamescope still scans out on
+# the iGPU panel. No-op on AMD-only / iGPU-only hardware.
+if [[ -d /proc/driver/nvidia ]] || [[ -e /dev/nvidiactl ]]; then
+  export __NV_PRIME_RENDER_OFFLOAD=1
+  export __GLX_VENDOR_LIBRARY_NAME=nvidia
+  export __VK_LAYER_NV_optimus=NVIDIA_only
+fi
+
+# Mobile Game Mode hooks. Power helper runs via NOPASSWD sudo (see
+# /etc/sudoers.d/dashboard3d). EXIT trap restores defaults on every
+# exit path so we never strand the system in low-power on the way
+# back to the dashboard.
 apply_quiet() {
   (( QUIET )) || return 0
   echo ">>> Mobile Game Mode: lowering CPU boost + platform profile ..."
-  sudo -n "$POWER" boost off    2>&1 | sed 's/^/    /'
+  sudo -n "$POWER" boost off     2>&1 | sed 's/^/    /'
   sudo -n "$POWER" profile quiet 2>&1 | sed 's/^/    /'
 }
 restore_quiet() {
   (( QUIET )) || return 0
-  echo ">>> Mobile Game Mode: restoring CPU boost + performance profile ..."
-  sudo -n "$POWER" boost on          2>&1 | sed 's/^/    /'
-  sudo -n "$POWER" profile performance 2>&1 | sed 's/^/    /'
+  echo ">>> Mobile Game Mode: restoring platform profile ..."
+  # CPU boost stays OFF on exit — the appliance defaults to boost-off
+  # (see dashboard3d-prep.sh) and the user manages boost manually via
+  # the in-app toggle. Re-enabling it here would contradict the policy.
+  sudo -n "$POWER" profile balanced 2>&1 | sed 's/^/    /'
 }
 trap restore_quiet EXIT
 
@@ -58,9 +89,8 @@ else
   echo "================== Dashboard3D Game Mode =================="
 fi
 
-# --- wait for the network -------------------------------------------
-# Steam's first run downloads its client; with no internet it quits.
-echo "waiting for the network (Steam's first run needs internet) ..."
+# Wait for network — Steam first-run downloads its client.
+echo "waiting for the network (Steam needs internet on first run) ..."
 NET=OFFLINE
 for i in $(seq 1 30); do
   if ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then NET=online; break; fi
@@ -69,7 +99,7 @@ for i in $(seq 1 30); do
 done
 printf '\r                              \r'
 
-# --- diagnostics (reprinted in the failure report) -----------------
+# Diagnostics — reprinted in the failure report if we fall through.
 {
   echo "=== Game Mode diagnostics @ $(date '+%Y-%m-%d %H:%M:%S') ==="
   echo "build    : $(cat /etc/dashboard3d-build 2>/dev/null || echo unknown)"
@@ -78,7 +108,9 @@ printf '\r                              \r'
   echo "DRM      : $(ls /dev/dri/ 2>/dev/null | tr '\n' ' ')"
   echo "seat     : seat=${XDG_SEAT:-?} vt=${XDG_VTNR:-?} session=${XDG_SESSION_ID:-?}"
   echo "runtime  : ${XDG_RUNTIME_DIR:-<unset>}"
-  echo "gamescope: $(command -v gamescope 2>/dev/null || echo '!! MISSING')"
+  echo "Xorg     : $(command -v Xorg 2>/dev/null || echo '!! MISSING')"
+  echo "startx   : $(command -v startx 2>/dev/null || echo '!! MISSING')"
+  echo "openbox  : $(command -v openbox-session 2>/dev/null || echo '!! MISSING')"
   echo "steam    : $(command -v steam 2>/dev/null || echo '!! MISSING')"
   echo "free RAM : $(free -h 2>/dev/null | awk '/^Mem:/{print $7" of "$2}')"
   echo "steam dir: $(du -sh "$HOME/.local/share/Steam" 2>/dev/null | cut -f1)"
@@ -90,53 +122,46 @@ if [[ "$NET" == OFFLINE ]]; then
   echo ">>> WARNING: no internet — Steam's first run will likely fail."
 fi
 apply_quiet
+
+# Write the one-shot xinitrc. openbox-session runs in the background
+# (provides window management). steam runs in the foreground; when the
+# user picks File > Exit, steam exits, the script exits, Xorg exits,
+# we return to the dashboard.
+cat > "$XINITRC" <<'XINITRC_EOF'
+#!/usr/bin/env bash
+# Auto-generated by dashboard3d-gamemode. Started by `startx`.
+openbox-session &
+sleep 1
+exec steam
+XINITRC_EOF
+chmod +x "$XINITRC"
+
 echo
-echo "launching gamescope + Steam ..."
-echo "(first run downloads the Steam client — several minutes; the"
-echo " screen may look idle. To leave Game Mode: Steam menu > Exit.)"
+echo "Starting Xorg + openbox + Steam (desktop client) ..."
+echo "(first run downloads the Steam client — several minutes."
+echo " To leave Game Mode: Steam menu > File > Exit.)"
 echo
 
-# --- launch loop ----------------------------------------------------
-# Steam's first run bootstraps then restarts itself, ending the
-# gamescope session; relaunch on a short run. A long run (>= 3 min) is
-# a real session the user ended -> back to the dashboard.
-MAX=6
-rc=0; dur=0; attempt=0
-while (( attempt < MAX )); do
-  attempt=$(( attempt + 1 ))
-  { echo; echo "===== gamescope+Steam attempt $attempt @ $(date '+%H:%M:%S') ====="; } >> "$LOG"
-  start=$SECONDS
-  # NOTE: no -e/--steam flag. -e puts gamescope in Steam Deck mode, where it
-  # waits for Steam to send a "Deck UI ready" handshake before it paints.
-  # During Steam's first-run download that handshake never arrives, so
-  # gamescope hangs forever with a blank screen. Plain gamescope just shows
-  # Steam's window as soon as it appears (same as the Dashboard launch).
-  gamescope -f -- steam >>"$LOG" 2>&1
-  rc=$?
-  dur=$(( SECONDS - start ))
-  clear 2>/dev/null || true
-
-  if (( dur >= 180 )); then
-    echo "Steam session ended (ran ${dur}s). Returning to the dashboard."
-    sleep 2
-    exit 0
-  fi
-
-  (( attempt >= MAX )) && break
-  echo "Steam exited after ${dur}s (attempt $attempt of $MAX, exit=$rc)."
-  echo "This is expected while Steam bootstraps/restarts its client."
-  echo "Relaunching in 5s — press X to stop and return to the dashboard."
-  if read -t 5 -r -n 1 k 2>/dev/null && [[ "${k:-}" == [xX] ]]; then
-    echo; echo "Returning to the dashboard."
-    exit 0
-  fi
-done
-
-# --- failure report (fits one screen) ------------------------------
+# startx blocks until the X session ends. We pass NO client argument
+# so startx auto-discovers ~/.xinitrc (the one we just wrote above) —
+# passing the path explicitly makes startx treat it as a client and
+# can bypass the proper xinitrc sourcing, which left us hitting the
+# system /etc/X11/xinit/xinitrc (xterm/twm not-found errors).
+# `-- vt1` ties Xorg to the VT we're already on (auto-login gamer).
+startx -- vt1 >>"$LOG" 2>&1
+rc=$?
 clear 2>/dev/null || true
+
+if (( rc == 0 )); then
+  echo "Steam session ended. Returning to the dashboard ..."
+  sleep 1
+  exit 0
+fi
+
+# Failure report — fits one screen, photographable.
 echo "############################################################"
 echo "## GAME MODE COULD NOT START"
-echo "## $attempt attempts, last exit=$rc after ${dur}s, net=$NET"
+echo "## startx exit=$rc, net=$NET"
 echo "############################################################"
 cat "$DIAG" 2>/dev/null
 echo "--- last 40 lines of /tmp/gamemode.log --------------------"

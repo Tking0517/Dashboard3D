@@ -229,7 +229,8 @@ genfstab -U "$MNT" >> "$MNT/etc/fstab"
 
 # --- appliance layer (copied from this live system) ------------------------
 say "installing the appliance layer"
-for s in dashboard3d-session dashboard3d-gamemode dashboard3d-install dashboard3d-prep; do
+for s in dashboard3d-session dashboard3d-gamemode dashboard3d-install \
+         dashboard3d-prep dashboard3d-power dashboard3d-media-keys; do
   [[ -f "/usr/local/bin/$s" ]] \
     && install -Dm755 "/usr/local/bin/$s" "$MNT/usr/local/bin/$s"
 done
@@ -239,8 +240,33 @@ done
 [[ -f /etc/systemd/system/dashboard3d-prep.service ]] \
   && install -Dm644 /etc/systemd/system/dashboard3d-prep.service \
        "$MNT/etc/systemd/system/dashboard3d-prep.service"
+[[ -f /etc/systemd/user/dashboard3d-media-keys.service ]] \
+  && install -Dm644 /etc/systemd/user/dashboard3d-media-keys.service \
+       "$MNT/etc/systemd/user/dashboard3d-media-keys.service" \
+  && mkdir -p "$MNT/etc/systemd/user/default.target.wants" \
+  && ln -sf /etc/systemd/user/dashboard3d-media-keys.service \
+       "$MNT/etc/systemd/user/default.target.wants/dashboard3d-media-keys.service"
 [[ -f /etc/sudoers.d/dashboard3d ]] \
   && install -Dm440 /etc/sudoers.d/dashboard3d "$MNT/etc/sudoers.d/dashboard3d"
+# MangoHud overlay config — dashboard3d-gamemode exports
+# MANGOHUD_CONFIGFILE=/etc/MangoHud.conf, so the installed system needs
+# this file too or the overlay falls back to defaults (which don't
+# include gpu_name — i.e. we lose the "which GPU is actually rendering"
+# verification).
+[[ -f /etc/MangoHud.conf ]] \
+  && install -Dm644 /etc/MangoHud.conf "$MNT/etc/MangoHud.conf"
+# /etc/skel — the live system's customize_airootfs.sh pre-stages a
+# Steam bootstrap into /etc/skel/.local/share/Steam so the gamer user
+# is born with Steam ready (no 1-3 min first-run download). Carry the
+# whole /etc/skel over so the target's gamer user inherits the same
+# seed. Without this, target's /etc/skel is just Arch's default and
+# the first Game Mode entry stalls on the first-run download.
+if [[ -d /etc/skel ]]; then
+  say "carrying /etc/skel (Steam pre-bootstrap) to target"
+  mkdir -p "$MNT/etc/skel"
+  cp -aT /etc/skel "$MNT/etc/skel" 2>/dev/null || \
+    say "WARN: /etc/skel copy partial — target gamer may see Steam first-run"
+fi
 
 [[ -d /opt/dashboard3d ]] || die "/opt/dashboard3d is missing on the live system"
 mkdir -p "$MNT/opt/dashboard3d"
@@ -249,15 +275,29 @@ chmod 755 "$MNT/opt/dashboard3d/dashboard3d" 2>/dev/null || true
 # The app runs as 'gamer' (uid 1000) and writes config under it.
 chown -R 1000:1000 "$MNT/opt/dashboard3d" 2>/dev/null || true
 
-# modprobe rules for the INSTALLED system: amdgpu loads normally (the real
-# initramfs has firmware); the NVIDIA dGPU stays dark.
-install -Dm644 /dev/stdin "$MNT/etc/modprobe.d/dashboard3d.conf" <<'EOF'
-blacklist nouveau
-blacklist nvidia
-blacklist nvidia_drm
-blacklist nvidia_modeset
-blacklist nvidia_uvm
-EOF
+# modprobe.d on the installed system: COPY whatever the live system has,
+# don't hardcode a stale policy. The old installer baked in a blanket
+# blacklist of nvidia + nvidia_drm + nvidia_modeset + nvidia_uvm, which
+# was correct for the original iGPU-only design but is wrong now that we
+# prefer the dGPU for both the dashboard (PRIME offload) and Game Mode.
+# The live system's /etc/modprobe.d/dashboard3d.conf already has the
+# right policy (blacklist nouveau + amdgpu udev-autoload only — explicit
+# modprobe still works, and that's how dashboard3d-prep.service loads
+# both amdgpu and nvidia at boot).
+if [[ -f /etc/modprobe.d/dashboard3d.conf ]]; then
+  install -Dm644 /etc/modprobe.d/dashboard3d.conf \
+    "$MNT/etc/modprobe.d/dashboard3d.conf"
+else
+  say "WARN: /etc/modprobe.d/dashboard3d.conf missing on live system — installed system will use defaults"
+fi
+# NVIDIA RTD3 runtime-PM udev rule — pairs with the
+# NVreg_DynamicPowerManagement option in modprobe.d above. Without this
+# the dGPU never runtime-suspends and the installed system would idle
+# ~25C hotter than the live USB.
+if [[ -f /etc/udev/rules.d/80-dashboard3d-nvidia-pm.rules ]]; then
+  install -Dm644 /etc/udev/rules.d/80-dashboard3d-nvidia-pm.rules \
+    "$MNT/etc/udev/rules.d/80-dashboard3d-nvidia-pm.rules"
+fi
 
 cp /etc/dashboard3d-build "$MNT/etc/dashboard3d-build" 2>/dev/null \
   || date '+%Y-%m-%d %H:%M (installed)' > "$MNT/etc/dashboard3d-build"
@@ -303,6 +343,12 @@ EOF
 systemctl enable NetworkManager
 systemctl enable dashboard3d-prep.service
 systemctl set-default multi-user.target
+# PipeWire per-user services for the gamer account — without this the
+# volume keys' wpctl backend has no audio server to talk to. --global
+# writes the enable symlinks under /etc/systemd/user so every user gets
+# PipeWire + WirePlumber at login.
+systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service || \
+  echo "WARN: pipewire --global enable failed"
 mkinitcpio -P
 
 bootctl install

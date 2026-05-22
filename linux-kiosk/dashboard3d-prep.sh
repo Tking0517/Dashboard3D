@@ -40,11 +40,34 @@ done
 FAN_TEMPS=(40 55 65 72 80 87 92 97)
 FAN_PWMS=(0 45 90 140 195 240 255 255)
 
-# performance platform profile + the ASUS turbo throttle policy.
+# CPU boost OFF by default. The dashboard sits idle most of the time
+# and every short transient (animation tick, JS GC, audio sampler)
+# spikes the CPU to its boost clock and adds heat the rAF throttle
+# can't undo. Boost stays off until something explicitly turns it
+# back on: Game Mode entry, or a future in-app toggle. AMD path
+# writes the cpufreq/boost knob; Intel path writes intel_pstate/
+# no_turbo (inverted). Silent no-op on platforms without either.
+disable_boost_default() {
+  if [[ -w /sys/devices/system/cpu/cpufreq/boost ]]; then
+    echo 0 > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null \
+      && echo "AMD cpufreq boost -> off" \
+      || echo "WARN: cpufreq/boost write failed"
+  elif [[ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null \
+      && echo "Intel turbo -> off" \
+      || echo "WARN: intel_pstate/no_turbo write failed"
+  else
+    echo "no CPU boost sysfs found"
+  fi
+}
+
+# Balanced platform profile (Game Mode flips to performance via
+# dashboard3d-power and restores balanced on exit). throttle policy
+# left at 0 (default) so the firmware can manage CPU/dGPU clocks.
 apply_profiles() {
   local applied="" prof p
   if [[ -w /sys/firmware/acpi/platform_profile ]]; then
-    for prof in performance balanced; do
+    for prof in balanced quiet low-power performance; do
       grep -qw "$prof" /sys/firmware/acpi/platform_profile_choices 2>/dev/null \
         && echo "$prof" > /sys/firmware/acpi/platform_profile 2>/dev/null \
         && { applied="platform_profile=$prof"; break; }
@@ -52,7 +75,7 @@ apply_profiles() {
   fi
   for p in /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy \
            /sys/devices/platform/asus-wmi/throttle_thermal_policy; do
-    [[ -w "$p" ]] && echo 1 > "$p" 2>/dev/null && applied="$applied throttle=1"
+    [[ -w "$p" ]] && echo 0 > "$p" 2>/dev/null && applied="$applied throttle=0"
   done
   echo "${applied:-<none>}"
 }
@@ -75,27 +98,33 @@ apply_fan_curve() {
   done
 }
 
-# The undriven NVIDIA dGPU idles hot; enable PCI runtime PM + D3cold.
-power_down_dgpu() {
-  local d ven cls res=""
+# nvidia is NOT modprobed here — it's no longer blacklisted, so udev
+# autoloads it early in boot on its own. We let RTD3 (NVIDIA Dynamic
+# Power Management, NVreg_DynamicPowerManagement=0x02 in modprobe.d)
+# keep the dGPU cool: the driver drops the GPU into D3cold (~0W) when
+# idle and wakes it on demand for PRIME-offloaded games. So the driver
+# is loaded + available, but the rail is asleep at the dashboard.
+# Report the dGPU's runtime PM state in the diag log so we can confirm
+# RTD3 actually engaged on this hardware.
+nvidia_pm_state() {
+  local d st="unknown"
   for d in /sys/bus/pci/devices/*; do
-    ven=$(cat "$d/vendor" 2>/dev/null)
-    cls=$(cat "$d/class" 2>/dev/null)
-    [[ "$ven" == "0x10de" ]] || continue
+    [[ "$(cat "$d/vendor" 2>/dev/null)" == 0x10de ]] || continue
+    local cls; cls=$(cat "$d/class" 2>/dev/null)
     [[ "$cls" == 0x0300* || "$cls" == 0x0302* ]] || continue
-    [[ -e "$d/d3cold_allowed" ]] && echo 1 > "$d/d3cold_allowed" 2>/dev/null
-    echo auto > "$d/power/control" 2>/dev/null
-    sleep 3
-    res="${d##*/} -> $(cat "$d/power/runtime_status" 2>/dev/null)"
+    st="runtime_status=$(cat "$d/power/runtime_status" 2>/dev/null || echo '?')"
+    st="$st control=$(cat "$d/power/control" 2>/dev/null || echo '?')"
+    break
   done
-  echo "${res:-<no NVIDIA dGPU found>}"
+  echo "$st"
 }
 
 {
   echo "=== Dashboard3D hardware prep @ $(date '+%Y-%m-%d %H:%M:%S') ==="
   echo "DRM devices : $(ls /dev/dri/ 2>/dev/null | tr '\n' ' ')"
   echo "profiles    : $(apply_profiles)"
-  echo "nvidia dGPU : $(power_down_dgpu)"
+  echo "cpu boost  : $(disable_boost_default)"
+  echo "nvidia RTD3: $(nvidia_pm_state)"
   apply_fan_curve
   echo "fan curve   : applied"
   echo "=== done ==="
