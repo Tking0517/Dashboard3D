@@ -89,6 +89,14 @@
   src: url('./fonts/SpaceGrotesk-VF.woff2') format('woff2-variations');
   font-weight: 300 700; font-style: normal; font-display: swap;
 }
+/* DOS VGA — the authentic IBM PC text-mode face (Px437, code page 437).
+   Used only by the DOS theme, which locks the font picker while active.
+   Source: VileR's Oldschool PC Font Pack (int10h.org), CC BY-SA 4.0. */
+@font-face {
+  font-family: 'DOS VGA';
+  src: url('./fonts/Px437_IBM_VGA_9x16.ttf') format('truetype');
+  font-weight: normal; font-style: normal; font-display: swap;
+}
 
 /* ── Z-index ladder ───────────────────────────────────────────
    Use these tiers when adding new positioned elements so layering
@@ -873,6 +881,217 @@ body.is-calm .bg-grid::after {
 [data-theme^="matte"] #scratch-grid {
   margin-bottom: 16px;
 }
+
+/* ── DOS themes — IBM-PC text-mode ─────────────────────────────────
+   The third structural family. Where retro ADDS CRT chrome and matte
+   STRIPS it, DOS does both at once: every gradient, glow, bloom, blur
+   and idle pulse is removed — making this the lightest theme to paint
+   — and the dashboard is rebuilt in a flat 80x25 text-mode idiom:
+   monospace type, hard square corners, dashed rules everywhere, solid
+   block fills, and inverted (fg/bg-swapped) panel header bars. The
+   variants differ only by phosphor colour. */
+
+/* GREEN — Lotus 1-2-3 / monochrome P1 green */
+[data-theme="dos-green"] {
+  --accent: #44ff44;
+  --amber:  #c8ff44;
+  --red:    #ff5555;
+  --ok:     #44ff44;
+  --text:   #5cff5c;
+  --muted:  #1f9a1f;
+  --dim:    #0a2a0a;
+  --bg:       #000000;
+  --panel-bg: #000000;
+}
+/* AMBER — gas-plasma / amber CRT */
+[data-theme="dos-amber"] {
+  --accent: #ffb83c;
+  --amber:  #ffd86c;
+  --red:    #ff6644;
+  --ok:     #b6e84c;
+  --text:   #ffc457;
+  --muted:  #9a6a1f;
+  --dim:    #2a1c08;
+  --bg:       #000000;
+  --panel-bg: #000000;
+}
+/* CYAN — high-cyan EGA */
+[data-theme="dos-cyan"] {
+  --accent: #44e0ff;
+  --amber:  #ffe24c;
+  --red:    #ff5e6e;
+  --ok:     #54ff9c;
+  --text:   #74e6ff;
+  --muted:  #1f7e9a;
+  --dim:    #08222a;
+  --bg:       #000000;
+  --panel-bg: #000000;
+}
+/* WHITE — IBM MDA monochrome white */
+[data-theme="dos-white"] {
+  --accent: #f4f4f4;
+  --amber:  #ffe24c;
+  --red:    #ff6a6a;
+  --ok:     #7cff7c;
+  --text:   #d2d2d2;
+  --muted:  #7c7c7c;
+  --dim:    #262626;
+  --bg:       #000000;
+  --panel-bg: #000000;
+}
+/* VGA — full 16-colour palette, vivid multi-colour */
+[data-theme="dos-vga"] {
+  --accent: #55ffff;
+  --amber:  #ffff55;
+  --red:    #ff5555;
+  --ok:     #55ff55;
+  --text:   #c8c8c8;
+  --muted:  #5b6cff;
+  --dim:    #1a1a3a;
+  --bg:       #000000;
+  --panel-bg: #000000;
+}
+
+/* Shared DOS structural look — applies to every dos-* variant.
+   body[data-theme^="dos"] (not just [data-theme]) so the monospace
+   override beats any body.font-* class the user may have active. */
+body[data-theme^="dos"] {
+  /* Dim text-mode rules — present but quiet, so nested borders never
+     stack up into visual static. */
+  --rule:     color-mix(in srgb, var(--accent) 50%, transparent);
+  --rule-dim: color-mix(in srgb, var(--accent) 28%, transparent);
+  /* Roomier layout — a wider gap between panels for an airy,
+     well-spaced text-mode feel. */
+  --gap: 22px;
+  /* The DOS theme's locked face — the authentic IBM VGA text-mode font
+     (Px437 / code page 437). The font picker is disabled while a dos-*
+     theme is active (see the #font-btn rule below). */
+  --font-display: 'DOS VGA', 'Consolas', 'Courier New', monospace;
+  --font-tech:    'DOS VGA', 'Consolas', 'Courier New', monospace;
+}
+/* Strip every effect: no halation, no bloom, no blur, no rounded
+   corners. This is the cheapest theme in the set to paint. */
+[data-theme^="dos"] * {
+  text-shadow: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* The dashboard nests bordered elements many layers deep; rendered as
+   bright dashes that stacks into unreadable static. Hide every border
+   by default — widths are untouched so nothing shifts in layout — and
+   DOS keeps a visible line only on the panel outline + meter tracks
+   below. Whatever line does remain is a dash. */
+[data-theme^="dos"] *,
+[data-theme^="dos"] *::before,
+[data-theme^="dos"] *::after {
+  border-color: transparent !important;
+  border-style: dashed !important;
+}
+/* No idle pulse / breathe — a text-mode screen holds a still image. */
+[data-theme^="dos"] .panel,
+[data-theme^="dos"] .meter,
+[data-theme^="dos"] .time-row,
+[data-theme^="dos"] .temp-row,
+[data-theme^="dos"] .storage-row,
+[data-theme^="dos"] .net-row,
+[data-theme^="dos"] .gpu-mem-row,
+[data-theme^="dos"] .note-tab,
+[data-theme^="dos"] .weather-left,
+[data-theme^="dos"] .weather-right,
+[data-theme^="dos"] .bg-grid,
+[data-theme^="dos"] .bg-grid::after {
+  animation: none !important;
+}
+/* Flat solid panels — a fixed-size dashed box. A real CSS `dashed`
+   border auto-fits its dash length to each edge, so panels of
+   different sizes end up with different dashes; hard-stop gradients
+   instead pin every dash to exactly 4px on / 4px off, uniform across
+   the whole dashboard. */
+[data-theme^="dos"] .panel {
+  --dos-dash: var(--rule-dim);
+  border: 1px solid transparent !important;
+  background-color: var(--bg) !important;
+  background-image:
+    repeating-linear-gradient(to right,  var(--dos-dash) 0 4px, transparent 4px 8px),
+    repeating-linear-gradient(to right,  var(--dos-dash) 0 4px, transparent 4px 8px),
+    repeating-linear-gradient(to bottom, var(--dos-dash) 0 4px, transparent 4px 8px),
+    repeating-linear-gradient(to bottom, var(--dos-dash) 0 4px, transparent 4px 8px) !important;
+  background-size:     100% 1px, 100% 1px, 1px 100%, 1px 100% !important;
+  background-position: 0 0, 0 100%, 0 0, 100% 0 !important;
+  background-repeat:   no-repeat !important;
+}
+[data-theme^="dos"] .panel:hover {
+  filter: none;
+  --dos-dash: var(--accent);
+}
+/* Roomier panels — more dead space inside the dashed box: a wider
+   inset from the border and more room between content rows, for the
+   airy text-mode look. */
+[data-theme^="dos"] .panel-body {
+  padding: clamp(9px, 2.5cqi, 18px) clamp(12px, 3cqi, 22px) !important;
+  gap:     clamp(7px, 2cqi, 16px) !important;
+}
+/* Structural dashed lines — only the load-meter tracks keep an inner
+   divider. Content rows do NOT: their big value readouts overflow the
+   row box, so a re-shown border cuts straight through the text. The
+   panel outline + the dashed header underline carry the structure. */
+[data-theme^="dos"] .seg-bar {
+  border-color: var(--rule-dim) !important;
+}
+/* Dim grid wallpaper — a faint dotted lattice on the black screen. */
+[data-theme^="dos"] .bg-grid::after {
+  background-image:
+    radial-gradient(color-mix(in srgb, var(--accent) 15%, transparent) 1px, transparent 1.7px) !important;
+  background-size: 34px 34px !important;
+  background-position: 0 0 !important;
+  opacity: 1 !important;
+}
+/* Panel headers — a stroked title rule, not a filled bar: the title
+   in the theme colour over the panel background, with the same fixed
+   4px dashed underline (hard-stop gradient) as every other line. */
+[data-theme^="dos"] .panel-header {
+  border-bottom: 1px solid transparent !important;
+  background:
+    repeating-linear-gradient(to right, var(--accent) 0 4px, transparent 4px 8px)
+    bottom left / 100% 1px no-repeat !important;
+}
+[data-theme^="dos"] .panel-header,
+[data-theme^="dos"] .panel-header * {
+  color: var(--accent) !important;
+}
+/* Selected / active controls invert too — the DOS highlight idiom. */
+[data-theme^="dos"] .is-active,
+[data-theme^="dos"] .theme-cat-btn.is-active {
+  background: var(--accent) !important;
+  color: var(--bg) !important;
+}
+/* Topbar chrome flattens to the screen colour. */
+[data-theme^="dos"] .topbar-controls,
+[data-theme^="dos"] .topbar-btn,
+[data-theme^="dos"] .theme-cat-btn,
+[data-theme^="dos"] .theme-name {
+  background: var(--bg) !important;
+}
+/* DOS ships its own monospace face — the font picker is locked out
+   (greyed + unclickable) while a dos-* theme is active. */
+[data-theme^="dos"] #font-btn {
+  pointer-events: none !important;
+  opacity: 0.4 !important;
+}
+/* Load meters -> solid block fills, no segmented-LED gradient. */
+[data-theme^="dos"] .seg-bar {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg)) !important;
+}
+[data-theme^="dos"] .seg-bar-fill,
+[data-theme^="dos"] .seg-cpu,
+[data-theme^="dos"] .seg-mem,
+[data-theme^="dos"] .seg-disk {
+  background: var(--accent) !important;
+}
+[data-theme^="dos"] .seg-bar-fill.warn { background: var(--amber) !important; }
+[data-theme^="dos"] .seg-bar-fill.high { background: var(--red)   !important; }
 
 /* Alert theme — auto-engaged when offline, on errors, or when CPU/GPU load
    crosses 90%. Same animation cadence as every other theme; the strobe

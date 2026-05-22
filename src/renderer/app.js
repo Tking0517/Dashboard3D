@@ -2092,7 +2092,7 @@ function drawEinkChartFrame(ctx, w, h, rgb, yLabels) {
   ctx.moveTo(px + 0.5, py);
   ctx.lineTo(px + 0.5, baseY);
   ctx.stroke();
-  ctx.setLineDash([3, 2]);
+  ctx.setLineDash([4, 4]);
   ctx.beginPath();
   ctx.moveTo(px, baseY + 0.5);
   ctx.lineTo(px + pw, baseY + 0.5);
@@ -2218,6 +2218,44 @@ function renderSpark(container, samples) {
     ctx.arc(xOf(n - 1), yOf(view[n - 1]), 2, 0, Math.PI * 2);
     ctx.fillStyle = einkChartGradient(ctx, frame.py, baseY, 1);
     ctx.fill();
+    return;
+  }
+  // DOS themes: a flat terminal bar chart — thin solid bars on a faint
+  // labelled grid (the SCADA-panel look). Same chart frame as the rest
+  // of the DOS dashboard; theme-coloured via st.bright. A thin cap
+  // floats at each band's held peak.
+  if ((document.documentElement.getAttribute('data-theme') || '').startsWith('dos')) {
+    const [pr, pg, pb] = st.bright;
+    const barCol = `rgb(${pr},${pg},${pb})`;
+    const n = view.length;
+    const frame = drawEinkChartFrame(ctx, W, H, st.bright, [
+      { frac: 0,    text: '0' },
+      { frac: 0.25, text: '' },
+      { frac: 0.5,  text: '' },
+      { frac: 0.75, text: '' },
+      { frac: 1,    text: fmtRate(max).num },
+    ]);
+    const baseY = frame.py + frame.ph;
+    // Sparse, wide, well-spaced columns — source samples max-pooled
+    // into ~16px slots: a very sparse terminal look, fewer fillRects.
+    const gap  = 6;
+    const m    = Math.max(1, Math.min(n, Math.floor((frame.pw + gap) / 16)));
+    const barW = Math.max(1, (frame.pw - gap * (m - 1)) / m);
+    ctx.fillStyle = barCol;
+    for (let j = 0; j < m; j++) {
+      const lo = Math.floor(j * n / m);
+      const hi = Math.max(lo + 1, Math.floor((j + 1) * n / m));
+      let v = 0, pkv = 0;
+      for (let i = lo; i < hi && i < n; i++) {
+        if (view[i]     > v)   v   = view[i];
+        if (st.peaks[i] > pkv) pkv = st.peaks[i];
+      }
+      const x   = frame.px + j * (barW + gap);
+      const pct = Math.min(100, (v / max) * 100);
+      const bh  = (pct / 100) * frame.ph;
+      if (bh >= 0.5) ctx.fillRect(x, baseY - bh, barW, bh);
+      if (pkv > pct + 1) ctx.fillRect(x, baseY - (pkv / 100) * frame.ph - 0.75, barW, 1.5);
+    }
     return;
   }
   // Segmented LED-cell layout — same shape as the audio-in / audio-out
@@ -2958,7 +2996,8 @@ function createAudioVisualizer({
   function refreshThemeColorsIfNeeded() {
     if (_gradTheme === _themeVersion && _audioColor) return;
     const cs = getComputedStyle(barsRowEl || document.documentElement);
-    _audioColor = cs.getPropertyValue('--audio-color').trim() || '#5fa';
+    _audioColor = cs.getPropertyValue('--audio-color').trim()
+               || cs.getPropertyValue('--accent').trim() || '#5fa';
     _amberColor = cs.getPropertyValue('--amber').trim()       || '#f3a83b';
     _redColor   = cs.getPropertyValue('--red').trim()         || '#ff3b30';
     _mutedColor = cs.getPropertyValue('--muted').trim()       || '#6e8aa3';
@@ -3049,6 +3088,56 @@ function createAudioVisualizer({
       targetCtx.lineJoin = 'round';
       targetCtx.lineCap = 'round';
       targetCtx.stroke();
+      return;
+    }
+    // DOS themes: a flat green-terminal chart — solid spectrum bars on
+    // a faint labelled grid. Reuses the e-ink chart frame (Y-axis +
+    // gridlines + 0-100 scale) so it matches the rest of the DOS
+    // dashboard, then fills each band as one solid block in the theme
+    // colour — no segmented cells, reflection, or peak markers.
+    if ((document.documentElement.getAttribute('data-theme') || '').startsWith('dos')) {
+      const n = barCount;
+      const frame = drawEinkChartFrame(targetCtx, W, H, _brightRgb, [
+        { frac: 0,    text: '0'   },
+        { frac: 0.25, text: '25'  },
+        { frac: 0.5,  text: '50'  },
+        { frac: 0.75, text: '75'  },
+        { frac: 1,    text: '100' },
+      ]);
+      const baseY = frame.py + frame.ph;
+      // Faint vertical gridlines — graph-paper lattice behind the bars.
+      const [gr, gg, gb] = _brightRgb;
+      targetCtx.strokeStyle = `rgba(${gr},${gg},${gb},0.10)`;
+      targetCtx.lineWidth = 1;
+      targetCtx.setLineDash([]);
+      const vStep = Math.max(28, frame.pw / 8);
+      for (let gx = frame.px + vStep; gx < frame.px + frame.pw - 1; gx += vStep) {
+        targetCtx.beginPath();
+        targetCtx.moveTo(Math.round(gx) + 0.5, frame.py);
+        targetCtx.lineTo(Math.round(gx) + 0.5, baseY);
+        targetCtx.stroke();
+      }
+      // Spectrum bars — sparse, wide, well-spaced columns: the source
+      // bands are max-pooled into ~16px slots, so the chart reads as a
+      // very sparse terminal bar graph and costs far fewer fillRects.
+      const gap  = 6;
+      const m    = Math.max(1, Math.min(n, Math.floor((frame.pw + gap) / 16)));
+      const barW = Math.max(1, (frame.pw - gap * (m - 1)) / m);
+      targetCtx.fillStyle = _audioColor;
+      for (let j = 0; j < m; j++) {
+        const lo = Math.floor(j * n / m);
+        const hi = Math.max(lo + 1, Math.floor((j + 1) * n / m));
+        let v = 0;
+        for (let i = lo; i < hi && i < n; i++) {
+          const dist  = n > 1 ? Math.abs(i / (n - 1) - 0.5) * 2 : 0;
+          const shape = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
+          v = Math.max(v, Math.min(1, (displayed[i] / 100) * shape));
+        }
+        const bh = v * frame.ph;
+        if (bh < 0.5) continue;
+        const x = frame.px + j * (barW + gap);
+        targetCtx.fillRect(x, baseY - bh, barW, bh);
+      }
       return;
     }
     // Segmented EQ style: each bar is a vertical stack of small horizontal
@@ -7116,15 +7205,26 @@ const THEME_LABELS = {
   'matte-denim':    'MATTE · DENIM',
   'matte-fern':     'MATTE · FERN',
   'matte-haze':     'MATTE · HAZE',
+  'dos-green':      'DOS · GREEN',
+  'dos-amber':      'DOS · AMBER',
+  'dos-cyan':       'DOS · CYAN',
+  'dos-white':      'DOS · WHITE',
+  'dos-vga':        'DOS · VGA',
 };
 const THEME_SLUGS = new Set(Object.keys(THEME_LABELS).filter(Boolean));
 // Theme categories — every non-matte palette is "CYBER" (the default cyan
 // included), the matte-* palettes are "MATTE". The topbar exposes one button
 // per category plus a cycle button that steps colours within whichever
 // category is active. CYBER_THEMES keeps '' first so CYBER → default cyan.
-const CYBER_THEMES = Object.keys(THEME_LABELS).filter((k) => !k.startsWith('matte'));
+const CYBER_THEMES = Object.keys(THEME_LABELS).filter((k) => !k.startsWith('matte') && !k.startsWith('dos'));
 const MATTE_THEMES = Object.keys(THEME_LABELS).filter((k) => k.startsWith('matte'));
-const themeCategory = (slug) => ((slug || '').startsWith('matte') ? 'matte' : 'cyber');
+const DOS_THEMES   = Object.keys(THEME_LABELS).filter((k) => k.startsWith('dos'));
+const themeCategory = (slug) => {
+  const s = slug || '';
+  if (s.startsWith('matte')) return 'matte';
+  if (s.startsWith('dos'))   return 'dos';
+  return 'cyber';
+};
 
 const themeNameEl = document.querySelector('#theme-name');
 function applyTheme(name) {
@@ -7175,11 +7275,13 @@ function applyInvert(on) {
 // the per-category variant so switching back returns where you left off.
 const themeCyberBtn = document.getElementById('theme-cat-cyber');
 const themeMatteBtn = document.getElementById('theme-cat-matte');
+const themeDosBtn   = document.getElementById('theme-cat-dos');
 
 function _themeUpdateCatButtons(slug) {
   const cat = themeCategory(slug);
   themeCyberBtn?.classList.toggle('is-active', cat === 'cyber');
   themeMatteBtn?.classList.toggle('is-active', cat === 'matte');
+  themeDosBtn?.classList.toggle('is-active', cat === 'dos');
 }
 
 // Apply a theme slug, persist it, and remember it as the last-used
@@ -7191,7 +7293,8 @@ async function setTheme(slug) {
   _themeUpdateCatButtons(norm);
   if (window.dash?.setConfig) {
     const patch = { theme: useSlug };
-    patch[themeCategory(norm) === 'matte' ? 'themeLastMatte' : 'themeLastCyber'] = useSlug;
+    const lastKey = { matte: 'themeLastMatte', dos: 'themeLastDos', cyber: 'themeLastCyber' }[themeCategory(norm)];
+    patch[lastKey] = useSlug;
     try { await window.dash.setConfig(patch); } catch {}
   }
 }
@@ -7200,20 +7303,24 @@ async function setTheme(slug) {
 // (its first colour if none has been used yet).
 async function selectThemeCategory(cat) {
   const cfg  = (await window.dash?.getConfig?.()) || {};
-  const list = cat === 'matte' ? MATTE_THEMES : CYBER_THEMES;
-  let slug = cat === 'matte' ? cfg.themeLastMatte : cfg.themeLastCyber;
+  const list = cat === 'matte' ? MATTE_THEMES : cat === 'dos' ? DOS_THEMES : CYBER_THEMES;
+  let slug = cat === 'matte' ? cfg.themeLastMatte
+           : cat === 'dos'   ? cfg.themeLastDos
+           :                   cfg.themeLastCyber;
   if (slug == null || !list.includes(slug)) slug = list[0];
   await setTheme(slug);
   playSfx?.('confirm');
 }
 themeCyberBtn?.addEventListener('click', () => selectThemeCategory('cyber'));
 themeMatteBtn?.addEventListener('click', () => selectThemeCategory('matte'));
+themeDosBtn?.addEventListener('click',   () => selectThemeCategory('dos'));
 
 // Cycle button — next colour within the active category, wraps at the end.
 async function cycleThemeColor(step = 1) {
   const cfg  = (await window.dash?.getConfig?.()) || {};
   const cur  = cfg.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : '';
-  const list = themeCategory(cur) === 'matte' ? MATTE_THEMES : CYBER_THEMES;
+  const cat  = themeCategory(cur);
+  const list = cat === 'matte' ? MATTE_THEMES : cat === 'dos' ? DOS_THEMES : CYBER_THEMES;
   let idx = list.indexOf(cur);
   if (idx < 0) idx = 0;
   const len = list.length;
@@ -7307,6 +7414,9 @@ function applyUiFont(name) {
   if (fontNameEl) fontNameEl.textContent = entry.name;
 }
 async function advanceUiFont(step = 1) {
+  // The DOS theme ships its own monospace face and locks the picker —
+  // the font cannot be cycled while a dos-* theme is active.
+  if ((document.documentElement.getAttribute('data-theme') || '').startsWith('dos')) return;
   const cfg = (await window.dash?.getConfig?.()) || {};
   const cur = cfg.uiFont || 'DEFAULT';
   const idx = Math.max(0, UI_FONTS.findIndex((f) => f.name === cur));

@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.9.0-alpha.6] — 2026-05-22
+
+**DOS theme — a flat IBM-PC text-mode theme family.**
+
+### DOS theme (new)
+- New **DOS** theme category in the picker alongside Cyber and Matte — a
+  third structural family. Five palettes: GREEN (Lotus 1-2-3), AMBER, CYAN,
+  WHITE, and VGA (full multi-colour).
+- Structural look: every gradient, glow, bloom, blur and idle pulse is
+  stripped (the lightest theme to paint) — a flat black screen with a dim
+  dotted grid, hard square corners, and monospace type.
+- **Uniform dashes** — every dashed line is drawn with fixed hard-stop
+  gradients, exactly 4px on / 4px off on every panel. (A real CSS `dashed`
+  border auto-fits its dash length per edge and is never consistent.)
+- Panels are a dashed box with a *stroked* header — the title underlined in
+  the theme colour, not a filled bar. Load-meter tracks keep a dashed rule.
+- **Locked DOS font** — bundles the authentic IBM VGA text-mode face
+  (`Px437 IBM VGA 9x16`, code page 437 — from VileR's Oldschool PC Font
+  Pack, int10h.org, CC BY-SA 4.0). The font picker is disabled while a DOS
+  theme is active.
+- Audio visualizers and the network / drive-I/O graphs render as flat
+  green-terminal bar charts under DOS — solid theme-coloured bars, sparsely
+  spaced, on a labelled 0–100 grid (reuses the e-ink chart-frame helper).
+
+### Tooling
+- `Dashboard.bat` — the deploy step is now one `src\main` tree mirror instead
+  of 8 per-file `xcopy` lines (which silently skipped `stream-preload.js`);
+  the file is pinned to CRLF so cmd.exe parses it reliably.
+- New `TODO.md` — appliance roadmap (ISO optimisation, Discord A/V in Steam
+  Big Picture, startup-animation timing, the Big Picture splash).
+
 ## [0.9.0-alpha.5] — 2026-05-22
 
 **Linux appliance: keyboard input fixed for the Xorg overlay session.**

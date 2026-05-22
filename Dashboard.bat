@@ -21,17 +21,12 @@ ping -n 2 127.0.0.1 >nul
 
 echo Deploying...
 xcopy /E /Y /I "%DIST_SRC%\*" "%DIST_DEST%\" >nul
-xcopy /Y "%ROOT%src\main\main.js"             "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\preload.js"          "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\audify-worker.js"       "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\audify-worker-linux.js" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\audio-fft.js"           "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\youtube-host.html"   "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\youtube-preload.js"  "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-xcopy /Y "%ROOT%src\main\default-config.json" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\" >nul
-:: services/ holds the platform adapters (win/linux). /E /I /Y mirrors
-:: the whole tree so new files + subdirs land without listing each one.
-xcopy /E /I /Y "%ROOT%src\main\services" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main\services" >nul
+:: Mirror the whole src\main tree — main process, workers, preloads,
+:: youtube host, default config, and the services\ platform adapters —
+:: into the packaged app. /E /I /Y copies every file and subdir, so a
+:: new file in src\main deploys automatically: no per-file line to add
+:: and forget (which is how stream-preload.js used to get missed).
+xcopy /E /I /Y "%ROOT%src\main" "%ROOT%Dashboard3D-win32-x64\resources\app\src\main" >nul
 :: yt-client is a sibling file-dep at E:\VSCODE\yt-client and lives in
 :: our node_modules. Mirror it into the packaged resources so source
 :: changes in yt-client (engines, yt-dlp wrapper) flow without needing
