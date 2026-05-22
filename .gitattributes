@@ -1,0 +1,17 @@
+# Git attributes for the Dashboard3D repo.
+#
+# The repo is developed on Windows, but the linux-kiosk/ tree is consumed
+# verbatim by Linux — the appliance ISO build, bash, systemd and Xorg.
+# CRLF line endings there break "#!/usr/bin/env bash" shebangs and config
+# parsing, so those files are pinned to LF on every platform / checkout.
+
+# Default: normalise text files, platform-native line endings on checkout.
+* text=auto
+
+# Linux appliance tree — must stay LF everywhere.
+linux-kiosk/** eol=lf
+*.sh eol=lf
+*.py eol=lf
+
+# Windows batch files must stay CRLF.
+*.bat eol=crlf
