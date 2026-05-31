@@ -9658,6 +9658,30 @@ body.has-rec-edit-expanded .combo-pane-visualizer .visualizer-edit-pane {
   border-color: var(--red, #e63333);
   background: color-mix(in srgb, var(--red, #e63333) 14%, transparent);
 }
+/* Per-device mic rows add an ARM button between the label and MUTE, so
+   they use a 6-column grid; fixed SYSTEM/WINDOW rows keep the default. */
+.visualizer-mixer-row[data-kind="mic"] {
+  grid-template-columns: 64px 34px 52px 1fr 30px 72px;
+}
+.visualizer-mixer-arm {
+  font-family: var(--font-tech);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 2px 4px;
+  border: 1px solid var(--rule-dim);
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.visualizer-mixer-arm.is-armed {
+  color: var(--amber);
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}
+/* A disarmed mic row is dimmed; its slider/mute are also disabled in JS. */
+.visualizer-mixer-row.is-disarmed { opacity: 0.5; }
+.visualizer-mixer-row.is-disarmed .visualizer-mixer-meter-fill { width: 0 !important; }
 /* Mixer sliders inherit the LED-square thumb styling shared with the
    EDIT filter rows + PROCESS filters (rule group above). The
    accent-color fallback used to live here, which gave the rounded

@@ -2012,6 +2012,7 @@ export function init(deps) {
     _paintSoundBtn();
     try { await window.dash?.setConfig?.({ recRoomCaptureAudio: _recCaptureAudio }); } catch {}
     _renderMixer();
+    try { await _refreshMonitor(); } catch {}
     playSfx?.('click');
   });
 
@@ -2035,25 +2036,47 @@ export function init(deps) {
     _recCaptureMic = !_recCaptureMic;
     _paintMicBtn();
     try { await window.dash?.setConfig?.({ recRoomCaptureMic: _recCaptureMic }); } catch {}
+    // Master MIC off → release every armed mic's live monitor stream.
+    // On → re-enumerate (a mic may have been plugged in) then re-open
+    // armed mics for metering.
+    if (_recCaptureMic) { try { await _refreshMicList(); } catch {} }
     _renderMixer();
+    try { await _refreshMonitor(); } catch {}
     playSfx?.('click');
   });
 
   // ── MIXER (pre-record audio bus) ────────────────────────────────
-  // Per-source mute + volume that the recorder honors. State is
-  // keyed by source kind: 'system' / 'mic' / 'window'. Sources only
-  // render in the panel when their owning toggle is on (SOUND for
-  // system, MIC for mic, mirror-audio-tracks-present for window).
+  // SYSTEM and WINDOW remain fixed single sources. MIC is now PER-DEVICE:
+  // every enumerated microphone (including webcam built-in mics) gets its
+  // own row with an ARM toggle. Only ARMED mics open a stream, drive a
+  // meter, and get captured into the recording — so idle mics aren't held
+  // "in use" and there's no device contention. State:
+  //   _mixer.system / _mixer.window : { muted, vol }
+  //   _micState: Map deviceId -> { armed, muted, vol, label }
   const _mixer = {
     system: { muted: false, vol: 100 },
-    mic:    { muted: false, vol: 100 },
     window: { muted: false, vol: 100 },
   };
+  const _micState = new Map();
+  // Get-or-create the per-mic state. Defaults: NOT armed (privacy/safe),
+  // unmuted, full volume. `label` refreshed whenever enumeration gives us
+  // a non-empty one (labels are blank until a getUserMedia grant lands).
+  function _micEntry(deviceId, label) {
+    let e = _micState.get(deviceId);
+    if (!e) {
+      e = { armed: false, muted: false, vol: 100, label: label || 'Microphone' };
+      _micState.set(deviceId, e);
+    } else if (label) {
+      e.label = label;
+    }
+    return e;
+  }
   const _mixerRowsEl = document.getElementById('visualizer-mixer-rows');
+  // SYSTEM + WINDOW only. Mic rows are appended separately in _renderMixer
+  // because they're per-device, not a fixed kind.
   function _activeMixerSources() {
     const active = [];
     if (_recCaptureAudio) active.push({ kind: 'system', label: 'SYSTEM' });
-    if (_recCaptureMic)   active.push({ kind: 'mic',    label: 'MIC' });
     // Window audio shows up when the mirror exposes an audio track —
     // depends on the source the user picked. Re-check on every render
     // so picking a new source updates the panel.
@@ -2062,69 +2085,141 @@ export function init(deps) {
     }
     return active;
   }
+  // Build one mixer row. `meterKey` is what the meter loop / hot-apply use
+  // to find this row's analyser+gain in the live graphs:
+  //   'system' / 'window' for the fixed sources, 'mic:<deviceId>' per mic.
+  // `armToggle` (mic rows only) adds an ARM button; when a row is not
+  // armed, the slider/mute/meter are disabled and the meter reads 0.
+  function _makeMixerRow({ label, state, meterKey, kind, deviceId, armToggle }) {
+    const armed = armToggle ? !!state.armed : true;
+    const row = document.createElement('div');
+    row.className = 'visualizer-mixer-row'
+      + (state.muted ? ' is-muted' : '')
+      + (armToggle && !armed ? ' is-disarmed' : '');
+    row.dataset.kind = kind;
+    if (deviceId) row.dataset.deviceId = deviceId;
+    row.dataset.meterKey = meterKey;
+
+    const k = document.createElement('span');
+    k.className = 'visualizer-mixer-k';
+    k.textContent = label;
+    k.title = label;
+    row.appendChild(k);
+
+    // ARM toggle for mic rows. Off = mic stream is not opened (not "in
+    // use"), no meter, not recorded. Toggling re-syncs the monitor graph
+    // so the meter starts/stops live immediately.
+    if (armToggle) {
+      const arm = document.createElement('button');
+      arm.type = 'button';
+      arm.className = 'visualizer-mixer-arm' + (armed ? ' is-armed' : '');
+      arm.textContent = armed ? 'ON' : 'OFF';
+      arm.title = armed
+        ? 'This mic is armed — metered live and included in the recording. Click to disarm.'
+        : 'Click to arm: opens this mic, shows its level, and records it.';
+      arm.addEventListener('click', async () => {
+        state.armed = !state.armed;
+        await _persistMixer();
+        // Re-open/close the monitor for just this mic, then repaint.
+        try { await _refreshMonitor(); } catch {}
+        _renderMixer();
+        playSfx?.('click');
+      });
+      row.appendChild(arm);
+    }
+
+    const mute = document.createElement('button');
+    mute.type = 'button';
+    mute.className = 'visualizer-mixer-mute' + (state.muted ? ' is-muted' : '');
+    mute.textContent = state.muted ? 'MUTED' : 'MUTE';
+    mute.title = state.muted ? 'Un-mute this source in the mix' : 'Mute this source in the mix';
+    mute.disabled = armToggle && !armed;
+    mute.addEventListener('click', async () => {
+      state.muted = !state.muted;
+      await _persistMixer();
+      _renderMixer();
+      playSfx?.('click');
+    });
+    row.appendChild(mute);
+
+    const slide = document.createElement('input');
+    slide.type = 'range'; slide.min = '0'; slide.max = '150'; slide.step = '1';
+    slide.value = String(state.vol);
+    slide.disabled = armToggle && !armed;
+    const v = document.createElement('span');
+    v.className = 'visualizer-mixer-v'; v.textContent = String(state.vol);
+    slide.addEventListener('input', () => {
+      const next = parseInt(slide.value, 10);
+      if (Number.isFinite(next)) {
+        state.vol = next;
+        v.textContent = String(next);
+        // Hot-apply when a recording is active — gain nodes are kept on
+        // _screenrecState.mixerNodes keyed by meterKey for exactly this.
+        const mn = _screenrecState?.mixerNodes?.[meterKey];
+        if (mn?.gain) mn.gain.gain.value = (state.muted ? 0 : next / 100);
+      }
+    });
+    slide.addEventListener('change', _persistMixer);
+    row.appendChild(slide);
+    row.appendChild(v);
+
+    // Peak-style level meter. Width is driven by a CSS --level custom
+    // property that the meter loop sets every frame from this row's
+    // analyser (live whenever the source is armed/active).
+    const meter = document.createElement('div');
+    meter.className = 'visualizer-mixer-meter';
+    meter.title = 'Signal level — green/yellow/red = quiet/loud/clipping';
+    const meterFill = document.createElement('div');
+    meterFill.className = 'visualizer-mixer-meter-fill';
+    meter.appendChild(meterFill);
+    row.appendChild(meter);
+
+    return row;
+  }
+
   function _renderMixer() {
     if (!_mixerRowsEl) return;
-    const sources = _activeMixerSources();
+    const fixed = _activeMixerSources();
+    // Mic rows: every enumerated mic (incl. cam built-ins), armable.
+    const micRows = _recCaptureMic
+      ? [..._micState.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label))
+      : [];
     _mixerRowsEl.innerHTML = '';
-    if (!sources.length) {
+    if (!fixed.length && !micRows.length) {
       const empty = document.createElement('div');
       empty.className = 'visualizer-mixer-empty';
       empty.textContent = 'NO ACTIVE SOURCES · TURN ON SOUND OR MIC TO ENABLE';
       _mixerRowsEl.appendChild(empty);
       return;
     }
-    for (const src of sources) {
-      const state = _mixer[src.kind];
-      const row = document.createElement('div');
-      row.className = 'visualizer-mixer-row' + (state.muted ? ' is-muted' : '');
-      row.dataset.kind = src.kind;
-      const k = document.createElement('span'); k.className = 'visualizer-mixer-k'; k.textContent = src.label;
-      const mute = document.createElement('button');
-      mute.type = 'button';
-      mute.className = 'visualizer-mixer-mute' + (state.muted ? ' is-muted' : '');
-      mute.textContent = state.muted ? 'MUTED' : 'MUTE';
-      mute.title = state.muted ? 'Un-mute this source in the mix' : 'Mute this source in the mix';
-      mute.addEventListener('click', async () => {
-        state.muted = !state.muted;
-        await _persistMixer();
-        _renderMixer();
-        playSfx?.('click');
-      });
-      const slide = document.createElement('input');
-      slide.type = 'range'; slide.min = '0'; slide.max = '150'; slide.step = '1'; slide.value = String(state.vol);
-      const v = document.createElement('span'); v.className = 'visualizer-mixer-v'; v.textContent = String(state.vol);
-      slide.addEventListener('input', () => {
-        const next = parseInt(slide.value, 10);
-        if (Number.isFinite(next)) {
-          state.vol = next;
-          v.textContent = String(next);
-          // Hot-apply when a recording is active — gain nodes are
-          // kept on _screenrecState.mixerNodes for exactly this.
-          const mn = _screenrecState?.mixerNodes?.[src.kind];
-          if (mn?.gain) mn.gain.gain.value = (state.muted ? 0 : next / 100);
-        }
-      });
-      slide.addEventListener('change', _persistMixer);
-      // Peak-style level meter. Width is driven by a CSS --level custom
-      // property that _meterLoop sets every ~33 ms during recording.
-      // Idle (no recording) just stays at 0 — the dark bar is the
-      // "this source is wired but not active" cue.
-      const meter = document.createElement('div');
-      meter.className = 'visualizer-mixer-meter';
-      meter.title = 'Signal level — green/yellow/red = quiet/loud/clipping';
-      const meterFill = document.createElement('div');
-      meterFill.className = 'visualizer-mixer-meter-fill';
-      meter.appendChild(meterFill);
-      row.appendChild(k);
-      row.appendChild(mute);
-      row.appendChild(slide);
-      row.appendChild(v);
-      row.appendChild(meter);
-      _mixerRowsEl.appendChild(row);
+    for (const src of fixed) {
+      _mixerRowsEl.appendChild(_makeMixerRow({
+        label: src.label,
+        state: _mixer[src.kind],
+        meterKey: src.kind,
+        kind: src.kind,
+      }));
+    }
+    for (const [deviceId, state] of micRows) {
+      _mixerRowsEl.appendChild(_makeMixerRow({
+        label: state.label,
+        state,
+        meterKey: `mic:${deviceId}`,
+        kind: 'mic',
+        deviceId,
+        armToggle: true,
+      }));
     }
   }
   async function _persistMixer() {
-    try { await window.dash?.setConfig?.({ recRoomMixer: _mixer }); } catch {}
+    // Persist the fixed SYSTEM/WINDOW levels plus per-mic state (armed +
+    // mute + vol + label) keyed by deviceId so a mic's settings survive
+    // restarts and re-enumeration.
+    const mics = {};
+    for (const [id, e] of _micState.entries()) {
+      mics[id] = { armed: e.armed, muted: e.muted, vol: e.vol, label: e.label };
+    }
+    try { await window.dash?.setConfig?.({ recRoomMixer: _mixer, recRoomMics: mics }); } catch {}
   }
   window.addEventListener('rec-mirror-changed', _renderMixer);
 
@@ -2134,13 +2229,31 @@ export function init(deps) {
     _recCaptureAudio = cfg.recRoomCaptureAudio !== false;
     _recCaptureMic   = cfg.recRoomCaptureMic   !== false;
     if (cfg.recRoomMixer && typeof cfg.recRoomMixer === 'object') {
-      for (const k of ['system', 'mic', 'window']) {
+      for (const k of ['system', 'window']) {
         if (cfg.recRoomMixer[k]) Object.assign(_mixer[k], cfg.recRoomMixer[k]);
       }
     }
+    // Restore saved per-mic state. The device may not be enumerated yet
+    // (labels need a gUM grant) — seed the entry now; _syncMicState keeps
+    // armed entries even if the device is momentarily absent.
+    if (cfg.recRoomMics && typeof cfg.recRoomMics === 'object') {
+      for (const [id, saved] of Object.entries(cfg.recRoomMics)) {
+        if (!saved || typeof saved !== 'object') continue;
+        const e = _micEntry(id, saved.label);
+        e.armed = !!saved.armed;
+        e.muted = !!saved.muted;
+        if (Number.isFinite(saved.vol)) e.vol = saved.vol;
+      }
+    }
+    // Enumerate mics up front so rows appear without opening the picker.
+    try { await _refreshMicList(); } catch {}
     _paintSoundBtn();
     _paintMicBtn();
     _renderMixer();
+    // Any mics that were armed in a prior session should start metering
+    // as soon as a mirror is active — _refreshMonitor handles that and is
+    // re-invoked on mirror/REC changes.
+    try { await _refreshMonitor(); } catch {}
     // Meter loop runs forever — it reads from _mon.{kind}.analyser
     // which is only populated when mirror is active, so the meters
     // sit at 0 until the user starts mirroring (which calls
@@ -2161,7 +2274,9 @@ export function init(deps) {
   //             one _buildMixerStream opens at REC start).
   //   • window: a MediaStreamSource off whatever audio tracks the
   //             active mirror exposes.
-  const _mon = { ctx: null, system: null, mic: null, window: null };
+  // _mon.mics is a Map deviceId -> { analyser, stream } so each ARMED mic
+  // is metered independently. system/window stay single.
+  const _mon = { ctx: null, system: null, window: null, mics: new Map() };
   async function _monCtx() {
     if (_mon.ctx) return _mon.ctx;
     try { _mon.ctx = new (window.AudioContext || window.webkitAudioContext)(); return _mon.ctx; }
@@ -2215,35 +2330,46 @@ export function init(deps) {
     // subscribed (it's a flag in main).
     console.log('[mon] system detached');
   }
-  async function _monAttachMic() {
-    if (_mon.mic) return;
+  // Open ONE specific mic for live metering. Keyed by deviceId so each
+  // armed mic gets its own analyser. exact deviceId so we monitor the
+  // device the user armed, not the OS default.
+  async function _monAttachMic(deviceId) {
+    if (_mon.mics.has(deviceId)) return;
     const ctx = await _monCtx(); if (!ctx) return;
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+        audio: {
+          deviceId: { exact: deviceId },
+          echoCancellation: false, noiseSuppression: false, autoGainControl: true,
+        },
       });
     } catch (err) {
       const msg = err?.message || err?.name || 'unknown';
-      console.warn('[mon] mic gUM failed:', msg, err);
-      if (visualizerNowEl) visualizerNowEl.textContent = `MIC FAILED · ${msg}`;
+      const label = _micState.get(deviceId)?.label || deviceId;
+      console.warn('[mon] mic gUM failed:', label, msg, err);
+      if (visualizerNowEl) visualizerNowEl.textContent = `MIC FAILED · ${label} · ${msg}`;
       return;
     }
     const t0 = stream.getAudioTracks()[0];
-    console.log('[mon] mic attached:', { label: t0?.label || '(no label)', muted: t0?.muted, deviceId: t0?.getSettings?.()?.deviceId });
-    if (t0?.muted) {
-      if (visualizerNowEl) visualizerNowEl.textContent = `MIC MUTED AT OS · check Windows mic privacy`;
+    console.log('[mon] mic attached:', { label: t0?.label || '(no label)', muted: t0?.muted, deviceId });
+    if (t0?.muted && visualizerNowEl) {
+      visualizerNowEl.textContent = `MIC MUTED AT OS · ${t0?.label || ''} · check Windows mic privacy`;
     }
     const src = ctx.createMediaStreamSource(stream);
     const analyser = _makeMonAnalyser(ctx);
     src.connect(analyser);
-    _mon.mic = { analyser, stream };
+    _mon.mics.set(deviceId, { analyser, stream });
   }
-  function _monDetachMic() {
-    if (!_mon.mic) return;
-    for (const t of _mon.mic.stream.getTracks()) { try { t.stop(); } catch {} }
-    _mon.mic = null;
-    console.log('[mon] mic detached');
+  function _monDetachMic(deviceId) {
+    const m = _mon.mics.get(deviceId);
+    if (!m) return;
+    for (const t of m.stream.getTracks()) { try { t.stop(); } catch {} }
+    _mon.mics.delete(deviceId);
+    console.log('[mon] mic detached:', deviceId);
+  }
+  function _monDetachAllMics() {
+    for (const id of [..._mon.mics.keys()]) _monDetachMic(id);
   }
   async function _monAttachWindow() {
     if (_mon.window) return;
@@ -2274,14 +2400,26 @@ export function init(deps) {
   async function _refreshMonitor() {
     const mirrorActive = !!_mirrorStream;
     const recActive = !!_screenrecState;
-    if (!mirrorActive || recActive) {
-      _monDetachSystem(); _monDetachMic(); _monDetachWindow();
+    // During REC the recording graph (_screenrecState.mixerNodes) owns the
+    // meters and the mic devices — tear the monitor fully down so we don't
+    // contend for the same hardware.
+    if (recActive) {
+      _monDetachSystem(); _monDetachAllMics(); _monDetachWindow();
       return;
     }
-    if (_recCaptureAudio) await _monAttachSystem(); else _monDetachSystem();
-    if (_recCaptureMic)   await _monAttachMic();    else _monDetachMic();
-    const hasWin = (_mirrorStream?.getAudioTracks?.() || []).length > 0;
+    // SYSTEM + WINDOW meter only while a mirror is up (system loopback is
+    // tied to having something to record; window needs the mirror tracks).
+    if (mirrorActive && _recCaptureAudio) await _monAttachSystem(); else _monDetachSystem();
+    const hasWin = mirrorActive && (_mirrorStream?.getAudioTracks?.() || []).length > 0;
     if (hasWin) await _monAttachWindow(); else _monDetachWindow();
+    // MICS meter whenever ARMED — even without a mirror, so the user can
+    // check levels before recording. Disarmed/removed mics are released.
+    const wantMic = _recCaptureMic;
+    const armedIds = new Set(
+      wantMic ? [..._micState.entries()].filter(([, e]) => e.armed).map(([id]) => id) : []
+    );
+    for (const id of armedIds) await _monAttachMic(id);
+    for (const id of [..._mon.mics.keys()]) if (!armedIds.has(id)) _monDetachMic(id);
   }
   // Special-case: when the mirror source changes, the WINDOW node still
   // points at the old stream's tracks. Tear down + rebuild so the
@@ -2298,18 +2436,26 @@ export function init(deps) {
   // is the analyser fill + a peak scan over 512 samples.
   let _meterRaf = 0;
   const _meterBuf = new Uint8Array(512);
+  // Resolve the live analyser for a row's meter key. During REC the
+  // recording graph owns all analysers (keyed by meterKey, incl.
+  // 'mic:<id>'); otherwise the always-on monitor does. Mic monitor
+  // analysers live in the _mon.mics Map; system/window are direct.
+  function _analyserForMeterKey(meterKey) {
+    const recNode = _screenrecState?.mixerNodes?.[meterKey];
+    if (recNode?.analyser) return recNode.analyser;
+    if (meterKey.startsWith('mic:')) {
+      return _mon.mics.get(meterKey.slice(4))?.analyser || null;
+    }
+    return _mon[meterKey]?.analyser || null;
+  }
   function _startMeterLoop() {
     if (_meterRaf) return;
     const tick = () => {
       if (!_mixerRowsEl) { _meterRaf = 0; return; }
-      for (const kind of ['system', 'mic', 'window']) {
-        const row = _mixerRowsEl.querySelector(`[data-kind="${kind}"]`);
-        if (!row) continue;
-        // Prefer the recording graph's analyser when REC is active —
-        // the monitor is torn down during REC to avoid hardware
-        // contention, so this is where meters come from mid-recording.
-        const analyser = _screenrecState?.mixerNodes?.[kind]?.analyser
-                       || _mon[kind]?.analyser;
+      // Iterate the ACTUAL rendered rows (system/window + one per mic)
+      // rather than a fixed kind list, so per-device mic rows meter.
+      for (const row of _mixerRowsEl.querySelectorAll('[data-meter-key]')) {
+        const analyser = _analyserForMeterKey(row.dataset.meterKey);
         if (!analyser) { row.style.setProperty('--level', '0'); continue; }
         try { analyser.getByteTimeDomainData(_meterBuf); } catch { continue; }
         // Peak deviation from 128 (silence) → 0..128 → map to dB then
@@ -2617,7 +2763,7 @@ export function init(deps) {
     // Mirror is gone — the WINDOW source row in the MIXER also goes
     // away. Refresh the panel so the user sees the change without
     // having to toggle SOUND/MIC.
-    try { _renderMixer?.(); } catch {}
+    try { _renderMixer?.(); _refreshMonitor().catch(() => {}); } catch {}
     // Drop the dynamic source-aspect; the wrap goes back to default
     // full-pane-width sizing until the next mirror or playback.
     if (typeof _setSourceDims === 'function') _setSourceDims(0, 0);
@@ -2652,7 +2798,12 @@ export function init(deps) {
     const preset = _CAM_RES_PRESETS[_camResolution] || _CAM_RES_PRESETS['720p'];
     const open = await Promise.all(deviceIds.map(async (camId) => {
       const cam = _camDevices.find((d) => d.deviceId === camId);
-      const pairedMic = cam && _micDevices.find((m) => m.groupId && m.groupId === cam.groupId);
+      // VIDEO-ONLY. Cam built-in mics are NOT opened here anymore — they
+      // surface as their own armable rows in the MIXER (each metered +
+      // recorded independently). Holding the mic in the cam stream would
+      // make arming that same mic fail with NotReadableError, and the old
+      // auto-mix-all-cam-mics path also tripped the double-audio trap when
+      // SYSTEM loopback was on. See [[feedback_no_double_audio]].
       const constraints = {
         video: {
           deviceId: { exact: camId },
@@ -2660,23 +2811,12 @@ export function init(deps) {
           height: { ideal: preset.h },
           frameRate: { ideal: 30 },
         },
-        audio: pairedMic ? { deviceId: { exact: pairedMic.deviceId } } : false,
+        audio: false,
       };
       try {
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        return { camId, label: cam?.label || 'Camera', stream, hadAudio: !!pairedMic };
+        return { camId, label: cam?.label || 'Camera', stream, hadAudio: false };
       } catch (err1) {
-        // Retry video-only — common when the paired mic is busy or denied.
-        if (constraints.audio) {
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video, audio: false });
-            console.warn('[multi-cam] mic dropped for', cam?.label || camId, '—', err1?.message || err1);
-            return { camId, label: cam?.label || 'Camera', stream, hadAudio: false };
-          } catch (err2) {
-            console.warn('[multi-cam] cam failed:', cam?.label || camId, err2?.message || err2);
-            return null;
-          }
-        }
         console.warn('[multi-cam] cam failed:', cam?.label || camId, err1?.message || err1);
         return null;
       }
@@ -2902,7 +3042,7 @@ export function init(deps) {
       visualizerNowEl.textContent = `MIRROR · ${cams.length} CAM${cams.length === 1 ? '' : 'S'} · ${names}`.toUpperCase();
     }
     // New mirror up — pull any WINDOW audio it brings into the mixer.
-    try { _renderMixer?.(); } catch {}
+    try { _renderMixer?.(); _refreshMonitor().catch(() => {}); } catch {}
     console.log('[multi-cam] started:', {
       cams: cams.length,
       audioTracks: finalStream.getAudioTracks().length,
@@ -3019,7 +3159,7 @@ export function init(deps) {
     _mirrorSourceOverride = { id: src.id, name: src.name };
     try { _renderSourceStrip?.(); } catch {}
     // New source up — pull any WINDOW audio it brings into the mixer.
-    try { _renderMixer?.(); } catch {}
+    try { _renderMixer?.(); _refreshMonitor().catch(() => {}); } catch {}
     // If the captured stream ends (window closed, user revoked share),
     // auto-disengage so the UI doesn't lie about being live.
     const track = _mirrorStream.getVideoTracks()[0];
@@ -3161,7 +3301,7 @@ export function init(deps) {
     // user has explicit STOP via the MIRROR button; a real natural
     // end-of-video is signaled by the video element's own 'ended'
     // event, which file-playback code handles separately.
-    try { _renderMixer?.(); } catch {}
+    try { _renderMixer?.(); _refreshMonitor().catch(() => {}); } catch {}
     playSfx?.('confirm');
   }
   sourceUrlGoBtn?.addEventListener('click', () => {
@@ -3204,6 +3344,50 @@ export function init(deps) {
     _micDevices = devices.filter((d) => d.kind === 'audioinput');
     const camIds = new Set(cams.map((c) => c.deviceId));
     for (const id of [..._camPicked]) if (!camIds.has(id)) _camPicked.delete(id);
+    _syncMicState();
+  }
+
+  // Enumerate every microphone (incl. webcam built-in mics) and reconcile
+  // _micState with the current device set. Labels are blank until a
+  // getUserMedia grant has happened this session, so probe once if needed.
+  // Called standalone (mixer panel open) AND from _refreshCamList. Returns
+  // the live mic device list. Skips the 'default'/'communications' alias
+  // entries Windows exposes (they duplicate a real device and would show a
+  // phantom extra row).
+  async function _refreshMicList() {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
+    let devices = [];
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch {}
+    let mics = devices.filter((d) => d.kind === 'audioinput');
+    if (mics.length && mics.every((m) => !m.label)) {
+      try {
+        const probe = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        for (const t of probe.getTracks()) { try { t.stop(); } catch {} }
+        devices = await navigator.mediaDevices.enumerateDevices();
+        mics = devices.filter((d) => d.kind === 'audioinput');
+      } catch (err) {
+        console.warn('[rec-room] mic label probe failed:', err?.message || err);
+      }
+    }
+    _micDevices = mics;
+    _syncMicState();
+    return mics;
+  }
+
+  // Reconcile the _micState Map against _micDevices: create entries for
+  // new mics (default disarmed), refresh labels, and prune entries whose
+  // device disappeared (unless still armed — keep so a momentarily-absent
+  // USB mic doesn't lose its armed/level state on a transient re-enum).
+  function _syncMicState() {
+    const seen = new Set();
+    for (const m of _micDevices) {
+      if (m.deviceId === 'default' || m.deviceId === 'communications') continue;
+      seen.add(m.deviceId);
+      _micEntry(m.deviceId, m.label);
+    }
+    for (const id of [..._micState.keys()]) {
+      if (!seen.has(id) && !_micState.get(id)?.armed) _micState.delete(id);
+    }
   }
   function _renderSourceStrip() {
     if (!sourceStripEl) return;
@@ -3821,41 +4005,53 @@ registerProcessor('pcm-tap', PcmTap);
       }
     }
 
+    // Per-device mics: open + mix EVERY armed mic, each as its own node
+    // keyed 'mic:<deviceId>' so the meter loop and slider hot-apply find
+    // it. Disarmed mics are skipped (not opened, not recorded).
     if (_recCaptureMic) {
-      try {
-        // Mic constraints: keep echoCancellation OFF so the EC algorithm
-        // doesn't subtract system-loopback content from the mic (we're
-        // recording both simultaneously; cancelling overlap would gut the
-        // mic). noiseSuppression OFF so the user's recording stays raw.
-        // autoGainControl IS ON — without it, a quietly-configured
-        // Windows mic produces near-silent recordings even at slider 100.
-        const ms = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
-        });
-        const tracks = ms.getAudioTracks();
-        if (!tracks.length) {
-          console.warn('[mixer] mic getUserMedia returned a stream with no audio tracks');
-        } else {
+      const armedMics = [..._micState.entries()].filter(([, e]) => e.armed);
+      let micAttached = 0;
+      for (const [deviceId, mstate] of armedMics) {
+        try {
+          // Constraints rationale unchanged from the old single-mic path:
+          // EC off (don't subtract system-loopback overlap), NS off (raw),
+          // AGC on (quietly-configured Windows mics otherwise record near
+          // silent). exact deviceId so we capture the armed device.
+          const ms = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              deviceId: { exact: deviceId },
+              echoCancellation: false, noiseSuppression: false, autoGainControl: true,
+            },
+          });
+          const tracks = ms.getAudioTracks();
+          if (!tracks.length) {
+            console.warn('[mixer] mic returned no audio tracks:', mstate.label);
+            for (const t of ms.getTracks()) { try { t.stop(); } catch {} }
+            continue;
+          }
           const t0 = tracks[0];
           const settings = t0.getSettings?.() || {};
-          console.log('[mixer] mic attached:', { label: t0.label || '(no label)', deviceId: settings.deviceId, sampleRate: settings.sampleRate, channelCount: settings.channelCount, readyState: t0.readyState, muted: t0.muted });
-          if (t0.muted) {
-            if (visualizerNowEl) visualizerNowEl.textContent = `MIC MUTED AT OS · check Windows mic privacy`;
-            console.warn('[mixer] mic track is OS-muted — Windows mic privacy or device-level mute is blocking capture');
+          console.log('[mixer] mic attached:', { label: t0.label || mstate.label, deviceId: settings.deviceId, sampleRate: settings.sampleRate, channelCount: settings.channelCount, muted: t0.muted });
+          if (t0.muted && visualizerNowEl) {
+            visualizerNowEl.textContent = `MIC MUTED AT OS · ${t0.label || mstate.label} · check Windows mic privacy`;
           }
+          const src = ctx.createMediaStreamSource(ms);
+          const gain = ctx.createGain();
+          const analyser = _makeAnalyser();
+          gain.gain.value = mstate.muted ? 0 : mstate.vol / 100;
+          src.connect(gain).connect(master);
+          gain.connect(analyser);
+          nodes[`mic:${deviceId}`] = { src, gain, analyser };
+          teardowns.push(() => { for (const t of ms.getTracks()) { try { t.stop(); } catch {} } });
+          micAttached++;
+        } catch (err) {
+          const msg = err?.message || err?.name || 'unknown';
+          console.warn('[mixer] mic getUserMedia failed:', mstate.label, msg, err);
+          if (visualizerNowEl) visualizerNowEl.textContent = `MIC FAILED · ${mstate.label} · ${msg}`;
         }
-        const src = ctx.createMediaStreamSource(ms);
-        const gain = ctx.createGain();
-        const analyser = _makeAnalyser();
-        gain.gain.value = _mixer.mic.muted ? 0 : _mixer.mic.vol / 100;
-        src.connect(gain).connect(master);
-        gain.connect(analyser);
-        nodes.mic = { src, gain, analyser };
-        teardowns.push(() => { for (const t of ms.getTracks()) { try { t.stop(); } catch {} } });
-      } catch (err) {
-        const msg = err?.message || err?.name || 'unknown';
-        console.warn('[mixer] mic getUserMedia failed:', msg, err);
-        if (visualizerNowEl) visualizerNowEl.textContent = `MIC FAILED · ${msg}`;
+      }
+      if (armedMics.length && !micAttached) {
+        console.warn('[mixer] no armed mic could be opened');
       }
     }
 
@@ -3937,6 +4133,11 @@ registerProcessor('pcm-tap', PcmTap);
 
   async function _startScreenrec() {
     if (_screenrecState) return;
+    // Release the live monitor's mic/system/window streams BEFORE the
+    // recording opens its own. On Windows a second getUserMedia on a mic
+    // already held by the monitor throws NotReadableError ("device in
+    // use"), which would silently drop that mic from the recording.
+    try { _monDetachAllMics(); _monDetachSystem(); _monDetachWindow(); } catch {}
     if (!_mirrorStream) {
       // Auto-start the mirror so REC works in one click. If that fails, bail.
       await _startVisualizerMirror();
@@ -4482,8 +4683,15 @@ registerProcessor('pcm-tap', PcmTap);
     } finally {
       // Final teardown closes the AudioContext + tears down the
       // loopback. Fire-and-forget so the next REC can spin up without
-      // waiting on setLoopbackPcm(false) to round-trip.
-      try { Promise.resolve(st.finalTeardown?.()).catch(() => {}); } catch {}
+      // waiting on setLoopbackPcm(false) to round-trip. Once it settles
+      // the mic devices are free again, so rebuild the live monitor so
+      // armed-mic meters resume (and don't contend with the now-released
+      // recording streams).
+      try {
+        Promise.resolve(st.finalTeardown?.())
+          .catch(() => {})
+          .then(() => { _refreshMonitor().catch(() => {}); });
+      } catch { _refreshMonitor().catch(() => {}); }
     }
   }
   screenrecBtn?.addEventListener('click', () => {
