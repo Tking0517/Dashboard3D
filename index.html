@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   </head>
-  <body class="is-booting is-boot-distorted is-boot-glowing is-calm">
+  <body class="is-booting is-boot-distorted is-boot-glowing">
     <!-- CRT static-noise overlay, only visible while body.is-booting is
          active. Canvas-rendered horizontal stripes in the active theme
          accent — composited via mix-blend-mode: screen so it brightens
@@ -43,7 +43,6 @@
           <div class="diag-line" data-key="mode">MODE      —</div>
           <div class="diag-line diag-gap"></div>
           <div class="diag-line" data-key="theme">THEME    —</div>
-          <div class="diag-line" data-key="alerts">ALERTS   —</div>
           <div class="diag-line" data-key="up">UP       —</div>
         </div>
       </div>
@@ -180,18 +179,18 @@
       </div>
 
       <div id="audio-out-grid" class="audio-grid audio-grid-out" title="Default output (system audio) — drag to move">
-        <div class="audio-bars-row" id="audio-out-bars-row"></div>
         <div class="audio-meta-row">
           <button id="audio-out-mute-btn" class="audio-mute-btn" type="button" title="Mute / unmute">M</button>
           <span id="audio-out-device-name" class="audio-device-name">—</span>
         </div>
+        <div class="audio-bars-row" id="audio-out-bars-row"></div>
       </div>
       <div id="audio-in-grid" class="audio-grid audio-grid-in" title="Default input (microphone) — drag to move">
-        <div class="audio-bars-row" id="audio-in-bars-row"></div>
         <div class="audio-meta-row">
           <button id="audio-in-mute-btn" class="audio-mute-btn" type="button" title="Mute / unmute">M</button>
           <span id="audio-in-device-name" class="audio-device-name">—</span>
         </div>
+        <div class="audio-bars-row" id="audio-in-bars-row"></div>
       </div>
 
 
@@ -204,7 +203,7 @@
           <section class="panel panel-clock">
             <header class="panel-header">
               <span class="panel-title">CHRONO <em>A1</em></span>
-              <span class="panel-code">DUAL ZONE</span>
+              <span class="panel-code" id="clock-code">DUAL ZONE</span>
               <span class="panel-id" id="clock-doy-header">—</span>
             </header>
             <div class="panel-body clock-body">
@@ -230,18 +229,16 @@
                 <div class="profile-pic" id="profile-pic" title="Click to pick a profile picture">
                   <video id="profile-pic-video" class="profile-pic-video" autoplay muted playsinline hidden></video>
                   <img id="profile-pic-img" class="profile-pic-img" alt="" hidden />
-                  <!-- Camera ON/OFF toggle chip — top-right corner.
-                       Visible on profile-pic:hover OR whenever the
-                       camera is live. stopPropagation so clicking it
-                       toggles the webcam without opening the gallery
-                       picker. Icon tints accent (off → click to turn
-                       on) or red (live → click to turn off). -->
-                  <button id="profile-pic-camera-toggle" class="profile-pic-camera-toggle" type="button" title="Turn camera on / off" aria-label="Toggle camera">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <rect x="3" y="6" width="13" height="12" rx="1"/>
-                      <path d="M16 10l5-3v10l-5-3z"/>
-                    </svg>
-                  </button>
+                  <!-- RECORD video chip — top-left, outside the
+                       thumbnail. Visible only when the webcam is live.
+                       Toggles a MediaRecorder on the webcam stream; on
+                       stop, saves the captured bytes via
+                       processSnapsSave to gallery/videos/. -->
+                  <button id="profile-pic-record" class="profile-pic-record profile-pic-chip" type="button" title="Toggle recording to gallery (R)" aria-label="Toggle record">REC</button>
+                  <!-- (Camera ON/OFF chip removed — clicking anywhere on
+                       the profile-pic body now toggles the webcam off when
+                       it's live, or opens the source-chooser modal when
+                       it's off. See profilePicEl click handler in app.js.) -->
                   <!-- Cycle-cameras button: bottom-right. Visible only
                        when the live webcam feed is active (.is-live on
                        parent). Calls cycleCamera() so multi-camera
@@ -279,7 +276,14 @@
                 </div>
               </div>
 
-              <div class="time-row">
+              <!-- Secondary timezone (ALT ZONE 1) hidden for now. JS in
+                   app.js still updates these elements so re-enabling is
+                   just removing the `style="display:none"` on both
+                   wrappers. (Inline style is required — the .time-row
+                   and .alt-city-row class selectors set `display: grid`
+                   which would otherwise override the `hidden` attribute
+                   via CSS specificity.) -->
+              <div class="time-row" style="display:none">
                 <div class="time-meta">
                   <span class="micro-label">ALT ZONE 1</span>
                   <span class="micro-val accent" id="alt-name">—</span>
@@ -292,7 +296,7 @@
                 </div>
               </div>
 
-              <div class="alt-city-row">
+              <div class="alt-city-row" style="display:none">
                 <label class="micro-label">ALT 1 CITY</label>
                 <input
                   id="alt-city-input"
@@ -337,7 +341,7 @@
           <section class="panel panel-weather">
             <header class="panel-header">
               <span class="panel-title">METEO <em>B2</em></span>
-              <span class="panel-code">OPEN-METEO</span>
+              <span class="panel-code" id="weather-code">OPEN-METEO</span>
               <span class="panel-id" id="weather-pid">—</span>
             </header>
             <div class="panel-body weather-body">
@@ -404,7 +408,7 @@
             <section class="panel panel-cpu">
               <header class="panel-header">
                 <span class="panel-title">CPU <em>C3</em></span>
-                <span class="panel-code">LOGICAL</span>
+                <span class="panel-code" id="cpu-code">LOGICAL</span>
                 <span class="panel-id" id="sys-cores">—</span>
               </header>
               <div class="panel-body">
@@ -440,7 +444,7 @@
             <section class="panel panel-gpu">
               <header class="panel-header">
                 <span class="panel-title">GPU <em>G2</em></span>
-                <span class="panel-code">GRAPHICS</span>
+                <span class="panel-code" id="gpu-code">GRAPHICS</span>
                 <span class="panel-id" id="sys-gpu-count-header">—</span>
               </header>
               <div class="panel-body">
@@ -474,14 +478,13 @@
             <section class="panel panel-ram">
               <header class="panel-header">
                 <span class="panel-title">RAM <em>R1</em></span>
-                <span class="panel-code">MEMORY</span>
+                <span class="panel-code" id="ram-code">MEMORY</span>
                 <span class="panel-id" id="sys-mem-pct-header">—</span>
               </header>
               <div class="panel-body">
                 <div class="meter">
                   <div class="meter-head">
                     <span class="meter-label">MEMORY</span>
-                    <span class="meter-value" id="sys-mem-value">—</span>
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-mem" id="sys-mem-bar"></div></div>
                 </div>
@@ -492,17 +495,12 @@
                   </div>
                   <div class="core-grid" id="mem-hist-grid"></div>
                 </div>
-                <div class="meter">
-                  <div class="meter-head">
-                    <span class="meter-label">SCRATCH DISK</span>
-                    <span class="meter-value" id="sys-scratch-value">—</span>
-                  </div>
-                  <div class="scratch-grid" id="scratch-grid"></div>
-                </div>
               </div>
               <footer class="panel-footer">
                 <span class="footer-label">MEM STATUS</span>
                 <span class="footer-readout">
+                  <em>USED</em>
+                  <strong id="sys-mem-value">—</strong>
                   <em>CODE</em>
                   <strong class="amber">R1</strong>
                   <em class="ok">ACT STATUS</em>
@@ -516,6 +514,21 @@
                One panel with a mode toggle so each retains its own UI. -->
           <section class="panel panel-combo" data-mode="notes">
       <div class="topbar-controls">
+        <!-- Drag handles at the start + end of the row. Each absorbs
+             the empty space at its edge of the centered topbar (flex: 1
+             1 0) so the buttons keep their natural cluster, and a
+             mousedown on either drags the whole row left/right. The
+             grab nubs sit at the right side of the LEFT handle and
+             left side of the RIGHT handle (the "inner" edges) so they
+             stay visible no matter how far the row has been shifted. -->
+        <span class="topbar-grab topbar-grab-l" data-no-drag="true" title="Drag to shift the topbar"></span>
+        <!-- Recording-active badge. Visible from any room while a
+             screen recording is in progress so the user has a global
+             "yes it's still capturing" confirmation. visualizer.js
+             toggles `is-active` on _screenrecState lifecycle. -->
+        <span id="topbar-rec-indicator" class="topbar-rec-indicator" title="A screen recording is in progress" hidden>
+          <span class="topbar-rec-dot"></span><span class="topbar-rec-label">REC</span>
+        </span>
         <!-- ── Theme / appearance group ─────────────────────────────── -->
         <span id="user-name-chip" class="theme-name user-name-chip" title="Logged-in user" hidden>—</span>
         <button id="setup-btn" class="topbar-btn" type="button" title="Run guided setup" aria-label="Run guided setup">
@@ -526,14 +539,59 @@
         </button>
         <span id="version-chip" class="theme-name version-chip" title="Dashboard3D version">v—</span>
 
-        <button id="bg-pattern-btn" class="topbar-btn" type="button" title="Background pattern" aria-label="Background pattern">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="7" height="7"/>
-            <circle cx="17.5" cy="6.5" r="3.5"/>
-            <path d="M3 17 L7 13 L11 17 Z"/>
-            <path d="M14 14 L21 14 L21 21 L14 21 Z M14 17.5 L21 17.5"/>
-          </svg>
-        </button>
+        <!-- ── Collapsible THEME group ───────────────────────────────
+             Header shows the active theme name + a caret. Click the
+             caret to expand the body, which holds the type buttons
+             (CYBER · MATTE), the colour-cycle button, invert, and the
+             background-pattern picker. -->
+        <div class="topbar-group" id="theme-group" data-no-drag="true">
+          <button class="topbar-group-toggle" type="button" aria-expanded="false" title="Theme settings">
+            <span id="theme-name" class="theme-name topbar-group-name" title="Current theme">DEFAULT</span>
+            <svg class="topbar-group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 9 L12 15 L18 9"/>
+            </svg>
+          </button>
+          <div class="topbar-group-body">
+            <button id="theme-cat-cyber" class="theme-cat-btn" type="button" title="Cyber themes">CYBER</button>
+            <button id="theme-cat-hud"   class="theme-cat-btn" type="button" title="HUD / sci-fi cockpit themes">HUD</button>
+            <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next colour" aria-label="Next theme colour">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12 A9 9 0 1 1 12 3"/>
+                <polyline points="21,3 21,9 15,9"/>
+              </svg>
+            </button>
+            <button id="bg-pattern-btn" class="topbar-btn" type="button" title="Background pattern" aria-label="Background pattern">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"/>
+                <circle cx="17.5" cy="6.5" r="3.5"/>
+                <path d="M3 17 L7 13 L11 17 Z"/>
+                <path d="M14 14 L21 14 L21 21 L14 21 Z M14 17.5 L21 17.5"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- ── Collapsible TEXT group ────────────────────────────────
+             Header shows the active UI font name + caret. Body holds
+             the font-cycle button. -->
+        <div class="topbar-group" id="text-group" data-no-drag="true">
+          <button class="topbar-group-toggle" type="button" aria-expanded="false" title="Font settings">
+            <span id="font-name" class="theme-name topbar-group-name" title="Current UI font">DEFAULT</span>
+            <svg class="topbar-group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 9 L12 15 L18 9"/>
+            </svg>
+          </button>
+          <div class="topbar-group-body">
+            <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 19 L9 5 L13 19"/>
+                <path d="M6.5 14 H11.5"/>
+                <path d="M16 19 V9"/>
+                <path d="M14 11.5 Q16 9 18 11.5"/>
+              </svg>
+            </button>
+          </div>
+        </div>
 
         <div class="hz-control" id="hz-control" data-no-drag="true" title="Global refresh rate · 5 Hz step · 10–200 Hz">
           <button id="hz-down" class="topbar-btn hz-btn" type="button" aria-label="Slower">
@@ -545,48 +603,14 @@
           </button>
         </div>
 
-        <div class="theme-picker" id="theme-picker" data-no-drag="true">
-          <button id="theme-cat-cyber" class="theme-cat-btn" type="button" title="Cyber themes">CYBER</button>
-          <button id="theme-cat-matte" class="theme-cat-btn" type="button" title="Matte themes">MATTE</button>
-          <button id="theme-cat-dos" class="theme-cat-btn" type="button" title="DOS themes">DOS</button>
-          <button id="theme-cycle-btn" class="topbar-btn" type="button" title="Next colour" aria-label="Next theme colour">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12 A9 9 0 1 1 12 3"/>
-              <polyline points="21,3 21,9 15,9"/>
-            </svg>
-          </button>
-          <span id="theme-name" class="theme-name" title="Current theme">DEFAULT</span>
-        </div>
-
-        <span id="font-name" class="theme-name">DEFAULT</span>
-        <button id="font-btn" class="topbar-btn" type="button" title="Cycle UI font" aria-label="Cycle UI font">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 19 L9 5 L13 19"/>
-            <path d="M6.5 14 H11.5"/>
-            <path d="M16 19 V9"/>
-            <path d="M14 11.5 Q16 9 18 11.5"/>
-          </svg>
-        </button>
-
-        <button id="invert-btn" class="topbar-btn" type="button" title="Invert colors" aria-label="Invert colors">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="9"/>
-            <path d="M12 3 A 9 9 0 0 1 12 21 Z" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-
         <span id="topbar-div-1" class="topbar-divider" title="Drag to reposition divider"></span>
 
-        <!-- ── Panel debug group ────────────────────────────────────── -->
-        <button id="recall-panels-btn" class="topbar-btn" type="button" title="Recall panels (snap any off-screen panel back into the viewport)" aria-label="Recall panels">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="6" y="6" width="12" height="12"/>
-            <path d="M2 6 L6 6 L6 2"/>
-            <path d="M22 6 L18 6 L18 2"/>
-            <path d="M2 18 L6 18 L6 22"/>
-            <path d="M22 18 L18 18 L18 22"/>
-          </svg>
-        </button>
+        <!-- Display strip — one icon per attached monitor with an
+             aspect ratio that reflects its orientation (wide rect for
+             landscape, tall rect for portrait). Click an icon to move
+             the dashboard window to that display. Populated by JS at
+             boot and re-rendered on display-added / -removed events. -->
+        <div class="display-strip" id="display-strip" data-no-drag="true" title="Move dashboard to display"></div>
 
         <!-- Auto-orient — recomputes the panel layout to fit the current
              viewport: left + right side columns, productivity centered,
@@ -601,53 +625,84 @@
           </svg>
         </button>
 
+        <!-- Focus mode — sweeps the side panels + audio strips off the
+             screen in three staggered phases (shrink to sides → collapse
+             down → slide off) while the productivity panel expands to
+             fill the viewport. Click again to reverse the animation. -->
+        <button id="focus-mode-btn" class="topbar-btn" type="button" title="Focus mode — clear the side panels and expand productivity to fill the screen. Click again to restore." aria-label="Focus mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9 V4 H9"/>
+            <path d="M20 9 V4 H15"/>
+            <path d="M4 15 V20 H9"/>
+            <path d="M20 15 V20 H15"/>
+          </svg>
+        </button>
+
+        <!-- Invert — frequently-used color flip lives out here next to
+             the layout/focus buttons so it's one click away. The THEME
+             group still holds the palette + type controls. -->
+        <button id="invert-btn" class="topbar-btn" type="button" title="Invert colors" aria-label="Invert colors">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 3 A 9 9 0 0 1 12 21 Z" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+
         <span id="topbar-div-2" class="topbar-divider" title="Drag to reposition divider"></span>
 
-        <!-- ── Mode + system group ──────────────────────────────────── -->
-        <button id="lock-ui-btn" class="topbar-btn" type="button" title="Lock UI (prevents panel drag, resize, and topbar reorder)" aria-label="Lock UI">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="5" y="11" width="14" height="9" rx="1"/>
-            <path d="M8 11 V7 a4 4 0 0 1 8 0 V11"/>
-            <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-
-        <button id="diag-btn" class="topbar-btn" type="button" title="Toggle diagnostics overlay" aria-label="Toggle diagnostics overlay">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18"/>
-            <path d="M3 9 H21 M9 3 V21"/>
-            <circle cx="6" cy="6" r="0.8" fill="currentColor"/>
-          </svg>
-        </button>
-
-        <button id="flush-ram-btn" class="topbar-btn" type="button" title="Flush RAM (drops working sets to standby for every accessible process)" aria-label="Flush RAM">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="8" width="18" height="9" rx="1"/>
-            <path d="M7 8 V6 M11 8 V6 M15 8 V6 M19 8 V6"/>
-            <path d="M7 17 V19 M11 17 V19 M15 17 V19 M19 17 V19"/>
-            <path d="M6 12 H10 M14 12 H18"/>
-          </svg>
-        </button>
-
-        <button id="refresh-btn" class="topbar-btn" type="button" title="Refresh — reload the renderer (Ctrl+R)" aria-label="Refresh">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 11 A8 8 0 1 0 19 16"/>
-            <path d="M20 5 V11 H14"/>
-          </svg>
-        </button>
-
-        <button id="sleep-btn" class="topbar-btn" type="button" title="Sleep — suspend this PC to RAM (asks to confirm)" aria-label="Sleep">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 13 A9 9 0 1 1 11 3 A7 7 0 0 0 21 13 Z"/>
-          </svg>
-        </button>
-
-        <button id="power-btn" class="topbar-btn" type="button" title="Power — power off, restart, or sleep this PC" aria-label="Power menu">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3 V11"/>
-            <path d="M7.5 6.5 A7 7 0 1 0 16.5 6.5"/>
-          </svg>
-        </button>
+        <!-- ── Collapsible UI group ─────────────────────────────────
+             Layout / panel-management actions that don't need to be
+             one click away. Header is the UI label + caret; body holds
+             recall, store-config, align-edges, lock-ui, diag. -->
+        <div class="topbar-group" id="ui-group" data-no-drag="true">
+          <button class="topbar-group-toggle" type="button" aria-expanded="false" title="UI / panel settings">
+            <span class="theme-name topbar-group-name">UI</span>
+            <svg class="topbar-group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 9 L12 15 L18 9"/>
+            </svg>
+          </button>
+          <div class="topbar-group-body">
+            <button id="recall-panels-btn" class="topbar-btn" type="button" title="Recall panels (snap any off-screen panel back into the viewport)" aria-label="Recall panels">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="6" y="6" width="12" height="12"/>
+                <path d="M2 6 L6 6 L6 2"/>
+                <path d="M22 6 L18 6 L18 2"/>
+                <path d="M2 18 L6 18 L6 22"/>
+                <path d="M22 18 L18 18 L18 22"/>
+              </svg>
+            </button>
+            <button id="store-config-btn" class="topbar-btn" type="button" title="Store current layout — saves panel positions, theme, and background as the launch default" aria-label="Store current layout">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 3 H17 L21 7 V21 H5 Z"/>
+                <path d="M8 3 V8 H16 V3"/>
+                <rect x="14" y="4" width="1.5" height="3"/>
+                <rect x="7" y="13" width="10" height="6"/>
+              </svg>
+            </button>
+            <button id="align-edges-btn" class="topbar-btn" type="button" title="Align edges — snap nearby panel edges to share coordinates (flushes drifted panels without resetting the layout)" aria-label="Align panel edges">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="4" y1="2" x2="4" y2="22"/>
+                <rect x="4" y="4"  width="9"  height="4"/>
+                <rect x="4" y="11" width="14" height="4"/>
+                <rect x="4" y="18" width="6"  height="4"/>
+              </svg>
+            </button>
+            <button id="lock-ui-btn" class="topbar-btn" type="button" title="Lock UI (prevents panel drag, resize, and topbar reorder)" aria-label="Lock UI">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="5" y="11" width="14" height="9" rx="1"/>
+                <path d="M8 11 V7 a4 4 0 0 1 8 0 V11"/>
+                <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>
+              </svg>
+            </button>
+            <button id="diag-btn" class="topbar-btn" type="button" title="Toggle diagnostics overlay" aria-label="Toggle diagnostics overlay">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18"/>
+                <path d="M3 9 H21 M9 3 V21"/>
+                <circle cx="6" cy="6" r="0.8" fill="currentColor"/>
+              </svg>
+            </button>
+          </div>
+        </div>
 
         <button id="gamemode-btn" class="topbar-btn" type="button" title="Game Mode — launch Steam Big Picture" aria-label="Game Mode">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -655,27 +710,6 @@
             <circle cx="15.5" cy="10.5" r="0.6" fill="currentColor"/>
             <circle cx="17.5" cy="13" r="0.6" fill="currentColor"/>
             <path d="M6.5 7 H15 A4.5 4.5 0 0 1 19.5 11.5 L20 15 A2.4 2.4 0 0 1 15.6 16.4 L14 14 H10 L8.4 16.4 A2.4 2.4 0 0 1 4 15 L4.6 11 A4.5 4.5 0 0 1 6.5 7 Z"/>
-          </svg>
-        </button>
-
-        <button id="calm-btn" class="topbar-btn" type="button" title="Calm mode — stop the pulse animations (keeps the theme glow, runs cooler)" aria-label="Toggle calm mode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 10 Q6 5 9 10 T15 10"/>
-            <path d="M15 14 H21"/>
-            <path d="M3 14 H9"/>
-          </svg>
-        </button>
-
-        <button id="sfx-btn" class="topbar-btn" type="button" title="Toggle UI sound effects" aria-label="Toggle UI sound effects">
-          <svg class="sfx-icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
-            <path d="M16 9 Q18 12 16 15"/>
-            <path d="M19 7 Q22 12 19 17"/>
-          </svg>
-          <svg class="sfx-icon-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/>
-            <path d="M16 9 L22 15"/>
-            <path d="M22 9 L16 15"/>
           </svg>
         </button>
 
@@ -695,12 +729,27 @@
           <span class="battery-pct" id="battery-pct">—</span>
         </span>
 
+        <button id="app-refresh-btn" class="topbar-btn" type="button" title="Refresh dashboard (reload renderer — picks up CSS / JS changes)" aria-label="Refresh dashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 12 A8 8 0 1 1 17.66 6.34"/>
+            <path d="M20 4 V8 H16"/>
+          </svg>
+        </button>
+
+        <button id="app-restart-btn" class="topbar-btn" type="button" title="Restart Dashboard3D (relaunches main + renderer — for changes that need a full restart)" aria-label="Restart Dashboard3D">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 4 V8"/>
+            <path d="M18.36 7.64 A9 9 0 1 1 5.64 7.64"/>
+          </svg>
+        </button>
+
         <button id="close-btn" class="topbar-btn" type="button" title="Quit Dashboard3D" aria-label="Quit">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M6 6 L18 18"/>
             <path d="M18 6 L6 18"/>
           </svg>
         </button>
+        <span class="topbar-grab topbar-grab-r" data-no-drag="true" title="Drag to shift the topbar"></span>
       </div>
             <header class="panel-header">
               <span class="panel-title" id="combo-title">PRODUCTIVITY <em>N1</em></span>
@@ -717,6 +766,7 @@
               <button type="button" class="combo-mode-tab" data-mode="tasks">TASKS</button>
               <button type="button" class="combo-mode-tab" data-mode="music">MUSIC</button>
               <button type="button" class="combo-mode-tab" data-mode="stream">STREAM</button>
+              <button type="button" class="combo-mode-tab" data-mode="mail">MAIL</button>
             </div>
             <div class="panel-body combo-body">
               <!-- NOTES pane -->
@@ -781,6 +831,13 @@
 
               <!-- EXPLORE pane (in-panel mini-Explorer for gallery + docs) -->
               <div class="combo-pane combo-pane-explore" data-explore-tab="gallery">
+                <!-- Body layout: tabs + section list on the left (.explore-content),
+                     resize handle, then the info / preview side panel on the right.
+                     Panel width is driven by --explore-info-width (set on
+                     .combo-pane-explore by the JS resize drag), persisted under
+                     cfg.exploreInfoWidth. -->
+                <div class="explore-main">
+                  <div class="explore-content">
                 <div class="explore-tabs">
                   <button type="button" class="explore-tab is-active" data-explore-tab-btn="gallery">GALLERY</button>
                   <button type="button" class="explore-tab" data-explore-tab-btn="docs">DOCS</button>
@@ -792,6 +849,23 @@
                     <span class="explore-section-title">GALLERY</span>
                     <button type="button" class="explore-action" data-explore-up="gallery"      title="Up">↑</button>
                     <span class="explore-section-path" id="explore-gallery-path">—</span>
+                    <!-- VIEW: grid / list toggle. SORT: name|date|size|type
+                         with a direction button. SIZE: thumbnail size
+                         slider (only meaningful in grid mode but visible
+                         in both for layout stability). All persisted per
+                         section under cfg.exploreView/Sort/SortDir/ThumbSize. -->
+                    <span class="explore-view-controls" data-explore-view-for="gallery">
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="gallery" data-mode="grid" title="Grid view">▦</button>
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="gallery" data-mode="list" title="List view">▤</button>
+                      <select class="explore-sort-select" data-explore-sort="gallery" title="Sort by">
+                        <option value="name">NAME</option>
+                        <option value="date">DATE</option>
+                        <option value="size">SIZE</option>
+                        <option value="type">TYPE</option>
+                      </select>
+                      <button type="button" class="explore-action explore-sort-dir" data-explore-sort-dir="gallery" title="Toggle ascending / descending">↓</button>
+                      <input type="range" class="explore-thumb-slider" data-explore-thumb-size="gallery" min="80" max="260" step="4" value="140" title="Thumbnail size">
+                    </span>
                     <button type="button" class="explore-action" data-explore-mkdir="gallery"   title="New folder">+</button>
                     <button type="button" class="explore-action" data-explore-delete="gallery"  title="Delete selected (→ Recycle Bin)">🗑</button>
                     <button type="button" class="explore-action" data-explore-open="gallery"    title="Open in Explorer">⌂</button>
@@ -804,6 +878,18 @@
                     <span class="explore-section-title">DOCS</span>
                     <button type="button" class="explore-action" data-explore-up="docs"         title="Up">↑</button>
                     <span class="explore-section-path" id="explore-docs-path">—</span>
+                    <span class="explore-view-controls" data-explore-view-for="docs">
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="docs" data-mode="grid" title="Grid view">▦</button>
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="docs" data-mode="list" title="List view">▤</button>
+                      <select class="explore-sort-select" data-explore-sort="docs" title="Sort by">
+                        <option value="name">NAME</option>
+                        <option value="date">DATE</option>
+                        <option value="size">SIZE</option>
+                        <option value="type">TYPE</option>
+                      </select>
+                      <button type="button" class="explore-action explore-sort-dir" data-explore-sort-dir="docs" title="Toggle ascending / descending">↓</button>
+                      <input type="range" class="explore-thumb-slider" data-explore-thumb-size="docs" min="80" max="260" step="4" value="140" title="Thumbnail size">
+                    </span>
                     <button type="button" class="explore-action" data-explore-mkdir="docs"      title="New folder">+</button>
                     <button type="button" class="explore-action" data-explore-delete="docs"     title="Delete selected (→ Recycle Bin)">🗑</button>
                     <button type="button" class="explore-action" data-explore-open="docs"       title="Open in Explorer">⌂</button>
@@ -816,6 +902,18 @@
                     <span class="explore-section-title">DOWNLOADS</span>
                     <button type="button" class="explore-action" data-explore-up="downloads"      title="Up">↑</button>
                     <span class="explore-section-path" id="explore-downloads-path">—</span>
+                    <span class="explore-view-controls" data-explore-view-for="downloads">
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="downloads" data-mode="grid" title="Grid view">▦</button>
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="downloads" data-mode="list" title="List view">▤</button>
+                      <select class="explore-sort-select" data-explore-sort="downloads" title="Sort by">
+                        <option value="name">NAME</option>
+                        <option value="date">DATE</option>
+                        <option value="size">SIZE</option>
+                        <option value="type">TYPE</option>
+                      </select>
+                      <button type="button" class="explore-action explore-sort-dir" data-explore-sort-dir="downloads" title="Toggle ascending / descending">↓</button>
+                      <input type="range" class="explore-thumb-slider" data-explore-thumb-size="downloads" min="80" max="260" step="4" value="140" title="Thumbnail size">
+                    </span>
                     <button type="button" class="explore-action" data-explore-mkdir="downloads"   title="New folder">+</button>
                     <button type="button" class="explore-action" data-explore-delete="downloads"  title="Delete selected (→ Recycle Bin)">🗑</button>
                     <button type="button" class="explore-action" data-explore-open="downloads"    title="Open in Explorer">⌂</button>
@@ -828,6 +926,18 @@
                     <span class="explore-section-title">AUDIO</span>
                     <button type="button" class="explore-action" data-explore-up="music"      title="Up">↑</button>
                     <span class="explore-section-path" id="explore-music-path">—</span>
+                    <span class="explore-view-controls" data-explore-view-for="music">
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="music" data-mode="grid" title="Grid view">▦</button>
+                      <button type="button" class="explore-action explore-view-btn" data-explore-view="music" data-mode="list" title="List view">▤</button>
+                      <select class="explore-sort-select" data-explore-sort="music" title="Sort by">
+                        <option value="name">NAME</option>
+                        <option value="date">DATE</option>
+                        <option value="size">SIZE</option>
+                        <option value="type">TYPE</option>
+                      </select>
+                      <button type="button" class="explore-action explore-sort-dir" data-explore-sort-dir="music" title="Toggle ascending / descending">↓</button>
+                      <input type="range" class="explore-thumb-slider" data-explore-thumb-size="music" min="80" max="260" step="4" value="140" title="Thumbnail size">
+                    </span>
                     <button type="button" class="explore-action" data-explore-mkdir="music"   title="New folder">+</button>
                     <button type="button" class="explore-action" data-explore-delete="music"  title="Delete selected (→ Recycle Bin)">🗑</button>
                     <button type="button" class="explore-action" data-explore-open="music"    title="Open in Explorer">⌂</button>
@@ -835,6 +945,41 @@
                   </header>
                   <ul class="explore-list" id="explore-music-list"></ul>
                 </div>
+                  </div><!-- /.explore-content -->
+                  <!-- Resize handle — drag left/right to shrink or
+                       widen the info panel. Mousedown captures the
+                       pointer; pointermove updates --explore-info-width
+                       on .combo-pane-explore. -->
+                  <div class="explore-resize-handle" id="explore-info-resize" title="Drag to resize info panel"></div>
+                  <!-- INFO panel: larger preview on top, file details
+                       below. Preview is a stack — <img> for images,
+                       <video controls> for videos (with native scrub),
+                       and a placeholder when nothing is selected.
+                       Details are rendered by JS based on the current
+                       selection (latest single-click). -->
+                  <aside class="explore-info-panel" id="explore-info-panel">
+                    <div class="explore-info-preview" id="explore-info-preview">
+                      <img   id="explore-info-img" alt="" hidden>
+                      <video id="explore-info-vid" controls preload="metadata" hidden></video>
+                      <span class="explore-info-placeholder" id="explore-info-placeholder">SELECT A FILE</span>
+                    </div>
+                    <div class="explore-info-name" id="explore-info-name">—</div>
+                    <dl class="explore-info-details" id="explore-info-details">
+                      <!-- Rows built by JS: TYPE, SIZE, MODIFIED,
+                           DIMENSIONS (images), DURATION (videos), PATH. -->
+                    </dl>
+                    <!-- Batch-rename tool. Shown only when 2+ files are
+                         selected. Takes a base name and renames every
+                         selected file to base_001.ext, base_002.ext, …
+                         (each file keeping its original extension). -->
+                    <div class="explore-batch-rename" id="explore-batch-rename" hidden>
+                      <div class="explore-batch-rename-title">BATCH RENAME</div>
+                      <input type="text" id="explore-batch-rename-input" class="explore-batch-rename-input" placeholder="new base name" autocomplete="off" spellcheck="false">
+                      <button type="button" id="explore-batch-rename-btn" class="explore-action explore-batch-rename-btn">RENAME 0 FILES</button>
+                      <div class="explore-batch-rename-status" id="explore-batch-rename-status"></div>
+                    </div>
+                  </aside>
+                </div><!-- /.explore-main -->
                 <!-- Inline media viewer for the EXPLORE pane.
                      Covers the file list when active; closes via × or
                      Esc. Video element keeps native controls so seek /
@@ -861,10 +1006,6 @@
                        Stays hidden until the wrap gets the .is-still class,
                        so it never steals from video/mirror playback. -->
                   <img id="visualizer-still" class="visualizer-still" alt="">
-                  <!-- FIT-crop preview canvas. Live drawImage of just the
-                       crop region from the video element, sized to fill the
-                       wrap. Shown only when CROP + FIT are both on. -->
-                  <canvas id="visualizer-crop-preview" class="visualizer-crop-preview" hidden></canvas>
                   <div class="visualizer-empty" id="visualizer-empty">REC ROOM · CHOOSE A SOURCE AND HIT MIRROR</div>
                   <!-- Free-capture crop rect overlay. Hidden until CROP is engaged.
                        8 handles for resize + drag-anywhere-in-body to move. -->
@@ -906,6 +1047,27 @@
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15"/></svg>
                     </button>
                   </div>
+                  <!-- Bottom-overlay STEALTH + REC buttons. Mirror the
+                       topbar #visualizer-stealth-btn / -screenrec-btn so
+                       the user can toggle either without leaving the
+                       video frame. JS forwards clicks to those source
+                       buttons and syncs .is-active state back. -->
+                  <div class="visualizer-player-overlay">
+                    <button type="button"
+                            class="vplayer-overlay-btn"
+                            id="visualizer-stealth-btn-overlay"
+                            title="Stealth (mute preview)">
+                      <span class="vplayer-overlay-dot"></span>
+                      <span>STEALTH</span>
+                    </button>
+                    <button type="button"
+                            class="vplayer-overlay-btn"
+                            id="visualizer-screenrec-btn-overlay"
+                            title="Record">
+                      <span class="vplayer-overlay-dot"></span>
+                      <span>REC</span>
+                    </button>
+                  </div>
                 </div>
                 <!-- EDIT mode pane. Hidden until user clicks EDIT on a video.
                      Layout: dual-video preview (original / edited), shared
@@ -917,158 +1079,12 @@
                      the captures list below. Updates --rec-split-pct on
                      the combo-pane via JS; CSS reads that to set heights. -->
                 <div class="visualizer-split" id="visualizer-split" title="Drag to resize" role="separator" aria-orientation="horizontal"></div>
-                <div class="visualizer-list-head">
-                  <span class="visualizer-list-title">CAPTURES</span>
-                  <span class="visualizer-list-now" id="visualizer-now">—</span>
-                  <!-- Transport: prev / play-pause / next -->
-                  <div class="vis-btn-group" data-group="transport">
-                    <button type="button" class="explore-action" id="visualizer-prev-btn" title="Previous">
-                      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2" height="14"/><path d="M20 5 L8 12 L20 19 Z"/></svg>
-                    </button>
-                    <button type="button" class="explore-action" id="visualizer-playpause-btn" title="Play / pause">
-                      <svg class="vis-play-icon"  viewBox="0 0 24 24" fill="currentColor"><path d="M7 5 L19 12 L7 19 Z"/></svg>
-                      <svg class="vis-pause-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
-                    </button>
-                    <button type="button" class="explore-action" id="visualizer-next-btn" title="Next">
-                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5 L16 12 L4 19 Z"/><rect x="18" y="5" width="2" height="14"/></svg>
-                    </button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mute-btn" title="Mute playback audio (recording and mirror)">SOUND</button>
-                  </div>
-                  <span class="vis-btn-divider"></span>
-                  <!-- Source / capture configuration -->
-                  <div class="vis-btn-group" data-group="source">
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mirror-btn" title="Mirror the currently-playing video (YouTube popout, browser tabs, any media)">MIRROR</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-source-btn" title="Choose which window or screen to mirror">SOURCE</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-fit-btn" title="Fill the rec-room player with just the cropped region (only effective while CROP is on)">FIT</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-crop-btn" title="Free capture — define a draggable rectangle and record only inside it">CROP</button>
-                  </div>
-                  <span class="vis-btn-divider"></span>
-                  <!-- Recording overlays + quality -->
-                  <div class="vis-btn-group" data-group="overlays">
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-keys-btn" title="Overlay pressed keys onto the recording (recording-only; not visible on this screen)">KEYS</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-osd-btn" title="On-screen display: time, date, and live FPS overlays (recording-only)">OSD</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-quality-btn" title="Recording quality and resolution presets / custom bitrate">Q:MED</button>
-                  </div>
-                  <span class="vis-btn-divider"></span>
-                  <!-- Capture actions -->
-                  <div class="vis-btn-group" data-group="capture">
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-screencap-btn" title="Save a JPEG to gallery/screencap on each keystroke or mouse click (throttled)">SNAP</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-screenrec-btn" title="Continuous video record of the mirror source to gallery/recordings/*.mkv">REC</button>
-                  </div>
-                  <span class="vis-btn-divider"></span>
-                  <!-- Edit + output -->
-                  <div class="vis-btn-group" data-group="output">
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-edit-btn" title="Open this clip in EDIT ROOM (DaVinci-Cut-page-flavored editor with 2V+1A timeline, razor, in/out marks, fast-add tools)" disabled>→ EDIT</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-process-btn" title="Stitch the selected snaps into a video (shift/ctrl click to multi-select in the screencap folder)" disabled>PROCESS</button>
-                  </div>
-                  <span class="vis-btn-divider"></span>
-                  <!-- File actions -->
-                  <div class="vis-btn-group" data-group="file">
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-delete-btn" title="Move the selected captures (or the currently-playing item) to the Recycle Bin" disabled>DELETE</button>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-undo-btn" title="Restore the most recently deleted item" disabled>UNDO</button>
-                    <button type="button" class="explore-action" id="visualizer-refresh-btn"   title="Refresh">↻</button>
-                  </div>
-                </div>
-                <!-- Popover: capture source picker. Populated on open via desktopCapturer. -->
-                <div class="visualizer-source-picker" id="visualizer-source-picker" hidden>
-                  <div class="visualizer-source-picker-head">
-                    <span>CAPTURE SOURCE</span>
-                    <button type="button" class="explore-action" id="visualizer-source-close" title="Close">×</button>
-                  </div>
-                  <div class="visualizer-source-hint">
-                    Minimized windows aren't listed — Windows hides them from capture. Restore the window first.
-                  </div>
-                  <ul class="visualizer-source-list" id="visualizer-source-list"></ul>
-                </div>
-                <!-- Popover: stitch selected snaps into a video. Format,
-                     resolution, compression preset, and a percentage-based
-                     time-crunch slider that controls snap pacing. -->
-                <div class="visualizer-process-picker" id="visualizer-process-picker" hidden>
-                  <div class="visualizer-source-picker-head">
-                    <span>PROCESS SNAPS · <em id="visualizer-process-count">0</em> SELECTED</span>
-                    <button type="button" class="explore-action" id="visualizer-process-close" title="Close">×</button>
-                  </div>
-                  <div class="visualizer-process-body">
-                    <div class="visualizer-process-row">
-                      <span class="visualizer-process-label">FORMAT</span>
-                      <div class="visualizer-process-radios" data-group="format">
-                        <button type="button" data-val="mp4" class="is-active">MP4</button>
-                        <button type="button" data-val="mkv">MKV</button>
-                        <button type="button" data-val="hevc">HEVC</button>
-                      </div>
-                    </div>
-                    <div class="visualizer-process-row">
-                      <span class="visualizer-process-label">RES</span>
-                      <div class="visualizer-process-radios" data-group="res">
-                        <button type="button" data-val="source" class="is-active">Source</button>
-                        <button type="button" data-val="720">720p</button>
-                        <button type="button" data-val="1080">1080p</button>
-                        <button type="button" data-val="2160">2160p</button>
-                      </div>
-                    </div>
-                    <div class="visualizer-process-row">
-                      <span class="visualizer-process-label">COMPRESS</span>
-                      <div class="visualizer-process-radios" data-group="quality">
-                        <button type="button" data-val="lite">LITE</button>
-                        <button type="button" data-val="std" class="is-active">STD</button>
-                        <button type="button" data-val="crisp">CRISP</button>
-                      </div>
-                    </div>
-                    <div class="visualizer-process-row">
-                      <span class="visualizer-process-label">TIME CRUNCH</span>
-                      <input type="range" id="visualizer-process-speed" min="100" max="3000" step="50" value="200">
-                      <span id="visualizer-process-speed-val" class="visualizer-process-speed-val">200%</span>
-                    </div>
-                    <!-- Optional color/filter pass applied during the
-                         snap-stitch ffmpeg invocation. Reuses the same
-                         filter object the EDIT panel writes, so the user
-                         only learns one set of controls. -->
-                    <details class="visualizer-process-filters">
-                      <summary>FILTERS · color, blur, denoise</summary>
-                      <div class="vis-edit-filter-row">
-                        <span class="vis-edit-filter-label">BRIGHTNESS</span>
-                        <input type="range" id="vis-proc-brightness" min="0" max="200" step="1" value="100">
-                        <span class="vis-edit-filter-val" data-for="proc-brightness">100%</span>
-                      </div>
-                      <div class="vis-edit-filter-row">
-                        <span class="vis-edit-filter-label">CONTRAST</span>
-                        <input type="range" id="vis-proc-contrast" min="0" max="200" step="1" value="100">
-                        <span class="vis-edit-filter-val" data-for="proc-contrast">100%</span>
-                      </div>
-                      <div class="vis-edit-filter-row">
-                        <span class="vis-edit-filter-label">SATURATION</span>
-                        <input type="range" id="vis-proc-saturation" min="0" max="200" step="1" value="100">
-                        <span class="vis-edit-filter-val" data-for="proc-saturation">100%</span>
-                      </div>
-                      <div class="vis-edit-filter-row">
-                        <span class="vis-edit-filter-label">HUE</span>
-                        <input type="range" id="vis-proc-hue" min="-180" max="180" step="1" value="0">
-                        <span class="vis-edit-filter-val" data-for="proc-hue">0°</span>
-                      </div>
-                      <div class="vis-edit-filter-row">
-                        <span class="vis-edit-filter-label">BLUR</span>
-                        <input type="range" id="vis-proc-blur" min="0" max="20" step="0.1" value="0">
-                        <span class="vis-edit-filter-val" data-for="proc-blur">0.0 px</span>
-                      </div>
-                      <div class="vis-edit-filter-row vis-edit-toggle-row">
-                        <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-proc-auto"     title="Auto contrast boost">AUTO CONTRAST</button>
-                        <button type="button" class="explore-action explore-action-wide vis-edit-toggle" id="vis-proc-denoise"  title="ffmpeg hqdn3d denoise on the export pass">DENOISE</button>
-                      </div>
-                    </details>
-                    <div class="visualizer-process-actions">
-                      <button type="button" id="visualizer-process-preview" class="visualizer-process-preview" title="Play a lightweight live preview of the current time-crunch speed in the slot below">▶ PREVIEW</button>
-                      <button type="button" id="visualizer-process-go" class="visualizer-process-go">PROCESS</button>
-                    </div>
-                    <!-- Inline preview slot — cycles through the selected snaps
-                         at the current TIME CRUNCH pace. Lives inside the
-                         picker so the player wrap underneath isn't required. -->
-                    <div class="visualizer-process-preview-slot">
-                      <img id="visualizer-process-preview-img" class="visualizer-process-preview-img" alt="">
-                      <div class="visualizer-process-preview-empty" id="visualizer-process-preview-empty">PRESS ▶ PREVIEW TO PLAY</div>
-                    </div>
-                    <div id="visualizer-process-status" class="visualizer-process-status"></div>
-                  </div>
-                </div>
+                <!-- (Source picker popover removed — sources are now
+                     inline buttons in the toolbar at #visualizer-source-strip.
+                     Single-select for screens/windows; multi-select toggle
+                     for cameras with auto-composite on every change.) -->
+                <!-- (PROCESS snap-stitcher popover removed — that
+                     workflow lives in EDIT now via _stitchSnapFolder.) -->
                 <!-- Popover: on-screen display toggles. Time, date, and live
                      FPS counter — all rendered to the recording canvas only. -->
                 <div class="visualizer-osd-picker" id="visualizer-osd-picker" hidden>
@@ -1082,47 +1098,267 @@
                     <li class="visualizer-osd-row" data-osd="fps"><span class="visualizer-source-name">FPS</span><span class="visualizer-source-kind">live frame rate</span></li>
                   </ul>
                 </div>
-                <!-- Popover: recording quality. 4 profile presets + a custom
-                     resolution/bitrate section for fine control. -->
-                <div class="visualizer-quality-picker" id="visualizer-quality-picker" hidden>
-                  <div class="visualizer-source-picker-head">
-                    <span>RECORDING QUALITY</span>
-                    <button type="button" class="explore-action" id="visualizer-quality-close" title="Close">×</button>
+                <!-- Bottom row: audio MIXER spans the full width under the
+                     player. RECORDING QUALITY + FPS toggles live inside it
+                     as flat buttons. The capture list previously paired
+                     with it was removed — those files are reachable from
+                     the EDIT room's BINS panel. -->
+                <!-- Collapse pull-tab. Click to fold the whole MIXER /
+                     CAMERAS / FILTERS strip down so the player wrap
+                     fills the pane. The topbar's REC indicator still
+                     shows while a recording is in progress so the user
+                     never loses the "still capturing" signal. -->
+                <button type="button" id="visualizer-bottom-collapse" class="visualizer-bottom-collapse" title="Collapse / expand the mixer + cameras + filters strip" aria-expanded="true">
+                  <span class="visualizer-bottom-collapse-arrow">▾</span>
+                </button>
+                <!-- Capture-state toggles (SNAP / REC / SOUND / MIC) +
+                     MIRROR / CROP + KEYS / OSD + → EDIT. Lives at the top
+                     of the collapsible bottom region so the whole control
+                     surface (buttons + mixer/sources/cameras) hides
+                     together when the user clicks the collapse arrow. -->
+                <div class="visualizer-list-head">
+                  <div class="vis-btn-group" data-group="capture">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-screencap-btn" title="Save a JPEG to gallery/screencap on each keystroke or mouse click (throttled)">SNAP</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-screenrec-btn" title="Continuous video record of the mirror source to gallery/recordings/*.mkv">REC</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mute-btn" title="Capture system audio into the screen recording">SOUND</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mic-btn" title="Capture microphone audio into the screen recording">MIC</button>
+                    <!-- STEALTH: mute the preview speaker output without
+                         touching the recording stream. Useful when
+                         capturing a URL playback that you don't want to
+                         hear yourself — audio still lands in the saved
+                         file via captureStream. -->
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-stealth-btn" title="Mute preview audio (recording is unaffected)">STEALTH</button>
+                    <!-- PCM: audio-only record. Captures the mixer audio
+                         (system loopback + mic) with no video and saves a
+                         high-quality 320k MP3 to the music folder. Toggle:
+                         click to start, click again to stop + save. -->
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-pcm-btn" title="Audio-only record → high-quality MP3 to the music folder">PCM</button>
                   </div>
-                  <ul class="visualizer-source-list" id="visualizer-quality-list">
-                    <li class="visualizer-quality-row" data-profile="lite"><span class="visualizer-source-name">LITE</span><span class="visualizer-source-kind">720p · 1.5 Mbps · 30 fps</span></li>
-                    <li class="visualizer-quality-row" data-profile="med"><span class="visualizer-source-name">MEDIUM</span><span class="visualizer-source-kind">Source · 5 Mbps · 30 fps</span></li>
-                    <li class="visualizer-quality-row" data-profile="large"><span class="visualizer-source-name">LARGE</span><span class="visualizer-source-kind">Source · 12 Mbps · 60 fps</span></li>
-                    <li class="visualizer-quality-row" data-profile="max"><span class="visualizer-source-name">MAX</span><span class="visualizer-source-kind">Source · 40 Mbps · 60 fps · near lossless</span></li>
-                  </ul>
-                  <div class="visualizer-quality-custom">
-                    <div class="visualizer-quality-custom-row">
-                      <label for="visualizer-quality-res">RES</label>
-                      <select id="visualizer-quality-res">
-                        <option value="source">Source</option>
-                        <option value="1080">1080p</option>
-                        <option value="720">720p</option>
-                        <option value="480">480p</option>
-                      </select>
+                  <span class="vis-btn-divider"></span>
+                  <div class="vis-btn-group" data-group="source">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-mirror-btn" title="Mirror the currently-playing video (YouTube popout, browser tabs, any media)">MIRROR</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-crop-btn" title="Free capture — define a draggable rectangle and record only inside it">CROP</button>
+                    <!-- Orientation toggle. Swaps the rec-room between
+                         landscape layout (default — player on top,
+                         controls below) and portrait layout (player on
+                         the left, controls stacked vertically on the
+                         right). Switch to 9:16 for phone-clip / vertical-
+                         monitor sources so the player gets the full pane
+                         height instead of being pillar-boxed. -->
+                    <button type="button" class="explore-action explore-action-wide visualizer-orient-btn" id="visualizer-orient-btn" title="Switch player layout to vertical (9:16) — controls move to a column on the right" aria-pressed="false">
+                      <span class="visualizer-orient-icon" aria-hidden="true"></span>
+                      <span class="visualizer-orient-label">9:16</span>
+                    </button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <!-- Recording overlays. (QUALITY + FPS live in the
+                       MIXER panel — see #visualizer-quality-buttons
+                       and #visualizer-fps-buttons.) -->
+                  <div class="vis-btn-group" data-group="overlays">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-keys-btn" title="Overlay pressed keys onto the recording (recording-only; not visible on this screen)">KEYS</button>
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-osd-btn" title="On-screen display: time, date, and live FPS overlays (recording-only)">OSD</button>
+                  </div>
+                  <span class="vis-btn-divider"></span>
+                  <div class="vis-btn-group" data-group="output">
+                    <button type="button" class="explore-action explore-action-wide" id="visualizer-edit-btn" title="Open this clip in EDIT ROOM (DaVinci-Cut-page-flavored editor with 2V+1A timeline, razor, in/out marks, fast-add tools)" disabled>→ EDIT</button>
+                  </div>
+                  <!-- Status / diagnostic readout. Fills the empty space
+                       at the right end of the toolbar. Used for live REC
+                       stats (frames=N audio=N), URL load errors, mic
+                       failures, and any other surface-level status that
+                       the user needs to see without opening DevTools. -->
+                  <div id="visualizer-console" class="visualizer-console" aria-live="polite" title="Status / diagnostic output">—</div>
+                </div>
+                <div class="visualizer-bottom-split">
+                  <!-- AUDIO MIXER — pre-record mix bus. Each row has
+                       a MUTE chip and a level slider; recordings get the
+                       sum of every enabled source. System loopback is
+                       always present; mic + window rows appear when
+                       getUserMedia / the mirror surfaces a usable input.
+                       Levels persist via cfg.recRoomMixer. -->
+                  <div class="visualizer-mixer" id="visualizer-mixer">
+                    <div class="visualizer-mixer-head">
+                      <span class="visualizer-mixer-title">MIXER</span>
+                      <span class="visualizer-mixer-hint">Pre-record audio bus · sources mix into the recording</span>
                     </div>
-                    <div class="visualizer-quality-custom-row">
-                      <label for="visualizer-quality-bitrate">RATE</label>
-                      <input type="range" id="visualizer-quality-bitrate" min="500" max="50000" step="500" value="5000">
-                      <span id="visualizer-quality-bitrate-val">5.0 Mbps</span>
+                    <div class="visualizer-mixer-rows" id="visualizer-mixer-rows">
+                      <!-- Rows are built by visualizer.js _renderMixer() —
+                           one per active source. Placeholder shows when
+                           the user hasn't enabled any input. -->
+                      <div class="visualizer-mixer-empty">NO ACTIVE SOURCES · TURN ON SOUND OR MIC TO ENABLE</div>
                     </div>
-                    <div class="visualizer-quality-custom-row">
-                      <label for="visualizer-quality-fps">FPS</label>
-                      <select id="visualizer-quality-fps">
-                        <option value="30">30</option>
-                        <option value="60">60</option>
-                        <option value="120">120</option>
-                      </select>
-                      <span></span>
+                    <!-- Recording preset + FPS toggles. Replaces the old
+                         Q:MED toolbar dropdown — three bitrate tiers and
+                         three frame-rate options, each independent.
+                         Active button gets .is-active (amber fill). -->
+                    <div class="visualizer-mixer-foot">
+                      <div class="visualizer-mixer-foot-row">
+                        <span class="visualizer-mixer-foot-k">QUALITY</span>
+                        <div class="visualizer-mixer-foot-btns" id="visualizer-quality-buttons">
+                          <button type="button" class="explore-action" data-profile="lite"  title="720p · 5 Mbps">LITE</button>
+                          <button type="button" class="explore-action" data-profile="med"   title="Source · 15 Mbps">MED</button>
+                          <button type="button" class="explore-action" data-profile="large" title="Source · 40 Mbps · near-lossless">LARGE</button>
+                          <button type="button" class="explore-action" data-profile="custom" title="Custom bitrate — type a Mbps value in the field on the right">CUSTOM</button>
+                          <input type="number" id="visualizer-quality-custom-input" class="vis-mixer-custom-input" min="1" max="200" step="1" value="20" title="Mbps when CUSTOM is selected">
+                          <span class="vis-mixer-custom-unit">Mbps</span>
+                        </div>
+                      </div>
+                      <div class="visualizer-mixer-foot-row">
+                        <span class="visualizer-mixer-foot-k">FPS</span>
+                        <div class="visualizer-mixer-foot-btns" id="visualizer-fps-buttons">
+                          <button type="button" class="explore-action" data-fps="24" title="24 fps (cinematic)">24</button>
+                          <button type="button" class="explore-action" data-fps="30" title="30 fps (standard)">30</button>
+                          <button type="button" class="explore-action" data-fps="60" title="60 fps (smooth motion)">60</button>
+                          <button type="button" class="explore-action" data-fps="custom" title="Custom frame rate — type a value in the field on the right">CUSTOM</button>
+                          <input type="number" id="visualizer-fps-custom-input" class="vis-mixer-custom-input" min="1" max="240" step="1" value="48" title="Frame rate when CUSTOM is selected">
+                          <span class="vis-mixer-custom-unit">fps</span>
+                        </div>
+                      </div>
                     </div>
-                    <button type="button" class="explore-action explore-action-wide" id="visualizer-quality-apply">APPLY CUSTOM</button>
+                  </div>
+                  <!-- SOURCES strip — moved out of the topbar to sit
+                       between MIXER and CAMERAS so source selection
+                       happens visually in line with mirror / audio
+                       routing. Populated by visualizer.js _renderSourceStrip;
+                       SCAN re-enumerates Electron's desktopCapturer.
+                       IDs preserved (#visualizer-source-strip body,
+                       #visualizer-source-scan button) so the existing
+                       JS bindings work unchanged. -->
+                  <div class="visualizer-sources-strip" id="visualizer-sources-strip">
+                    <div class="visualizer-sources-strip-head">
+                      <span class="visualizer-sources-strip-title">SOURCES</span>
+                      <!-- Direct video-URL field. Paste a link to a .mp4 /
+                           .webm / .mov / .m3u8 / .mpd (or anything the
+                           HTMLVideoElement can decode) and the mirror
+                           switches to URL playback. Ad-free by virtue
+                           of skipping the host page entirely. -->
+                      <input type="text" class="visualizer-sources-url" id="visualizer-source-url" placeholder="DIRECT VIDEO URL · paste & GO" spellcheck="false" autocomplete="off">
+                      <button type="button" class="explore-action visualizer-sources-url-go" id="visualizer-source-url-go" title="Play this URL in the mirror">GO</button>
+                      <button type="button" class="explore-action visualizer-sources-strip-scan" id="visualizer-source-scan" title="Re-scan available sources">↻ SCAN</button>
+                    </div>
+                    <div class="visualizer-sources-strip-body" id="visualizer-source-strip">
+                      <!-- Source buttons appended at runtime by JS;
+                           empty state is shown via CSS :empty::before. -->
+                    </div>
+                  </div>
+                  <!-- CAM strip — multi-select webcam toggles. Each click
+                       adds/removes the cam from the live composite mirror;
+                       active cams are lit. Lives next to the MIXER so the
+                       per-cam audio routing (each cam's built-in mic) is
+                       one glance away from the volume sliders. The FILTERS
+                       sub-section applies to the canvas the cams are
+                       drawn into, so the recording captures the same look
+                       — not just the preview. -->
+                  <div class="visualizer-cam-strip" id="visualizer-cam-strip">
+                    <!-- Two-column layout: cameras + resolution presets
+                         on the LEFT, filter sliders on the RIGHT. -->
+                    <div class="visualizer-cam-strip-col visualizer-cam-strip-col-left">
+                      <div class="visualizer-cam-strip-head">
+                        <span class="visualizer-cam-strip-title">CAMERAS</span>
+                        <span class="visualizer-cam-strip-hint">Multi-select composite · click to toggle</span>
+                      </div>
+                      <div class="visualizer-cam-strip-body" id="visualizer-cam-strip-body">
+                        <div class="visualizer-cam-strip-empty">NO CAMERAS DETECTED · CLICK SCAN</div>
+                      </div>
+                      <!-- Camera resolution presets. Drives BOTH the
+                           getUserMedia request (so the cam delivers at
+                           that res) and the composite canvas size (so the
+                           recording lands at the same res). Picking a new
+                           preset while cams are active re-acquires them. -->
+                      <div class="visualizer-cam-res" id="visualizer-cam-res">
+                        <span class="visualizer-cam-res-label">RES</span>
+                        <button type="button" class="explore-action" data-camres="480p"  title="854 × 480">480p</button>
+                        <button type="button" class="explore-action" data-camres="720p"  title="1280 × 720 (standard)">720p</button>
+                        <button type="button" class="explore-action" data-camres="1080p" title="1920 × 1080">1080p</button>
+                        <button type="button" class="explore-action" data-camres="4k"    title="3840 × 2160 — cam must support this natively">4K</button>
+                      </div>
+                    </div>
+                    <div class="visualizer-cam-strip-col visualizer-cam-strip-col-right">
+                      <!-- SVG filter for GAMMA — canvas.ctx.filter references
+                           #cam-gamma-filter for non-CSS curves. The exponent
+                           attrs update live from the GAMMA slider. -->
+                      <svg width="0" height="0" aria-hidden="true" style="position:absolute;width:0;height:0;pointer-events:none">
+                        <defs>
+                          <filter id="cam-gamma-filter">
+                            <feComponentTransfer id="cam-gamma-node">
+                              <feFuncR type="gamma" amplitude="1" exponent="1" offset="0"/>
+                              <feFuncG type="gamma" amplitude="1" exponent="1" offset="0"/>
+                              <feFuncB type="gamma" amplitude="1" exponent="1" offset="0"/>
+                            </feComponentTransfer>
+                          </filter>
+                          <!-- Sharpen kernel — feConvolveMatrix with a 3×3
+                               kernel whose center cell + corners scale with
+                               the SHARPEN slider. Strength 0 = identity. -->
+                          <filter id="cam-sharpen-filter">
+                            <feConvolveMatrix id="cam-sharpen-node" order="3"
+                              preserveAlpha="true" edgeMode="duplicate"
+                              kernelMatrix="0 0 0  0 1 0  0 0 0"/>
+                          </filter>
+                        </defs>
+                      </svg>
+                      <div class="visualizer-cam-filters" id="visualizer-cam-filters">
+                      <div class="visualizer-cam-filters-head">
+                        <span class="visualizer-cam-filters-title">FILTERS</span>
+                        <!-- LUT scroll-wheel selector: shows the current
+                             LUT name; mousewheel cycles through entries
+                             (including OFF). Click also advances forward
+                             one step for trackpad users. -->
+                        <button type="button" class="visualizer-cam-lut-name" id="vis-cam-lut-name" title="Scroll-wheel to cycle LUTs (click also advances)">—</button>
+                        <button type="button" class="explore-action visualizer-cam-filters-lut" id="vis-cam-lut" title="Toggle LUT bypass (keeps current selection)">LUT</button>
+                        <button type="button" class="explore-action visualizer-cam-filters-bw" id="vis-cam-bw" title="Toggle black &amp; white">B&amp;W</button>
+                        <button type="button" class="explore-action visualizer-cam-filters-reset" id="vis-cam-filters-reset" title="Reset filters to neutral">RESET</button>
+                      </div>
+                      <!-- DOM order is column-major: rows 1-4 fill the
+                           left sub-column (BRIGHT/CONTRAST/SATURATE/HUE),
+                           rows 5-8 fill the right (BLUR/SHARPEN/GAMMA/AMOUNT).
+                           grid-auto-flow: column on the grid container makes
+                           DOM order = placement. -->
+                      <div class="visualizer-cam-filters-rows">
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">BRIGHT</span>
+                          <input type="range" id="vis-cam-brightness" min="0" max="200" step="1" value="100">
+                          <span class="visualizer-cam-filter-val" data-for="brightness">100%</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">CONTRAST</span>
+                          <input type="range" id="vis-cam-contrast" min="0" max="200" step="1" value="100">
+                          <span class="visualizer-cam-filter-val" data-for="contrast">100%</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">SATURATE</span>
+                          <input type="range" id="vis-cam-saturate" min="0" max="200" step="1" value="100">
+                          <span class="visualizer-cam-filter-val" data-for="saturate">100%</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">HUE</span>
+                          <input type="range" id="vis-cam-hue" min="-180" max="180" step="1" value="0">
+                          <span class="visualizer-cam-filter-val" data-for="hue">0°</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">BLUR</span>
+                          <input type="range" id="vis-cam-blur" min="0" max="20" step="0.1" value="0">
+                          <span class="visualizer-cam-filter-val" data-for="blur">0.0 px</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">SHARPEN</span>
+                          <input type="range" id="vis-cam-sharpen" min="0" max="200" step="1" value="0">
+                          <span class="visualizer-cam-filter-val" data-for="sharpen">0%</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">GAMMA</span>
+                          <input type="range" id="vis-cam-gamma" min="50" max="200" step="1" value="100">
+                          <span class="visualizer-cam-filter-val" data-for="gamma">1.00</span>
+                        </div>
+                        <div class="visualizer-cam-filter-row">
+                          <span class="visualizer-cam-filter-label">LUT</span>
+                          <input type="range" id="vis-cam-lut-amount" min="0" max="100" step="1" value="100">
+                          <span class="visualizer-cam-filter-val" data-for="lut-amount">100%</span>
+                        </div>
+                      </div>
+                    </div>
+                    </div><!-- /visualizer-cam-strip-col-right -->
                   </div>
                 </div>
-                <ul class="visualizer-list" id="visualizer-list"></ul>
                 <div class="visualizer-edit-pane" id="visualizer-edit-pane" hidden>
                   <div class="vis-edit-head">
                     <span class="vis-edit-title" title="Scroll-wheel zoom · drag to pan · double-click to reset">EDIT · <em id="vis-edit-name">—</em></span>
@@ -1351,14 +1587,25 @@
                 <div class="edit-top">
                   <!-- BINS: REC ROOM captures folder, mirrored. Drag clip
                        row onto a timeline track to place it. -->
-                  <div class="edit-bins">
+                  <div class="edit-bins" id="edit-bins">
                     <div class="edit-bins-head">
+                      <!-- Collapse toggle — click to fold the bin list
+                           away when you're working on the timeline and
+                           don't need the clip list visible. Re-click
+                           to restore. The chevron rotates 180° via the
+                           .is-collapsed class. -->
+                      <button id="edit-bins-collapse" class="edit-bins-collapse" type="button" title="Collapse / expand bins" aria-label="Toggle bins panel">‹</button>
                       <span class="edit-section-label">BINS</span>
                       <button id="edit-bins-refresh" class="edit-toolbar-btn" type="button" title="Re-scan captures folder">↻</button>
                     </div>
                     <div class="edit-bins-list" id="edit-bins-list">
                       <div class="edit-bins-empty">NO MEDIA · LOADING…</div>
                     </div>
+                    <!-- Width-resize handle on the right edge. Drag
+                         left/right to widen or narrow the bins column.
+                         Hidden while .is-collapsed (collapse button
+                         owns width). Width persists in localStorage. -->
+                    <div class="edit-bins-resize" id="edit-bins-resize" title="Drag to resize bins"></div>
                   </div>
 
                   <!-- VIEWER: single source/timeline preview surface.
@@ -1371,8 +1618,43 @@
                       <span class="edit-viewer-tc" id="edit-viewer-tc">00:00:00:00</span>
                     </div>
                     <div class="edit-viewer-stage" id="edit-viewer-stage">
+                      <!-- Viewer-zoom wrapper. The .edit-viewer-video
+                           sits inside this; we apply a CSS transform
+                           to the video to zoom + pan. Mouse wheel on
+                           the stage zooms; click+drag pans when
+                           zoomed in. Reset via the 1:1 chip below. -->
                       <video id="edit-viewer-video" class="edit-viewer-video" preload="metadata"></video>
+                      <img   id="edit-viewer-img"   class="edit-viewer-img" alt="" hidden />
+                      <!-- SVG filter defs for the COLOR panel's gamma
+                           and sharpen controls. CSS filter() handles
+                           sat / contrast / brightness / hue natively;
+                           gamma needs feComponentTransfer and sharpen
+                           needs feConvolveMatrix, neither of which has
+                           a direct CSS equivalent. JS updates the
+                           kernelMatrix and gamma exponent live as the
+                           sliders move. -->
+                      <svg width="0" height="0" aria-hidden="true" style="position:absolute;width:0;height:0;pointer-events:none">
+                        <defs>
+                          <filter id="edit-color-svg">
+                            <feComponentTransfer id="edit-color-gamma-node">
+                              <feFuncR type="gamma" amplitude="1" exponent="1" offset="0"/>
+                              <feFuncG type="gamma" amplitude="1" exponent="1" offset="0"/>
+                              <feFuncB type="gamma" amplitude="1" exponent="1" offset="0"/>
+                            </feComponentTransfer>
+                            <feConvolveMatrix id="edit-color-sharp-node" order="3 3" preserveAlpha="true" edgeMode="duplicate" kernelMatrix="0 0 0  0 1 0  0 0 0"/>
+                          </filter>
+                        </defs>
+                      </svg>
                       <div class="edit-viewer-empty" id="edit-viewer-empty">SELECT A CLIP</div>
+                      <!-- Zoom HUD — bottom-right corner. Shows
+                           current zoom level + a 1:1 reset button.
+                           Hidden when zoom is at 1.0. -->
+                      <div class="edit-viewer-zoom-hud" id="edit-viewer-zoom-hud" hidden>
+                        <button class="edit-viewer-zoom-out" id="edit-viewer-zoom-out" type="button" title="Zoom out">−</button>
+                        <span class="edit-viewer-zoom-val" id="edit-viewer-zoom-val">100%</span>
+                        <button class="edit-viewer-zoom-in"  id="edit-viewer-zoom-in"  type="button" title="Zoom in">+</button>
+                        <button class="edit-viewer-zoom-reset" id="edit-viewer-zoom-reset" type="button" title="Reset zoom (0)">1:1</button>
+                      </div>
                     </div>
                     <!-- Transport row -->
                     <div class="edit-viewer-transport">
@@ -1389,14 +1671,78 @@
                     </div>
                   </div>
 
-                  <!-- INSPECT: selected clip metadata + a quick action chip -->
-                  <div class="edit-inspect">
-                    <div class="edit-section-label">INSPECT</div>
-                    <div class="edit-inspect-row"><span class="edit-inspect-k">NAME</span><span class="edit-inspect-v" id="edit-ins-name">—</span></div>
-                    <div class="edit-inspect-row"><span class="edit-inspect-k">DUR</span> <span class="edit-inspect-v" id="edit-ins-dur">—</span></div>
-                    <div class="edit-inspect-row"><span class="edit-inspect-k">IN</span>  <span class="edit-inspect-v" id="edit-ins-in">—</span></div>
-                    <div class="edit-inspect-row"><span class="edit-inspect-k">OUT</span> <span class="edit-inspect-v" id="edit-ins-out">—</span></div>
-                    <div class="edit-inspect-row"><span class="edit-inspect-k">FPS</span> <span class="edit-inspect-v" id="edit-ins-fps">—</span></div>
+                  <!-- INSPECT: selected clip metadata. Collapsible —
+                       click the chevron to fold the metadata away and
+                       give the viewer more horizontal space. -->
+                  <div class="edit-inspect" id="edit-inspect">
+                    <div class="edit-inspect-head">
+                      <span class="edit-section-label">INSPECT</span>
+                      <!-- Collapse chevron. INSPECT lives on the right
+                           edge so the chevron points RIGHT (›) when
+                           expanded; rotates to LEFT (‹) when collapsed
+                           to signal "click to expand". -->
+                      <button id="edit-inspect-collapse" class="edit-inspect-collapse" type="button" title="Collapse / expand inspector" aria-label="Toggle inspector panel">›</button>
+                    </div>
+                    <div class="edit-inspect-body">
+                      <div class="edit-inspect-row"><span class="edit-inspect-k">NAME</span><span class="edit-inspect-v" id="edit-ins-name">—</span></div>
+                      <div class="edit-inspect-row"><span class="edit-inspect-k">DUR</span> <span class="edit-inspect-v" id="edit-ins-dur">—</span></div>
+                      <div class="edit-inspect-row"><span class="edit-inspect-k">IN</span>  <span class="edit-inspect-v" id="edit-ins-in">—</span></div>
+                      <div class="edit-inspect-row"><span class="edit-inspect-k">OUT</span> <span class="edit-inspect-v" id="edit-ins-out">—</span></div>
+                      <div class="edit-inspect-row"><span class="edit-inspect-k">FPS</span> <span class="edit-inspect-v" id="edit-ins-fps">—</span></div>
+
+                      <!-- PROXY toggle — per-clip-source scrub cache.
+                           Click to generate; lit when the proxy is
+                           ready and being used during scrubs. Click
+                           again to delete the cached file. Disabled
+                           for image clips. -->
+                      <div class="edit-inspect-proxy">
+                        <span class="edit-inspect-k">PROXY</span>
+                        <button class="edit-toolbar-btn" id="edit-proxy-btn" type="button" title="Generate a scrub cache for this clip's source">PROXY</button>
+                      </div>
+
+                      <!-- COLOR section — per-clip adjustments inspired by
+                           DaVinci Resolve's Color page. Slider value writes
+                           to the selected timeline clip's `color` field;
+                           the viewer's CSS filter mirrors it live. Export
+                           translates the same values into ffmpeg's eq +
+                           unsharp filter graph. -->
+                      <div class="edit-inspect-color-head">
+                        <span class="edit-section-label">COLOR</span>
+                        <button class="edit-toolbar-btn" id="edit-color-reset" type="button" title="Reset all color adjustments to defaults">↺</button>
+                      </div>
+                      <div class="edit-inspect-color">
+                        <label class="edit-color-row">
+                          <span class="edit-color-k">SAT</span>
+                          <input type="range" id="edit-color-sat" min="0" max="200" step="1" value="100">
+                          <span class="edit-color-v" id="edit-color-sat-v">100</span>
+                        </label>
+                        <label class="edit-color-row">
+                          <span class="edit-color-k">CON</span>
+                          <input type="range" id="edit-color-con" min="0" max="200" step="1" value="100">
+                          <span class="edit-color-v" id="edit-color-con-v">100</span>
+                        </label>
+                        <label class="edit-color-row">
+                          <span class="edit-color-k">BRT</span>
+                          <input type="range" id="edit-color-brt" min="0" max="200" step="1" value="100">
+                          <span class="edit-color-v" id="edit-color-brt-v">100</span>
+                        </label>
+                        <label class="edit-color-row">
+                          <span class="edit-color-k">GAM</span>
+                          <input type="range" id="edit-color-gam" min="50" max="200" step="1" value="100">
+                          <span class="edit-color-v" id="edit-color-gam-v">100</span>
+                        </label>
+                        <label class="edit-color-row">
+                          <span class="edit-color-k">HUE</span>
+                          <input type="range" id="edit-color-hue" min="-180" max="180" step="1" value="0">
+                          <span class="edit-color-v" id="edit-color-hue-v">0</span>
+                        </label>
+                        <label class="edit-color-row">
+                          <span class="edit-color-k">SHRP</span>
+                          <input type="range" id="edit-color-shrp" min="0" max="100" step="1" value="0">
+                          <span class="edit-color-v" id="edit-color-shrp-v">0</span>
+                        </label>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1417,17 +1763,46 @@
                      keyboard shortcut in [brackets] so the user can see at a
                      glance which key does what — much less guessing. -->
                 <div class="edit-tools">
+                  <!-- UNDO / REDO — Ctrl+Z / Ctrl+Y also work. Buttons
+                       disable when the respective stack is empty. -->
+                  <button class="edit-tool-btn" id="edit-tool-undo" type="button" title="Undo last timeline change (Ctrl+Z)" disabled>↶ UNDO</button>
+                  <button class="edit-tool-btn" id="edit-tool-redo" type="button" title="Redo (Ctrl+Y / Ctrl+Shift+Z)" disabled>↷ REDO</button>
+                  <span class="edit-tool-sep"></span>
                   <span class="edit-section-label">TOOL</span>
                   <button class="edit-tool-btn is-active" id="edit-tool-sel"   data-tool="select" type="button" title="Selection — click a clip to select, drag to move. Shortcut: A">▼ SELECT [A]</button>
                   <button class="edit-tool-btn"           id="edit-tool-trim"  data-tool="trim"   type="button" title="Trim — drag a clip edge (L/R handle) to retime it. Shortcut: T">↔ TRIM [T]</button>
                   <button class="edit-tool-btn"           id="edit-tool-razor" data-tool="razor"  type="button" title="Razor / Cut — click a clip to split it at the click position. Shortcut: B">✂ CUT [B]</button>
+                  <button class="edit-tool-btn"           id="edit-tool-timelapse" data-tool="timelapse" type="button" title="Timelapse — drag a clip's right edge LEFT to speed it up (1× → up to 64×). No source is trimmed; the same frames just play faster. Shortcut: Y">TIMELAPSE [Y]</button>
                   <span class="edit-tool-sep"></span>
-                  <button class="edit-tool-btn is-active" id="edit-tool-snap"  type="button" title="Snap to clip edges + playhead. Shortcut: S">⚡ SNAP [S]</button>
+                  <button class="edit-tool-btn is-active" id="edit-tool-snap"  type="button" title="Snap to clip edges + playhead. Shortcut: S">SNAP [S]</button>
                   <span class="edit-tool-sep"></span>
                   <label class="edit-tool-zoom">
                     <span>ZOOM</span>
                     <input type="range" id="edit-tl-zoom" min="20" max="400" step="5" value="80" title="Pixels per second of timeline">
                   </label>
+                  <span class="edit-tool-sep"></span>
+                  <!-- Temporal denoise — toggle armed-state on/off,
+                       slider sets strength 0-100. Live preview applies
+                       a CSS filter to the viewer that approximates the
+                       look of temporal smoothing; on export the strength
+                       maps to ffmpeg hqdn3d's luma_tmp + chroma_tmp
+                       values so the cleanup is real, not just visual. -->
+                  <button class="edit-tool-btn" id="edit-tool-denoise" type="button" title="Temporal denoise — smooths frame-to-frame noise. Live preview is approximate; export bakes in via ffmpeg hqdn3d.">DENOISE</button>
+                  <label class="edit-tool-zoom edit-tool-denoise-strength" id="edit-tool-denoise-strength" hidden>
+                    <span>STR</span>
+                    <input type="range" id="edit-tl-denoise" min="0" max="100" step="5" value="60" title="Temporal denoise strength 0-100">
+                  </label>
+                  <span class="edit-tool-sep"></span>
+                  <!-- EXPORT — renders the currently-selected source
+                       clip (trimmed to mark IN/OUT) via ffmpeg. Auto-
+                       picks h264_nvenc (CUDA) when available, falls back
+                       to QSV / AMF / libx264. Output lands in
+                       gallery/recordings/<USER NNNN>.mp4. The DENOISE
+                       state flows through automatically. -->
+                  <button class="edit-tool-btn edit-tool-export" id="edit-tool-export" type="button" title="Render selected source clip to gallery/recordings via ffmpeg (uses NVIDIA NVENC when available)">▶ EXPORT</button>
+                  <!-- Progress chip — shows percent + encoder while
+                       an export is in flight; hidden otherwise. -->
+                  <span class="edit-tool-export-progress" id="edit-tool-export-progress" hidden>0%</span>
                   <span class="edit-tool-sep"></span>
                   <!-- Always-visible diagnostic readout: active tool, viewer
                        mode, playhead timecode, selected clip count. Updates
@@ -1681,6 +2056,23 @@
                 </div>
                 <ul class="tasks-proc-list" id="tasks-proc-list"></ul>
 
+                <!-- Wire-graph showing CPU + GPU utilisation over time.
+                     Lines drawn from rolling history buffers (see
+                     pushTasksCpuHist / pushTasksGpuHist in app.js); the
+                     canvas re-renders whenever new samples arrive AND
+                     the tasks tab is active. -->
+                <div class="tasks-section-head">
+                  <span class="tasks-section-title">USAGE</span>
+                  <span class="tasks-section-tag">
+                    <span class="tasks-graph-legend tg-cpu">— CPU</span>
+                    <span class="tasks-graph-legend tg-gpu">— GPU</span>
+                    <span class="tasks-graph-legend tg-ram">— RAM</span>
+                  </span>
+                </div>
+                <div class="tasks-graph">
+                  <canvas id="tasks-graph-canvas"></canvas>
+                </div>
+
                 <div class="tasks-section-head">
                   <span class="tasks-section-title" data-tasks-line="svctitle">SERVICES</span>
                   <span class="tasks-section-tag" data-tasks-line="svctag">—</span>
@@ -1732,6 +2124,42 @@
                      master AnalyserNode. Segmented EQ bars on most themes,
                      a flat axis-framed line chart under e-ink. -->
                 <canvas id="bgm-meter" class="bgm-meter" width="320" height="120"></canvas>
+
+                <!-- TRIM overlay — opened from a library row's ✂ button.
+                     Scrub to set IN/OUT, PREVIEW the selection, then SAVE
+                     overwrites the source file in place (lossless cut).
+                     features/music.js owns all the wiring. -->
+                <div class="bgm-trim" id="bgm-trim" hidden>
+                  <div class="bgm-trim-card">
+                    <div class="bgm-trim-name" id="bgm-trim-name">TRACK</div>
+                    <div class="bgm-trim-bar" id="bgm-trim-bar">
+                      <div class="bgm-trim-sel" id="bgm-trim-sel"></div>
+                      <input type="range" id="bgm-trim-seek" class="bgm-trim-seek"
+                             min="0" max="1000" value="0" step="1" aria-label="Scrub">
+                    </div>
+                    <div class="bgm-trim-clock">
+                      <span id="bgm-trim-pos">0:00.0</span>
+                      <span id="bgm-trim-dur">0:00.0</span>
+                    </div>
+                    <div class="bgm-trim-row">
+                      <button type="button" class="bgm-trim-btn" id="bgm-trim-play" title="Play / pause">▶</button>
+                      <button type="button" class="bgm-trim-btn" id="bgm-trim-preview" title="Play just the selection">PREVIEW</button>
+                      <span class="bgm-trim-spacer"></span>
+                      <button type="button" class="bgm-trim-btn" id="bgm-trim-set-in" title="Set start to playhead">SET IN</button>
+                      <button type="button" class="bgm-trim-btn" id="bgm-trim-set-out" title="Set end to playhead">SET OUT</button>
+                    </div>
+                    <div class="bgm-trim-range">
+                      <span>IN <b id="bgm-trim-in">0:00.0</b></span>
+                      <span>OUT <b id="bgm-trim-out">0:00.0</b></span>
+                      <span>NEW <b id="bgm-trim-newlen">0:00.0</b></span>
+                    </div>
+                    <div class="bgm-trim-status" id="bgm-trim-status" hidden></div>
+                    <div class="bgm-trim-actions">
+                      <button type="button" class="bgm-trim-btn" id="bgm-trim-cancel">CANCEL</button>
+                      <button type="button" class="bgm-trim-btn bgm-trim-save" id="bgm-trim-save">SAVE · OVERWRITE</button>
+                    </div>
+                  </div>
+                </div>
               </div>
 
 
@@ -1762,11 +2190,247 @@
                 </div>
               </div>
 
+              <!-- MAIL pane — read-only IMAP client, three-column Apple
+                   Mail style: sidebar (mailboxes) · list (selected
+                   mailbox's messages) · reader (selected message body).
+                   Top toolbar is universal: refresh, compose, sign out,
+                   search. Config form appears as a full-pane overlay on
+                   first run / sign-out. Module: features/mail.js. -->
+              <div class="combo-pane combo-pane-mail">
+                <!-- Top toolbar — always visible once signed in. -->
+                <div class="mail-toolbar">
+                  <span class="mail-status-dot" id="mail-status-dot"></span>
+                  <span class="mail-status-text" id="mail-status-text">IDLE</span>
+                  <button type="button" class="mail-tb-btn" id="mail-refresh-btn" title="Refresh inbox">
+                    <span class="mail-tb-icon">&#8635;</span>REFRESH
+                  </button>
+                  <button type="button" class="mail-tb-btn" id="mail-compose-btn" title="Compose (coming soon)" disabled>
+                    <span class="mail-tb-icon">&#9998;</span>COMPOSE
+                  </button>
+                  <span class="mail-tb-spacer"></span>
+                  <input class="mail-search" id="mail-search" type="search"
+                         placeholder="SEARCH (SOON)" disabled />
+                  <span class="mail-tb-host" id="mail-tb-host">—</span>
+                  <button type="button" class="mail-tb-btn" id="mail-signout-btn" title="Sign out + clear creds">
+                    SIGN OUT
+                  </button>
+                </div>
+
+                <!-- Three-column body. CSS grid: sidebar | list | reader. -->
+                <div class="mail-body">
+                  <!-- Sidebar · Mailboxes. For v1 only INBOX is wired;
+                       the other Apple Mail standards (Drafts/Sent/Junk/
+                       Trash/Archive) sit visible but disabled so the
+                       structure is in place when we add folder routing. -->
+                  <aside class="mail-sidebar">
+                    <div class="mail-sb-section">
+                      <div class="mail-sb-label">MAILBOXES</div>
+                      <button type="button" class="mail-mbox is-active" data-mbox="INBOX">
+                        <span class="mail-mbox-icon">&#9993;</span>
+                        <span class="mail-mbox-name">Inbox</span>
+                        <span class="mail-mbox-count" id="mail-mbox-count-inbox"></span>
+                      </button>
+                      <button type="button" class="mail-mbox is-disabled" disabled data-mbox="DRAFTS">
+                        <span class="mail-mbox-icon">&#9998;</span>
+                        <span class="mail-mbox-name">Drafts</span>
+                      </button>
+                      <button type="button" class="mail-mbox is-disabled" disabled data-mbox="SENT">
+                        <span class="mail-mbox-icon">&#10138;</span>
+                        <span class="mail-mbox-name">Sent</span>
+                      </button>
+                      <button type="button" class="mail-mbox is-disabled" disabled data-mbox="JUNK">
+                        <span class="mail-mbox-icon">&#9888;</span>
+                        <span class="mail-mbox-name">Junk</span>
+                      </button>
+                      <button type="button" class="mail-mbox is-disabled" disabled data-mbox="TRASH">
+                        <span class="mail-mbox-icon">&#128465;</span>
+                        <span class="mail-mbox-name">Trash</span>
+                      </button>
+                      <button type="button" class="mail-mbox is-disabled" disabled data-mbox="ARCHIVE">
+                        <span class="mail-mbox-icon">&#128230;</span>
+                        <span class="mail-mbox-name">Archive</span>
+                      </button>
+                    </div>
+
+                    <!-- Contacts section. Favorites float to the top.
+                         Click a row to open compose with To pre-filled.
+                         The + button reveals an inline add form. -->
+                    <div class="mail-sb-section mail-sb-contacts">
+                      <div class="mail-sb-label">
+                        <span>CONTACTS</span>
+                        <span class="mail-sb-label-actions">
+                          <button type="button" class="mail-google-btn" id="mail-google-btn" title="Import from Google">G</button>
+                          <button type="button" class="mail-contact-add-btn" id="mail-contact-add-btn" title="Add contact">+</button>
+                        </span>
+                      </div>
+                      <form class="mail-contact-add-form" id="mail-contact-add-form" hidden autocomplete="off">
+                        <input type="text"  class="mail-contact-add-name"  id="mail-contact-add-name"  placeholder="Name" spellcheck="false" />
+                        <input type="email" class="mail-contact-add-email" id="mail-contact-add-email" placeholder="email@host.com" spellcheck="false" />
+                        <div class="mail-contact-add-actions">
+                          <button type="submit" class="mail-contact-add-save">ADD</button>
+                          <button type="button" class="mail-contact-add-cancel" id="mail-contact-add-cancel">&times;</button>
+                        </div>
+                      </form>
+                      <div class="mail-contacts-list" id="mail-contacts-list"></div>
+                    </div>
+                  </aside>
+
+                  <!-- Middle column · Message list. -->
+                  <section class="mail-list-col">
+                    <header class="mail-list-hdr">
+                      <span class="mail-list-title" id="mail-list-title">INBOX</span>
+                      <span class="mail-list-sub"   id="mail-list-sub">—</span>
+                    </header>
+                    <div class="mail-list" id="mail-list"></div>
+                  </section>
+
+                  <!-- Right column · Reader. -->
+                  <section class="mail-reader-col">
+                    <div class="mail-reader-empty" id="mail-reader-empty">
+                      SELECT A MESSAGE
+                    </div>
+                    <header class="mail-reader-hdr" id="mail-reader-hdr" hidden>
+                      <div class="mail-reader-subject" id="mail-reader-subject">—</div>
+                      <div class="mail-reader-meta">
+                        <span class="mail-reader-from" id="mail-reader-from">—</span>
+                        <span class="mail-reader-date" id="mail-reader-date">—</span>
+                      </div>
+                    </header>
+                    <!-- sandbox: allow-popups so external link clicks
+                         (rewritten to target=_blank by sanitize-html)
+                         open in the system browser. No allow-scripts →
+                         email JS can't run. No allow-same-origin → no
+                         DOM access to parent. -->
+                    <iframe class="mail-reader-frame" id="mail-reader-frame"
+                            sandbox="allow-popups allow-popups-to-escape-sandbox"
+                            srcdoc="" hidden></iframe>
+                  </section>
+                </div>
+
+                <!-- Google setup overlay — opened by the "G" button in
+                     the contacts header. Shown when no OAuth client is
+                     saved yet; collects Client ID + Secret (and links
+                     out to the Console steps). After save, the same
+                     button triggers the OAuth flow + contact import. -->
+                <div class="mail-google-overlay" id="mail-google-overlay">
+                  <form class="mail-google-form" id="mail-google-form" autocomplete="off">
+                    <header class="mail-google-hdr">
+                      <h3 class="mail-google-title">GOOGLE CONTACTS SETUP</h3>
+                      <button type="button" class="mail-google-close" id="mail-google-close" title="Close">&times;</button>
+                    </header>
+                    <div class="mail-google-hint">
+                      <p>One-time Google Cloud setup (~5 min) at
+                        <a href="https://console.cloud.google.com" target="_blank" rel="noopener">console.cloud.google.com</a>:</p>
+                      <ol>
+                        <li>Create a new project (any name).</li>
+                        <li>APIs &amp; Services → Library → enable <strong>People API</strong>.</li>
+                        <li>OAuth consent screen: choose <strong>External</strong>, fill in app name + your email, and add yourself as a <strong>test user</strong>.</li>
+                        <li>Credentials → Create Credentials → <strong>OAuth client ID</strong>, type: <strong>Desktop app</strong>.</li>
+                        <li>Copy the Client ID + Client secret and paste below.</li>
+                      </ol>
+                    </div>
+                    <label class="mail-google-row">
+                      <span>CLIENT ID</span>
+                      <input type="text" id="mail-google-client-id" placeholder="xxxxxxxxxxxx.apps.googleusercontent.com" spellcheck="false" />
+                    </label>
+                    <label class="mail-google-row">
+                      <span>CLIENT SECRET</span>
+                      <input type="password" id="mail-google-client-secret" placeholder="GOCSPX-…" autocomplete="off" />
+                    </label>
+                    <div class="mail-google-actions">
+                      <button type="submit" class="mail-google-save">SAVE &amp; AUTHORIZE</button>
+                      <button type="button" class="mail-google-disconnect" id="mail-google-disconnect" hidden>DISCONNECT</button>
+                      <span class="mail-google-status" id="mail-google-status"></span>
+                    </div>
+                  </form>
+                </div>
+
+                <!-- Compose overlay — opened by the COMPOSE button.
+                     Plain-text body in v1; To + optional Cc + Subject. -->
+                <div class="mail-compose-overlay" id="mail-compose-overlay">
+                  <form class="mail-compose-form" id="mail-compose-form" autocomplete="off">
+                    <header class="mail-compose-hdr">
+                      <h3 class="mail-compose-title">NEW MESSAGE</h3>
+                      <button type="button" class="mail-compose-close" id="mail-compose-close" title="Close">&times;</button>
+                    </header>
+                    <label class="mail-compose-row">
+                      <span>TO</span>
+                      <input type="text" id="mail-compose-to" placeholder="someone@example.com" spellcheck="false" />
+                    </label>
+                    <label class="mail-compose-row">
+                      <span>CC</span>
+                      <input type="text" id="mail-compose-cc" placeholder="optional, comma-separated" spellcheck="false" />
+                    </label>
+                    <label class="mail-compose-row">
+                      <span>SUBJECT</span>
+                      <input type="text" id="mail-compose-subject" placeholder="" spellcheck="true" />
+                    </label>
+                    <label class="mail-compose-row mail-compose-row-body">
+                      <span>MESSAGE</span>
+                      <textarea id="mail-compose-body" rows="12" spellcheck="true"
+                                placeholder="Write your message…"></textarea>
+                    </label>
+                    <div class="mail-compose-actions">
+                      <button type="submit" class="mail-compose-send">SEND</button>
+                      <button type="button" class="mail-compose-cancel" id="mail-compose-cancel">CANCEL</button>
+                      <span class="mail-compose-status" id="mail-compose-status"></span>
+                    </div>
+                  </form>
+                </div>
+
+                <!-- Config overlay — full-pane modal on first run /
+                     after sign-out. Hidden once creds are saved. -->
+                <div class="mail-config-overlay" id="mail-config-overlay">
+                  <form class="mail-config-form" id="mail-config-form" autocomplete="off">
+                    <h3 class="mail-config-title">CONNECT YOUR MAILBOX</h3>
+                    <p class="mail-config-hint">
+                      Gmail: enable 2-Step Verification, then create an
+                      <strong>App Password</strong> at
+                      myaccount.google.com → Security → App passwords.
+                      Other providers: use your normal IMAP password.
+                    </p>
+                    <label class="mail-config-row">
+                      <span>HOST</span>
+                      <input type="text" id="mail-cfg-host" placeholder="imap.gmail.com" value="imap.gmail.com" spellcheck="false" />
+                    </label>
+                    <label class="mail-config-row">
+                      <span>PORT</span>
+                      <input type="number" id="mail-cfg-port" placeholder="993" value="993" min="1" max="65535" />
+                    </label>
+                    <label class="mail-config-row">
+                      <span>EMAIL</span>
+                      <input type="email" id="mail-cfg-user" placeholder="you@gmail.com" autocomplete="username" spellcheck="false" />
+                    </label>
+                    <label class="mail-config-row">
+                      <span>APP PASSWORD</span>
+                      <input type="password" id="mail-cfg-pass" placeholder="16 chars, no spaces" autocomplete="current-password" />
+                    </label>
+                    <div class="mail-config-actions">
+                      <button type="submit" class="mail-config-submit">CONNECT</button>
+                      <span class="mail-config-error" id="mail-config-error"></span>
+                    </div>
+                  </form>
+                </div>
+              </div>
+
             </div>
             <footer class="panel-footer">
               <span class="footer-label" id="combo-footer-label">NOTES STATUS</span>
               <span class="footer-readout combo-footer-notes" id="notes-status">—</span>
             </footer>
+            <!-- One-click vertical collapse/expand. Sits outside the
+                 .panel-body / .panel-footer so it stays visible when
+                 those go display:none under .is-collapsed. Vertical
+                 drag still works via the header — this is the
+                 one-click shortcut. -->
+            <div class="combo-bottom-bar" data-no-drag="true">
+              <button type="button" class="combo-collapse-toggle"
+                      id="combo-collapse-toggle"
+                      title="Collapse / expand"
+                      aria-label="Collapse productivity panel">
+                <span class="combo-collapse-arrow">▲</span>
+              </button>
+            </div>
           </section>
           <span id="notes-tab-count" hidden>—</span>
 
@@ -1775,13 +2439,16 @@
             <section class="panel panel-storage">
               <header class="panel-header">
                 <span class="panel-title">STORAGE <em>D4</em></span>
-                <span class="panel-code">DRIVES</span>
+                <span class="panel-code" id="storage-code">DRIVES</span>
                 <span class="panel-id" id="storage-count">—</span>
               </header>
               <div class="panel-body storage-body">
                 <div class="storage-list" id="storage-list">
                   <div class="storage-empty">SCANNING DRIVES…</div>
                 </div>
+                <!-- Drive pager removed — all drives now render in the
+                     3-col grid above and the row count auto-flows; no
+                     cycling needed. -->
               </div>
               <footer class="panel-footer">
                 <span class="footer-label">DRIVE STATUS</span>
@@ -1792,7 +2459,8 @@
             <section class="panel panel-thermal">
               <header class="panel-header">
                 <span class="panel-title">THERMAL <em>E5</em></span>
-                <span class="panel-code">SENSOR ARRAY</span>
+                <button id="fans-edit-btn" class="thermal-curve-btn" type="button" title="Open the fan curve editor">CURVE</button>
+                <span class="panel-code" id="thermal-code">SENSOR ARRAY</span>
                 <span class="panel-id" id="temps-tag">—</span>
               </header>
               <div class="panel-body thermal-body">
@@ -1805,30 +2473,16 @@
                     <span class="caret">&#9656;</span>
                     <span class="bigvalue-num" id="temp-cpu">—</span>
                     <span class="bigvalue-unit">&deg;C</span>
-                    <span class="temp-power">
-                      <span class="bigvalue-num" id="power-cpu">—</span>
-                      <span class="bigvalue-unit">W</span>
-                    </span>
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-cpu-bar"></div></div>
+                  <div class="temp-sub-label"><span class="micro-label">POWER</span><span class="temp-name" id="power-cpu-name">—</span></div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-power" id="power-cpu-bar"></div></div>
                 </div>
 
-                <div class="temp-row">
-                  <div class="temp-head">
-                    <span class="micro-label">GPU 0</span>
-                    <span class="temp-name" id="temp-gpu0-name">—</span>
-                  </div>
-                  <div class="temp-readout">
-                    <span class="caret">&#9656;</span>
-                    <span class="bigvalue-num" id="temp-gpu0">—</span>
-                    <span class="bigvalue-unit">&deg;C</span>
-                    <span class="temp-power">
-                      <span class="bigvalue-num" id="power-gpu0">—</span>
-                      <span class="bigvalue-unit">W</span>
-                    </span>
-                  </div>
-                  <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu0-bar"></div></div>
-                </div>
+                <!-- GPU 0 (integrated / UHD) temp row removed — its
+                     reading always tracks the CPU package since the
+                     iGPU is on the same die. Only the discrete card
+                     (GPU 1) is shown below. -->
 
                 <div class="temp-row">
                   <div class="temp-head">
@@ -1839,45 +2493,37 @@
                     <span class="caret">&#9656;</span>
                     <span class="bigvalue-num" id="temp-gpu1">—</span>
                     <span class="bigvalue-unit">&deg;C</span>
-                    <span class="temp-power">
-                      <span class="bigvalue-num" id="power-gpu1">—</span>
-                      <span class="bigvalue-unit">W</span>
-                    </span>
                   </div>
                   <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-gpu1-bar"></div></div>
+                  <div class="temp-sub-label"><span class="micro-label">POWER</span><span class="temp-name" id="power-gpu1-name">—</span></div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-power" id="power-gpu1-bar"></div></div>
+                </div>
+
+                <!-- RAM temperature row — only populated when a sensor
+                     backend reports DRAM temps (LHM/HWiNFO). Hidden
+                     otherwise so the panel doesn't show empty "N/A"
+                     rows on machines without DIMM thermal probes. -->
+                <div class="temp-row" id="temp-row-ram" hidden>
+                  <div class="temp-head">
+                    <span class="micro-label">RAM</span>
+                    <span class="temp-name" id="temp-ram-name">—</span>
+                  </div>
+                  <div class="temp-readout">
+                    <span class="caret">&#9656;</span>
+                    <span class="bigvalue-num" id="temp-ram">—</span>
+                    <span class="bigvalue-unit">&deg;C</span>
+                  </div>
+                  <div class="seg-bar"><div class="seg-bar-fill seg-temp" id="temp-ram-bar"></div></div>
                 </div>
 
                 <!-- Fans subsection — populated from the same LHM
                      backend the dashboard spawns hidden. List shows
                      detected fans with live RPM + PWM%. Empty until
                      the sensor backend reports. -->
-                <div class="thermal-fans" id="thermal-fans">
-                  <div class="thermal-fans-head">
-                    <span class="micro-label">FANS</span>
-                    <span class="thermal-fans-tag" id="fans-status-tag">—</span>
-                  </div>
-                  <!-- Power/thermal profile selector — only shown on the
-                       Linux appliance, where the kernel exposes the ACPI
-                       platform profile. Populated by initThermalProfile(). -->
-                  <div class="thermal-profile" id="thermal-profile" hidden>
-                    <span class="micro-label">PROFILE</span>
-                    <div class="thermal-profile-btns" id="thermal-profile-btns"></div>
-                  </div>
-                  <!-- Hardware/thermal sysfs diagnostic — dumps what the
-                       Linux appliance actually exposes for fan control. -->
-                  <div class="thermal-hwdiag" id="thermal-hwdiag" hidden>
-                    <button type="button" class="thermal-hwdiag-btn" id="hwdiag-btn">HW DIAG</button>
-                    <pre class="thermal-hwdiag-out" id="hwdiag-out" hidden></pre>
-                  </div>
-                  <ul class="thermal-fans-list" id="fans-list">
-                    <li class="thermal-fans-empty" id="fans-empty">SENSOR BACKEND STARTING…</li>
-                  </ul>
-                </div>
               </div>
               <footer class="panel-footer">
                 <span class="footer-label">THERMAL STATUS</span>
                 <span class="footer-readout" id="thermal-status">SCANNING…</span>
-                <button id="fans-edit-btn" class="thermal-curve-btn" type="button" title="Open the fan curve editor">CURVE</button>
               </footer>
             </section>
           </div>
@@ -1891,7 +2537,7 @@
           <section class="panel panel-driveio">
             <header class="panel-header">
               <span class="panel-title">DRIVE I/O <em>G7</em></span>
-              <span class="panel-code">PHYSICAL DISK</span>
+              <span class="panel-code" id="driveio-code">PHYSICAL DISK</span>
               <span class="panel-id" id="disk-queue-tag">—</span>
             </header>
             <div class="panel-body net-body">
@@ -1920,20 +2566,6 @@
                 <div class="spark-bars spark-bars-tx" id="disk-write-spark"></div>
               </div>
 
-              <div class="micro-grid micro-grid-3">
-                <div class="micro-cell">
-                  <span class="micro-label">XFER/S</span>
-                  <span class="micro-val" id="disk-xfer">—</span>
-                </div>
-                <div class="micro-cell">
-                  <span class="micro-label">QUEUE</span>
-                  <span class="micro-val" id="disk-queue">—</span>
-                </div>
-                <div class="micro-cell">
-                  <span class="micro-label">TARGET</span>
-                  <span class="micro-val accent">_TOTAL</span>
-                </div>
-              </div>
             </div>
             <footer class="panel-footer">
               <span class="footer-label">DISK STATUS</span>
@@ -1945,7 +2577,7 @@
           <section class="panel panel-network">
             <header class="panel-header">
               <span class="panel-title">NETWORK <em>F6</em></span>
-              <span class="panel-code">LIVE TRAFFIC</span>
+              <span class="panel-code" id="network-code">LIVE TRAFFIC</span>
               <span class="panel-id" id="net-iface-tag">—</span>
             </header>
             <div class="panel-body net-body">
@@ -1974,24 +2606,18 @@
                 <div class="spark-bars spark-bars-tx" id="net-tx-spark"></div>
               </div>
 
-              <div class="micro-grid micro-grid-3">
-                <div class="micro-cell">
-                  <span class="micro-label">RX TOTAL</span>
-                  <span class="micro-val" id="net-rx-total">—</span>
-                </div>
-                <div class="micro-cell">
-                  <span class="micro-label">TX TOTAL</span>
-                  <span class="micro-val" id="net-tx-total">—</span>
-                </div>
-                <div class="micro-cell">
-                  <span class="micro-label">IFACE</span>
-                  <span class="micro-val accent" id="net-iface">—</span>
-                </div>
-              </div>
             </div>
             <footer class="panel-footer">
               <span class="footer-label">NET STATUS</span>
               <span class="footer-readout" id="net-status">STANDBY</span>
+              <span class="footer-readout net-totals">
+                <em>RX</em>
+                <strong id="net-rx-total">—</strong>
+                <em>TX</em>
+                <strong id="net-tx-total">—</strong>
+                <em>IFACE</em>
+                <strong class="accent" id="net-iface">—</strong>
+              </span>
             </footer>
           </section>
 
@@ -2102,45 +2728,117 @@
       </div>
     </div>
 
-    <!-- Power menu. Opens from the topbar #power-btn. Power off / restart
-         go through main's system-power handler (native confirm); sleep
-         reuses the existing system-sleep handler. -->
-    <div id="power-overlay" class="lx-overlay" hidden>
-      <div class="lx-card lx-card-power">
-        <header class="lx-head">
-          <span class="lx-title">POWER</span>
-          <span class="lx-code">SYSTEM</span>
-          <button id="power-close-btn" class="lx-close" type="button" title="Close">×</button>
-        </header>
-        <div class="lx-power-grid">
-          <button class="lx-power-btn" id="power-off-btn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 3 V12"/>
-              <path d="M6.5 7 A8 8 0 1 0 17.5 7"/>
-            </svg>
-            <span>POWER OFF</span>
-          </button>
-          <button class="lx-power-btn" id="power-restart-btn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 11 A8 8 0 1 0 19 16"/>
-              <path d="M20 5 V11 H14"/>
-            </svg>
-            <span>RESTART</span>
-          </button>
-          <button class="lx-power-btn" id="power-sleep-btn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 13 A9 9 0 1 1 11 3 A7 7 0 0 0 21 13 Z"/>
-            </svg>
-            <span>SLEEP</span>
-          </button>
-        </div>
-        <p class="lx-power-status" id="power-status"></p>
-      </div>
-    </div>
+    <!-- (Power menu removed — the topbar #power-btn and its overlay
+         were retired; users power off the appliance via the OS as
+         normal.) -->
 
     <!-- Profile-picture picker. Opens when the user clicks .profile-pic
          in the clock panel. Lists every image in the dashboard's gallery
          folder (recursive); pick one to set as your avatar. -->
+    <!-- Profile-picture SOURCE chooser. Shown when the user clicks the
+         smiley/avatar in the clock panel. Two options: GALLERY (opens
+         the picture-picker overlay below) or CAMERA (starts the live
+         webcam feed via startWebcam). -->
+    <div id="profile-source-overlay" class="picture-picker-overlay profile-source-overlay" hidden>
+      <div class="picture-picker-card profile-source-card">
+        <header class="picture-picker-head">
+          <span class="picture-picker-title">PROFILE PICTURE</span>
+          <span class="picture-picker-code">SOURCE</span>
+          <button id="profile-source-close" class="picture-picker-close" type="button" title="Close">×</button>
+        </header>
+        <div class="profile-source-body">
+          <button id="profile-source-gallery" class="profile-source-btn" type="button">
+            <span class="profile-source-icon">▣</span>
+            <span class="profile-source-label">GALLERY</span>
+            <span class="profile-source-desc">Pick from gallery</span>
+          </button>
+          <button id="profile-source-camera" class="profile-source-btn" type="button">
+            <span class="profile-source-icon" id="profile-source-camera-icon">◉</span>
+            <span class="profile-source-label" id="profile-source-camera-label">CAMERA</span>
+            <span class="profile-source-desc" id="profile-source-camera-desc">Use live webcam</span>
+          </button>
+          <!-- Cycle device button — only meaningful with the camera live AND
+               more than one device detected. Hidden otherwise. -->
+          <button id="profile-source-cycle" class="profile-source-btn" type="button" hidden>
+            <span class="profile-source-icon">↻</span>
+            <span class="profile-source-label">CYCLE</span>
+            <span class="profile-source-desc" id="profile-source-cycle-desc">Next camera device</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- EDIT ROOM · Export options. Opens when the user hits ▶ EXPORT in
+         the editor tools bar. Lets them choose filename, container/codec
+         (MP4/H.264, MP4/H.265, WebM/VP9, MOV/HEVC), quality preset, FPS,
+         and output resolution. CANCEL closes without exporting; EXPORT
+         fires the IPC with the chosen options. -->
+    <div id="edit-export-modal" class="picture-picker-overlay edit-export-modal" hidden>
+      <div class="picture-picker-card edit-export-card">
+        <header class="picture-picker-head">
+          <span class="picture-picker-title">EXPORT</span>
+          <span class="picture-picker-code">RENDER OPTIONS</span>
+          <button id="edit-export-cancel-x" class="picture-picker-close" type="button" title="Close">×</button>
+        </header>
+        <div class="edit-export-body">
+          <div class="edit-export-row">
+            <label class="edit-export-label" for="edit-export-name">FILENAME</label>
+            <input id="edit-export-name" class="edit-export-input" type="text" placeholder="leave blank for USER NNNN" maxlength="80" autocomplete="off" spellcheck="false" />
+            <span class="edit-export-suffix" id="edit-export-suffix">.mp4</span>
+          </div>
+          <div class="edit-export-row">
+            <label class="edit-export-label" for="edit-export-format">FORMAT</label>
+            <select id="edit-export-format" class="edit-export-select">
+              <option value="mp4-h264" selected>MP4 · H.264 (universal)</option>
+              <option value="mp4-h265">MP4 · H.265 / HEVC (smaller, slower)</option>
+              <option value="webm-vp9">WebM · VP9 (web)</option>
+              <option value="mov-hevc">MOV · HEVC (Apple)</option>
+            </select>
+          </div>
+          <div class="edit-export-row">
+            <label class="edit-export-label" for="edit-export-quality">QUALITY</label>
+            <select id="edit-export-quality" class="edit-export-select">
+              <option value="best">Best (visually lossless)</option>
+              <option value="high" selected>High (recommended)</option>
+              <option value="medium">Medium (smaller files)</option>
+              <option value="low">Low (preview / share)</option>
+              <option value="custom">Custom bitrate…</option>
+            </select>
+          </div>
+          <div class="edit-export-row edit-export-row-bitrate" id="edit-export-row-bitrate" hidden>
+            <label class="edit-export-label" for="edit-export-bitrate">BITRATE</label>
+            <input id="edit-export-bitrate" class="edit-export-input edit-export-input-num" type="number" min="0.5" max="200" step="0.5" value="12" />
+            <span class="edit-export-suffix">Mbps</span>
+          </div>
+          <div class="edit-export-row">
+            <label class="edit-export-label" for="edit-export-fps">FRAME RATE</label>
+            <select id="edit-export-fps" class="edit-export-select">
+              <option value="" selected>Keep original</option>
+              <option value="24">24 fps</option>
+              <option value="30">30 fps</option>
+              <option value="60">60 fps</option>
+            </select>
+          </div>
+          <div class="edit-export-row">
+            <label class="edit-export-label" for="edit-export-res">RESOLUTION</label>
+            <select id="edit-export-res" class="edit-export-select">
+              <option value="" selected>Keep original</option>
+              <option value="2160">4K · 2160p</option>
+              <option value="1440">1440p</option>
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+              <option value="480">480p</option>
+            </select>
+          </div>
+        </div>
+        <footer class="edit-export-foot">
+          <span class="edit-export-hint" id="edit-export-hint">NVENC will auto-select when available.</span>
+          <button id="edit-export-cancel" class="edit-export-btn" type="button">CANCEL</button>
+          <button id="edit-export-go"     class="edit-export-btn edit-export-btn-go" type="button">▶ EXPORT</button>
+        </footer>
+      </div>
+    </div>
+
     <div id="picture-picker-overlay" class="picture-picker-overlay" hidden>
       <div class="picture-picker-card">
         <header class="picture-picker-head">

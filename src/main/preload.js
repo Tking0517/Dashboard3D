@@ -88,6 +88,24 @@ contextBridge.exposeInMainWorld('dash', {
     ipcRenderer.on('edit-export-progress', handler);
     return () => ipcRenderer.off('edit-export-progress', handler);
   },
+  // Edit-room proxy cache. ensure() kicks off a background ffmpeg
+  // transcode (or returns ready/generating if already in flight) so
+  // the viewer can scrub against a short-GOP 540p H.264 file instead
+  // of the long-GOP source. status() polls without spawning. Done
+  // event fires once per source when the proxy file is written.
+  editProxyEnsure: (srcPath) => ipcRenderer.invoke('edit-proxy-ensure', srcPath),
+  editProxyStatus: (srcPath) => ipcRenderer.invoke('edit-proxy-status', srcPath),
+  // Session-scoped cleanup. deleteOne removes a single proxy when
+  // its source is no longer referenced by any timeline clip;
+  // clearAll wipes the whole proxies folder (call on export success
+  // or any "tear down the workspace" trigger).
+  editProxyDeleteOne: (srcPath) => ipcRenderer.invoke('edit-proxy-delete-one', srcPath),
+  editProxyClearAll: () => ipcRenderer.invoke('edit-proxy-clear-all'),
+  onEditProxyDone: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('edit-proxy-done', handler);
+    return () => ipcRenderer.off('edit-proxy-done', handler);
+  },
   // Browser-pane video scraper: enumerate every video on the URL,
   // filter by minimum duration (default 600 s = 10 min). Returns
   // { ok, items: [{ id, title, url, duration, thumbnail, channel }], note? }.
@@ -135,15 +153,49 @@ contextBridge.exposeInMainWorld('dash', {
   downloadsList:  (subdir = '') => ipcRenderer.invoke('downloads-list', subdir),
   musicPath:      () => ipcRenderer.invoke('music-path'),
   musicList:      (subdir = '') => ipcRenderer.invoke('music-list', subdir),
+  // MUSIC ROOM file ops — scoped to the managed music folder.
+  // rename keeps the original extension; delete goes to the OS Recycle
+  // Bin; trim cuts [inSec,outSec) in place (lossless stream-copy).
+  musicRename:    (rel, newName) => ipcRenderer.invoke('music-rename', rel, newName),
+  musicDelete:    (rel) => ipcRenderer.invoke('music-delete', rel),
+  musicTrim:      (opts) => ipcRenderer.invoke('music-trim', opts),
   setEmbedInvert: (on) => ipcRenderer.invoke('embed-invert', on),
   docsWrite:      (rel, content) => ipcRenderer.invoke('docs-write', rel, content),
   shellOpenPath:  (abs) => ipcRenderer.invoke('shell-open-path', abs),
+  displaysList:   () => ipcRenderer.invoke('displays-list'),
+  displayMoveTo:  (id) => ipcRenderer.invoke('display-move-to', id),
+  onDisplaysChanged: (cb) => {
+    const fn = (_e, data) => { try { cb(data); } catch {} };
+    ipcRenderer.on('displays-changed', fn);
+    return () => ipcRenderer.removeListener('displays-changed', fn);
+  },
+  onWindowDisplayChanged: (cb) => {
+    const fn = () => { try { cb(); } catch {} };
+    ipcRenderer.on('window-display-changed', fn);
+    return () => ipcRenderer.removeListener('window-display-changed', fn);
+  },
+  mediaInfo:    () => ipcRenderer.invoke('media-info'),
+  mediaCommand: (cmd) => ipcRenderer.invoke('media-command', cmd),
+  onMediaInfoChanged: (cb) => {
+    const fn = (_e, data) => { try { cb(data); } catch {} };
+    ipcRenderer.on('media-info-changed', fn);
+    return () => ipcRenderer.removeListener('media-info-changed', fn);
+  },
+  volumeInfo: () => ipcRenderer.invoke('volume-info'),
+  volumeSet:  (level) => ipcRenderer.invoke('volume-set', level),
+  onVolumeInfoChanged: (cb) => {
+    const fn = (_e, data) => { try { cb(data); } catch {} };
+    ipcRenderer.on('volume-info-changed', fn);
+    return () => ipcRenderer.removeListener('volume-info-changed', fn);
+  },
   openImageViewer:    (abs)   => ipcRenderer.invoke('open-image-viewer', abs),
   openContactSheet:   (paths) => ipcRenderer.invoke('open-contact-sheet', paths),
   clipboardCopyFiles: (paths) => ipcRenderer.invoke('clipboard-copy-files', paths),
   exploreMkdir:   (which, rel)  => ipcRenderer.invoke('explore-mkdir',  which, rel),
   exploreRename:  (oldAbs, newName) => ipcRenderer.invoke('explore-rename', oldAbs, newName),
   exploreDelete:  (abs) => ipcRenderer.invoke('explore-delete', abs),
+  exploreMove:    (src, destDir) => ipcRenderer.invoke('explore-move', src, destDir),
+  exploreCopy:    (src, destDir) => ipcRenderer.invoke('explore-copy', src, destDir),
   flushRam:        () => ipcRenderer.invoke('flush-ram'),
   // Suspend the host machine. Main shows a native confirm dialog first;
   // returns { ok: true } on confirm + spawn success, { ok: false, cancelled: true }
@@ -230,27 +282,46 @@ contextBridge.exposeInMainWorld('dash', {
   // source picker UI. Returns an array of { id, name, kind, thumbnail }.
   visualizerListSources:    () => ipcRenderer.invoke('visualizer-list-sources'),
 
+  // REC ROOM cam-filter LUT bank — list .cube files under gallery/luts/
+  // and read individual files. Both walk gallery-rooted paths only;
+  // traversal outside is rejected in main.
+  lutList: ()    => ipcRenderer.invoke('lut-list'),
+  lutRead: (abs) => ipcRenderer.invoke('lut-read', abs),
+
   // Screencap — input-driven JPEG capture of the active mirror stream.
   // Main owns the powerMonitor poll; when input is detected anywhere
   // on the system it pushes 'screencap-trigger' and the renderer grabs
   // a frame + sends it back via screencapSave.
-  screencapWatchStart: () => ipcRenderer.invoke('screencap-watch-start'),
+  screencapWatchStart: (opts) => ipcRenderer.invoke('screencap-watch-start', opts || {}),
   screencapWatchStop:  () => ipcRenderer.invoke('screencap-watch-stop'),
-  screencapSave:       (dataUrl) => ipcRenderer.invoke('screencap-save', dataUrl),
+  screencapSave:       (dataUrl, opts) => ipcRenderer.invoke('screencap-save', dataUrl, opts),
   onScreencapTrigger:  (callback) => {
     const handler = () => callback();
     ipcRenderer.on('screencap-trigger', handler);
     return () => ipcRenderer.removeListener('screencap-trigger', handler);
   },
 
-  // Screen record — continuous video capture of the mirror stream to
-  // <gallery>/recordings/*.mp4. Renderer owns MediaRecorder + chunks
-  // them to main via screenrecChunk; main appends to a write stream.
-  // screenrecStart forwards { mime } so main can tell hardware-H.264
-  // (write straight to .mp4) from software VP8/9 (transcode on stop).
-  screenrecStart: (opts) => ipcRenderer.invoke('screenrec-start', opts),
-  screenrecChunk: (id, bytes) => ipcRenderer.invoke('screenrec-chunk', id, bytes),
-  screenrecStop:  (id) => ipcRenderer.invoke('screenrec-stop', id),
+  // Screen record — live-pipe pipeline (OBS-style). Renderer pumps raw
+  // I420 video frames + raw f32le PCM straight to a long-lived ffmpeg
+  // child via two extra stdio pipes; ffmpeg encodes via NVENC and
+  // writes a fragmented MP4 file as it goes. No tmp.webm, no stop-time
+  // transcode. screenrecStart forwards stream geometry so ffmpeg can
+  // be spawned with the right `-video_size` / `-framerate` / `-ar`.
+  screenrecStart:      (opts) => ipcRenderer.invoke('screenrec-start', opts),
+  screenrecWriteVideo: (id, bytes) => ipcRenderer.invoke('screenrec-write-video', id, bytes),
+  screenrecWriteAudio: (id, bytes) => ipcRenderer.invoke('screenrec-write-audio', id, bytes),
+  screenrecStop:       (id) => ipcRenderer.invoke('screenrec-stop', id),
+  // REC ROOM global hotkeys (F9 = PCM, F10 = screen REC). Main owns the
+  // globalShortcut grab; this delivers the toggle intent to the renderer.
+  onRecHotkey: (cb) => {
+    const h = (_e, d) => { try { cb(d); } catch {} };
+    ipcRenderer.on('rec-hotkey', h);
+    return () => ipcRenderer.removeListener('rec-hotkey', h);
+  },
+  // Diagnostic log — append one line to <gallery>/rec-diagnostic.log.
+  // Returns { ok, path } so the renderer can show the user where to look.
+  screenrecLogDiag:     (line) => ipcRenderer.invoke('screenrec-log-diag', line),
+  screenrecLogDiagPath: () => ipcRenderer.invoke('screenrec-log-diag-path'),
 
   // Snap-to-video processor — renderer ships a single Uint8Array blob
   // produced by canvas + MediaRecorder; main writes it to
@@ -318,4 +389,57 @@ contextBridge.exposeInMainWorld('dash', {
     return () => ipcRenderer.removeListener('browser-newtab-request', handler);
   },
 
+});
+
+// Separate global namespace for the YouTube room — mirrors the
+// contract the standalone YouTubePop app uses so its renderer logic
+// drops in unchanged. yt-client is hosted by main (yt:* handlers in
+// main.js around line 7401); this bridge is just the renderer-side
+// glue.
+contextBridge.exposeInMainWorld('yt', {
+  search:         (query, opts) => ipcRenderer.invoke('yt:search', query, opts),
+  searchGeneral:  (query, opts) => ipcRenderer.invoke('yt:search-general', query, opts),
+  // FEtrending feed — auth-free, gives the YouTube room a home / start page.
+  browseTrending: (opts)        => ipcRenderer.invoke('yt:browse-trending', opts),
+  getStream:      (idOrUrl)     => ipcRenderer.invoke('yt:get-stream', idOrUrl),
+  // High-quality MSE pair (video-only + audio-only) for 1080p / 4K
+  // playback. Returns combined-URL fallback inside the response when
+  // separable streams aren't available for the requested video.
+  getStreams:     (idOrUrl, opts) => ipcRenderer.invoke('yt:get-streams', idOrUrl, opts),
+  getMetadata:    (idOrUrl)     => ipcRenderer.invoke('yt:get-metadata', idOrUrl),
+});
+
+// MAIL room — read-only IMAP bridge. Service implementation lives in
+// src/main/mail-service.js; this is just the renderer-side glue.
+// Credentials are encrypted at rest via Electron safeStorage in main,
+// and the password never crosses the IPC boundary again after save.
+contextBridge.exposeInMainWorld('mail', {
+  hasCreds:   ()      => ipcRenderer.invoke('mail:has-creds'),
+  getCreds:   ()      => ipcRenderer.invoke('mail:get-creds'),
+  saveCreds:  (c)     => ipcRenderer.invoke('mail:save-creds', c),
+  clearCreds: ()      => ipcRenderer.invoke('mail:clear-creds'),
+  connect:    ()      => ipcRenderer.invoke('mail:connect'),
+  disconnect: ()      => ipcRenderer.invoke('mail:disconnect'),
+  listInbox:  (opts)  => ipcRenderer.invoke('mail:list-inbox', opts),
+  getMessage: (uid)   => ipcRenderer.invoke('mail:get-message', uid),
+  send:       (msg)   => ipcRenderer.invoke('mail:send', msg),
+  contacts: {
+    list:   ()        => ipcRenderer.invoke('mail:contacts:list'),
+    add:    (c)       => ipcRenderer.invoke('mail:contacts:add', c),
+    update: (id, p)   => ipcRenderer.invoke('mail:contacts:update', id, p),
+    remove: (id)      => ipcRenderer.invoke('mail:contacts:remove', id),
+  },
+  google: {
+    status:         ()   => ipcRenderer.invoke('mail:google:status'),
+    setup:          (c)  => ipcRenderer.invoke('mail:google:setup', c),
+    clearSetup:     ()   => ipcRenderer.invoke('mail:google:clear-setup'),
+    authorize:      ()   => ipcRenderer.invoke('mail:google:authorize'),
+    disconnect:     ()   => ipcRenderer.invoke('mail:google:disconnect'),
+    importContacts: ()   => ipcRenderer.invoke('mail:google:import-contacts'),
+  },
+  onStatus:   (cb)    => {
+    const h = (_e, s) => { try { cb(s); } catch {} };
+    ipcRenderer.on('mail:status', h);
+    return () => ipcRenderer.removeListener('mail:status', h);
+  },
 });

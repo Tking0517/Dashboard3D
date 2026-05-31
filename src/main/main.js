@@ -15,9 +15,33 @@ const trimService    = require('./services/system/trim');
 const sensorsService = require('./services/sensors');
 const audioService   = require('./services/audio');
 const wmService      = require('./services/wm');
+const thumbnails     = require('./thumbnails');
+const mailService    = require('./mail-service');
+const contactsService= require('./contacts-service');
+const googleOauth    = require('./google-oauth');
+const googlePeople   = require('./google-people');
 
 const HTTP_PORT = 7373;
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
+
+// ── Chromium command-line switches for screen-recording continuity ─
+// REC ROOM screen recording suffers when Dashboard3D loses focus
+// because Chromium normally suspends the renderer's video pipeline
+// (decoder, timers, rAF) for unfocused / occluded windows. The
+// per-BrowserWindow `backgroundThrottling: false` covers Page Visibility
+// timer-throttling but NOT the deeper renderer-backgrounding +
+// occluded-window paths. These switches disable all of it so the
+// recording canvas / MediaStreamTrack pipeline keeps running at full
+// rate when the user switches focus to the app they're recording.
+// Must be appended before app.whenReady (i.e. here, at module load).
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+// Stop Chromium from even checking whether the window is occluded.
+// Without this, the OS-level occlusion test still runs and feeds the
+// "is hidden" signal into the renderer pipeline → throttling kicks in
+// regardless of the three switches above. Belt-and-braces.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 
 // Main HUD BrowserWindow. Captured in createWindow() so the embedded
 // BROWSER pane can attach/detach BrowserViews against it.
@@ -53,6 +77,45 @@ const { runPowerShell } = require('./services/_util/powershell');
 function getWorkArea() {
   return screen.getPrimaryDisplay().workArea;
 }
+// Pick the display the window is mostly on by intersection area. Falls
+// back to the primary when there's zero overlap (window off-screen).
+function _displayForWindow(win) {
+  try {
+    const b = win.getBounds();
+    const all = screen.getAllDisplays();
+    let best = null, bestArea = 0;
+    for (const d of all) {
+      const r = d.bounds;
+      const ix = Math.max(b.x, r.x);
+      const iy = Math.max(b.y, r.y);
+      const ax = Math.min(b.x + b.width,  r.x + r.width);
+      const ay = Math.min(b.y + b.height, r.y + r.height);
+      const area = Math.max(0, ax - ix) * Math.max(0, ay - iy);
+      if (area > bestArea) { bestArea = area; best = d; }
+    }
+    return best || screen.getPrimaryDisplay();
+  } catch {
+    return screen.getPrimaryDisplay();
+  }
+}
+// setBounds with size honored even when `resizable: false` was passed at
+// construction. Windows + Electron will silently clamp a programmatic
+// setBounds size on a non-resizable window, so we temporarily flip the
+// flag, set the bounds, then flip it back.
+function _setBoundsFit(win, area) {
+  const wasFullscreen = win.isFullScreen();
+  const wasResizable  = win.isResizable();
+  try {
+    if (wasFullscreen) win.setFullScreen(false);
+    if (!wasResizable) win.setResizable(true);
+    win.setBounds(area);
+  } finally {
+    if (!wasResizable) win.setResizable(false);
+    if (wasFullscreen) {
+      setTimeout(() => { try { win.setFullScreen(true); } catch {} }, 80);
+    }
+  }
+}
 
 // LHM launching + native fallback moved to services/sensors.
 
@@ -82,6 +145,15 @@ function createWindow() {
       // Third-party content (browser-pane) gets the strict policy
       // independently via its BrowserView webPreferences below.
       autoplayPolicy: 'no-user-gesture-required',
+      // CRITICAL for REC ROOM screen recording.
+      // When the user records another app's window, Dashboard3D is in
+      // the background and Chromium aggressively throttles
+      // requestAnimationFrame in unfocused windows — the recording
+      // canvas's rAF stops firing after the first frame and MediaRecorder
+      // produces 1-byte chunks (proven via rec-diagnostic.log:
+      // STALL_3S { drawCount: 1 } at 3 s in). Setting backgroundThrottling
+      // to false keeps rAF running at full rate regardless of focus.
+      backgroundThrottling: false,
     },
   });
 
@@ -136,6 +208,27 @@ function createWindow() {
           console.warn(`[overlay] hotkey ${accel} register failed:`, err.message);
         }
       }
+      // REC ROOM global hotkeys: F9 = PCM (audio-only) toggle, F10 =
+      // screen REC toggle. These must work while another app is focused
+      // (you're recording it), so they're true global accelerators, not
+      // renderer keydowns. Windows-only: F9/F10 are bare keysyms, and a
+      // bare-keysym global grab on Linux/X11 can fall back to an AnyKey
+      // grab (the F13 footgun documented above) — and the REC ROOM's
+      // WASAPI capture is Windows-only regardless.
+      if (process.platform === 'win32') {
+        const _recHotkeys = { F9: 'pcm', F10: 'screenrec' };
+        for (const [accel, which] of Object.entries(_recHotkeys)) {
+          try {
+            globalShortcut.register(accel, () => {
+              if (_mainWin && !_mainWin.isDestroyed()) {
+                try { _mainWin.webContents.send('rec-hotkey', { which }); } catch {}
+              }
+            });
+          } catch (err) {
+            console.warn(`[rec-hotkey] ${accel} register failed:`, err.message);
+          }
+        }
+      }
     });
     app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch {} });
 
@@ -172,12 +265,15 @@ function createWindow() {
     win.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'));
   }
 
-  // Re-snap to work area whenever the OS reconfigures (e.g. taskbar autohide
-  // toggle, display change). Cheap and idempotent.
+  // Re-snap whenever the OS reconfigures (taskbar autohide toggle, display
+  // added/removed, resolution change). Picks the display the window is
+  // mostly on so multi-monitor setups don't yank the dashboard back to
+  // the primary every time a secondary display blinks.
   const reSnap = () => {
     if (win.isDestroyed() || win.isFullScreen()) return;
-    const a = getWorkArea();
-    win.setBounds(a);
+    const d = _displayForWindow(win);
+    _setBoundsFit(win, d.workArea);
+    try { win.webContents.send('window-display-changed'); } catch {}
   };
   screen.on('display-metrics-changed', reSnap);
   screen.on('display-added', reSnap);
@@ -249,11 +345,17 @@ function createWindow() {
   // Chromium's parallel tile raster threads. Letting Chromium use native
   // device pixel ratio is much cheaper.
 
-  // Native WASAPI loopback for the default output device. Pushes per-frame
-  // RMS levels to the renderer over IPC ('audio-out-level'). readConfig is
-  // passed in so the service can honor the persisted audioDeviceId without
-  // taking a direct dependency on our config module.
-  win.webContents.once('did-finish-load', () => audioService.startLoopback(win, null, readConfig));
+  // Global UI scale. webContents.setZoomFactor scales the rendered page
+  // exactly like browser Ctrl-+/Ctrl-- — proper viewport behaviour, no
+  // empty edge from CSS `zoom` (which the dashboard's absolute-positioned
+  // panels do not survive). Was 0.88 (~12% smaller than native); bumped
+  // to 1.0 per user request to make all text larger and easier to read.
+  // The earlier 1.2 was removed for GPU cost — 1.0 keeps native device
+  // pixel mapping (no per-paint scaling work), so no perf regression.
+  win.webContents.once('did-finish-load', () => {
+    try { win.webContents.setZoomFactor(1.0); } catch {}
+    audioService.startLoopback(win, null, readConfig);
+  });
   win.on('closed', () => audioService.stopLoopback());
 }
 
@@ -410,6 +512,41 @@ function applyYoutubeZenMode(on) {
 // Set true while in-page media (video/image) is fullscreen — suspends
 // the always-on-bottom demotion so the fullscreen window stays on top.
 let _mediaFullscreenActive = false;
+// ── Fullscreen blocker for BrowserView embeds ─────────────────────
+// Embedded pages (Discord, Facebook, browser-tab websites, YouTube
+// embeds) can call element.requestFullscreen() and Chromium honors
+// it by expanding the BrowserView content over the host window —
+// the dashboard chrome becomes unreachable until the embed releases
+// fullscreen, and many sites don't expose a visible exit. Block at
+// two layers:
+//   1) Inject a JS shim on every navigation that turns the Fullscreen
+//      API into a no-op (Promise rejected with NotAllowedError so
+//      well-behaved sites bail out gracefully).
+//   2) Safety listener on the BV's webContents that immediately
+//      undoes any fullscreen state that somehow slipped through.
+// Module scope so both the browser-tab path (in app.whenReady) and
+// the stream-view path (in registerIpc) can reach the same function.
+const _FS_BLOCK_SCRIPT = `(() => {
+  try {
+    const reject = () => Promise.reject(new DOMException('Fullscreen blocked', 'NotAllowedError'));
+    const resolve = () => Promise.resolve();
+    const ep = Element.prototype, dp = Document.prototype;
+    ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen']
+      .forEach((m) => { try { ep[m] = reject; } catch {} });
+    ['exitFullscreen','webkitExitFullscreen','mozCancelFullScreen','msExitFullscreen']
+      .forEach((m) => { try { dp[m] = resolve; } catch {} });
+  } catch {}
+})();`;
+function _blockBvFullscreen(wc) {
+  if (!wc) return;
+  const inject = () => { try { wc.executeJavaScript(_FS_BLOCK_SCRIPT); } catch {} };
+  wc.on('dom-ready', inject);
+  wc.on('did-frame-finish-load', (_e, isMainFrame) => { if (isMainFrame) inject(); });
+  wc.on('enter-html-full-screen', () => {
+    try { wc.executeJavaScript('document.exitFullscreen && document.exitFullscreen()'); } catch {}
+  });
+}
+
 function sendToBottom(win) {
   if (_mediaFullscreenActive) return;
   wmService.sendToBottom(win);
@@ -787,6 +924,39 @@ function ensureUserFolders() {
     try { fs.mkdirSync(p, { recursive: true }); }
     catch (err) { console.warn(`could not create ${p}:`, err.message); }
   }
+  _sweepLooseSnaps();
+}
+// One-shot housekeeping: move any loose .jpg/.jpeg files sitting directly
+// under gallery/screencap/ into a dated loose-snaps-<YYYYMMDD> subfolder.
+// Earlier builds wrote snaps as loose files; now every snap lives in a
+// session folder, and this catches stragglers from before the change so
+// the gallery view stays tidy.
+function _sweepLooseSnaps() {
+  try {
+    const root = path.join(galleryFolderPath(), 'screencap');
+    if (!fs.existsSync(root)) return;
+    const entries = fs.readdirSync(root, { withFileTypes: true });
+    const loose = entries.filter((e) => e.isFile() && /\.(jpe?g)$/i.test(e.name));
+    if (!loose.length) return;
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const bucket = path.join(root, `loose-snaps-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`);
+    fs.mkdirSync(bucket, { recursive: true });
+    for (const ent of loose) {
+      const src = path.join(root, ent.name);
+      let dst = path.join(bucket, ent.name);
+      let n = 1;
+      while (fs.existsSync(dst)) {
+        const ext = path.extname(ent.name);
+        const base = ent.name.slice(0, -ext.length);
+        dst = path.join(bucket, `${base}-${n++}${ext}`);
+      }
+      try { fs.renameSync(src, dst); }
+      catch (err) { console.warn('[screencap] sweep move failed:', err.message); }
+    }
+  } catch (err) {
+    console.warn('[screencap] loose-snap sweep failed:', err.message);
+  }
 }
 // Return the managed root (gallery/ docs/ downloads/) that contains `abs`,
 // or null if `abs` lives outside all of them. Used by the explore IPC
@@ -809,7 +979,12 @@ function _pathInsideManagedRoot(abs) { return _managedRootFor(abs) !== null; }
 // disabling webSecurity on the BrowserWindow. Scheme must be registered
 // here (before app.whenReady) so it's flagged secure + supports streams.
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'dash3d-file', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
+  { scheme: 'dash3d-file',  privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
+  // dash3d-thumb://<root>/<rel-path> — same routing as dash3d-file but
+  // resolves to an ffmpeg-generated JPEG cached under userdata/thumb-cache.
+  // Used by the EXPLORE gallery for video frames + non-native image
+  // formats (TIFF, PSD, HEIC, camera RAW).
+  { scheme: 'dash3d-thumb', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
 // Stop Chromium from detecting "the YouTube window is occluded by the
@@ -841,6 +1016,12 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 const enableFeatures = ['CanvasOopRasterization'];
 if (process.platform === 'win32') {
   enableFeatures.push('AllowWgcWindowCapturer', 'AllowWgcScreenCapturer');
+  // PlatformHEVCDecoderSupport was here but it triggers a GPU-process
+  // reinit on startup that briefly blanks attached displays on some
+  // Windows GPU drivers, AND the scrub path now uses the H.264 proxy
+  // instead of trying to seek the HEVC source live — so the flag
+  // costs more than it buys. Left as a one-line note in case future
+  // source-mode work needs to bring it back.
 }
 app.commandLine.appendSwitch('enable-features', enableFeatures.join(','));
 
@@ -1536,6 +1717,7 @@ app.whenReady().then(() => {
   const _bvDarkCssKeys = new Map(); // id → cssKey
   // Initialize the dark-mode flag from config; default ON.
   let _bvDarkMode = (() => { try { return readConfig().browserDarkMode !== false; } catch { return true; } })();
+
   function _wireBvEvents(id, view) {
     const wc = view.webContents;
     // Halve the compositor's frame budget for embedded pages. With every
@@ -1544,6 +1726,11 @@ app.whenReady().then(() => {
     // saves real GPU time. The YouTube popout's webContents uses its own
     // setFrameRate(60), unaffected.
     try { wc.setFrameRate(30); } catch {}
+    // Block HTML fullscreen for every embedded BrowserView. Without
+    // this, a misbehaving site (Discord's video popout, a YouTube
+    // embed, etc.) can ask Chromium to expand its content over the
+    // whole window and the dashboard chrome becomes unreachable.
+    _blockBvFullscreen(wc);
     wc.on('dom-ready', async () => {
       try { wc.insertCSS(_PAGE_STYLE_CSS); } catch {}
       if (_bvDarkMode) {
@@ -2040,6 +2227,7 @@ app.whenReady().then(() => {
            : which === 'docs'      ? docsFolderPath()
            : which === 'downloads' ? downloadsFolderPath()
            : which === 'music'     ? musicFolderPath()
+           : which === 'proxy'     ? proxyCacheDir()
            : null;
       if (!root) {
         console.warn('[dash3d-file] bad host:', u.hostname, 'in', request.url);
@@ -2117,6 +2305,52 @@ app.whenReady().then(() => {
       return new Response(`read failed: ${err.message}`, { status: 500 });
     }
   });
+
+  // dash3d-thumb://<root>/<rel-path> — serves a generated JPEG
+  // thumbnail for the file. Same root mapping as dash3d-file. Thumbs
+  // are cached on disk so subsequent requests for the same (path +
+  // mtime) are a no-op stat + readFileSync.
+  protocol.handle('dash3d-thumb', async (request) => {
+    let abs;
+    try {
+      const u = new URL(request.url);
+      const which = (u.hostname || '').toLowerCase();
+      const root = which === 'gallery'   ? galleryFolderPath()
+                 : which === 'docs'      ? docsFolderPath()
+                 : which === 'downloads' ? downloadsFolderPath()
+                 : which === 'music'     ? musicFolderPath()
+                 : null;
+      if (!root) return new Response('bad host', { status: 400 });
+      const rel = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
+      abs = path.resolve(root, rel);
+      if (!abs.startsWith(root)) return new Response('forbidden', { status: 403 });
+    } catch (err) {
+      return new Response('bad url', { status: 400 });
+    }
+    const thumbPath = await thumbnails.getThumb(abs);
+    if (!thumbPath) return new Response('thumb unavailable', { status: 404 });
+    try {
+      const buf = fs.readFileSync(thumbPath);
+      return new Response(buf, {
+        headers: {
+          'Content-Type':                 'image/jpeg',
+          'Content-Length':               String(buf.length),
+          // Cached for 1h — the cache key includes mtime so a real
+          // change still picks up a fresh thumb; this just keeps the
+          // renderer from re-fetching while you scroll the gallery.
+          'Cache-Control':                'private, max-age=3600',
+          'Access-Control-Allow-Origin':  '*',
+        },
+      });
+    } catch (err) {
+      return new Response(`thumb read failed: ${err.message}`, { status: 500 });
+    }
+  });
+
+  // EDIT room's project state isn't persisted between sessions, so
+  // its derived proxy cache shouldn't be either. Sweep the proxies
+  // folder on every cold start.
+  try { proxyClearAll(); } catch {}
 
   registerIpc();
   startHttpServer();
@@ -2198,7 +2432,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('temps-info', async () => {
-    return await getTempsInfo();
+    return await getTempsInfoCached();
   });
 
   ipcMain.handle('net-info', async () => {
@@ -2617,7 +2851,12 @@ function registerIpc() {
   // the same invert filter. Media is re-inverted so photos / avatars
   // stay right-side-up. Re-applied on each page load since a
   // navigation clears inserted CSS.
-  let _embedInvert = (() => { try { return !!readConfig().invert; } catch { return false; } })();
+  // Embed invert is permanently OFF — the dashboard's invert button
+  // flips the renderer chrome only, never the BrowserView embeds.
+  // (Stays as a `let` so the existing embed-invert IPC handler can
+  // still write to it without rejection if some external caller flips
+  // it, but the renderer no longer calls that path.)
+  let _embedInvert = false;
   const _embedInvertKeys = new Map(); // webContents.id → inserted css key
   // The triple :not(#…) bumps specificity to (3,0,1) so a web app that
   // ships its own `html.theme-dark { filter: … }` rule can't out-rank
@@ -2751,10 +2990,14 @@ function registerIpc() {
     const iconBase = `
     svg:not([class*="avatar" i]) { color: ${text} !important; }
   `;
-    // INK themes additionally crush hard-coded brand fills + grayscale
-    // raster emoji so nothing reads as full colour on printed paper.
-    // Cyber themes skip this so genuine brand colour survives.
-    const inkIcons = !p.eink ? '' : `
+    // INK themes used to additionally crush hard-coded brand fills +
+    // grayscale raster emoji so nothing reads as full colour on printed
+    // paper. Disabled — the user wants Discord's colored icons + status
+    // indicators (green online / yellow idle / red DND dots) visible
+    // even under matte themes. To re-enable, change `false` below to
+    // `p.eink`.
+    const INK_ICONS_ENABLED = false;
+    const inkIcons = !INK_ICONS_ENABLED ? '' : `
     /* Recolour glyph fills/strokes to ink — but NEVER touch elements
        inside <mask>/<defs>/<clipPath>/<pattern>/<symbol>. Discord
        shapes its guild icons + avatars with an SVG squircle mask whose
@@ -3820,6 +4063,10 @@ function registerIpc() {
     });
     const wc = view.webContents;
     try { wc.setUserAgent(_STREAM_CHROME_UA); } catch {}
+    // Stream embeds (Discord, etc.) can request fullscreen on a chat
+    // video or pinned message — block it so the dashboard chrome
+    // never gets covered. Same shim as the browser-tab BVs.
+    _blockBvFullscreen(wc);
 
     // ── Permissions (universal across kinds) ────────────────────
     // Auto-grant the four permissions modern web chat surfaces ask
@@ -4634,6 +4881,62 @@ function registerIpc() {
   ipcMain.handle('downloads-list', listFolder(downloadsFolderPath));
   ipcMain.handle('music-list',     listFolder(musicFolderPath));
 
+  // LUT folder — recursively enumerate every .cube file under
+  // gallery/luts/ (case-insensitive). REC ROOM's cam filter pipeline
+  // calls this once at startup to populate the LUT picker. Returns
+  // an array of { name, rel, path } sorted by name. Folder is
+  // optional — missing folder returns an empty array, not an error.
+  ipcMain.handle('lut-list', async () => {
+    try {
+      const root = path.join(galleryFolderPath(), 'luts');
+      // Case-insensitive lookup so 'Luts' / 'LUTS' both work.
+      let actualRoot = root;
+      try {
+        const galleryEntries = fs.readdirSync(galleryFolderPath());
+        const match = galleryEntries.find((n) => n.toLowerCase() === 'luts');
+        if (match) actualRoot = path.join(galleryFolderPath(), match);
+      } catch {}
+      if (!fs.existsSync(actualRoot)) return { entries: [] };
+      const out = [];
+      const walk = (dir) => {
+        let items;
+        try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const it of items) {
+          // Skip macOS metadata folders that show up in zip extracts.
+          if (it.name === '__MACOSX' || it.name.startsWith('._')) continue;
+          const full = path.join(dir, it.name);
+          if (it.isDirectory()) { walk(full); continue; }
+          if (!/\.cube$/i.test(it.name)) continue;
+          out.push({
+            name: it.name.replace(/\.cube$/i, ''),
+            rel: path.relative(actualRoot, full).replace(/\\/g, '/'),
+            path: full,
+          });
+        }
+      };
+      walk(actualRoot);
+      out.sort((a, b) => a.name.localeCompare(b.name));
+      return { entries: out, root: actualRoot };
+    } catch (err) {
+      return { entries: [], error: err.message };
+    }
+  });
+
+  // Read a single .cube file's contents as UTF-8 text. Renderer
+  // passes the absolute path returned by lut-list. Path must live
+  // under the gallery root to prevent traversal.
+  ipcMain.handle('lut-read', async (_e, abs) => {
+    try {
+      const root = galleryFolderPath();
+      const target = path.resolve(String(abs || ''));
+      if (!target.startsWith(root)) return { error: 'path outside gallery root' };
+      const text = fs.readFileSync(target, 'utf8');
+      return { ok: true, text };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   // Write a doc file (notes / paper auto-export). `rel` is a relative path
   // under the docs root; any traversal outside is rejected. Parents are
   // created on demand so callers can drop a `notes/<tab>.txt`.
@@ -4803,6 +5106,292 @@ function registerIpc() {
     return { ok: true };
   });
 
+  // ── Display enumeration + window-to-display move ─────────────────
+  // Topbar shows one icon per attached display with orientation hints
+  // (landscape vs portrait). Clicking an icon moves the dashboard's
+  // main window to that display's work area.
+  function _serializeDisplays() {
+    const all = screen.getAllDisplays();
+    const primaryId = screen.getPrimaryDisplay().id;
+    // Sort by spatial X position (then Y as tiebreaker) so the topbar
+    // strip reads left-to-right matching the physical monitor layout —
+    // a portrait monitor to the right of the main display shows up on
+    // the right of the strip, not wherever the OS happened to ID it.
+    const sorted = [...all].sort((a, b) => (a.bounds.x - b.bounds.x) || (a.bounds.y - b.bounds.y));
+    return sorted.map((d, i) => ({
+      id: d.id,
+      index: i,
+      label: d.label || `Display ${i + 1}`,
+      primary: d.id === primaryId,
+      internal: !!d.internal,
+      bounds: d.bounds,
+      workArea: d.workArea,
+      rotation: d.rotation,
+      // True when the display is taller than it is wide. Covers both
+      // physical-pivot monitors and rotated displays.
+      portrait: d.bounds.height > d.bounds.width,
+    }));
+  }
+  ipcMain.handle('displays-list', () => {
+    try { return { ok: true, displays: _serializeDisplays() }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('display-move-to', (_e, displayId) => {
+    try {
+      const win = _mainWin;
+      if (!win || win.isDestroyed()) return { ok: false, error: 'no main window' };
+      const target = screen.getAllDisplays().find((d) => d.id === Number(displayId));
+      if (!target) return { ok: false, error: 'display not found' };
+      const a = target.workArea;
+      _setBoundsFit(win, a);
+      // Renderer can't always tell from a 'resize' event alone that the
+      // OS-orientation of the new display flipped (e.g. landscape →
+      // portrait), so notify it directly so it reapplies the adaptive
+      // layout (panels-top / productivity-bottom on portrait).
+      try { win.webContents.send('window-display-changed'); } catch {}
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Push display-change events to the renderer so the strip can
+  // re-render when monitors are added/removed/rotated.
+  function _notifyDisplaysChanged() {
+    try {
+      const wc = _mainWin?.webContents;
+      if (wc && !wc.isDestroyed()) wc.send('displays-changed', _serializeDisplays());
+    } catch {}
+  }
+  screen.on('display-added',          _notifyDisplaysChanged);
+  screen.on('display-removed',        _notifyDisplaysChanged);
+  screen.on('display-metrics-changed', _notifyDisplaysChanged);
+
+  // ── SMTC media bridge ─────────────────────────────────────────────
+  // Persistent PowerShell child that polls the Windows System Media
+  // Transport Controls every 1.5 s and writes one JSON line per
+  // update to stdout. Each line gets forwarded to the renderer as
+  // 'media-info-changed'. media-command IPC sends a single VK_MEDIA_*
+  // key (play/pause, next, prev, mute) via a one-shot PowerShell that
+  // P/Invokes keybd_event — short-lived so the cost only applies on
+  // user-initiated button presses.
+  let _mediaPs = null;
+  let _mediaLastJson = null;
+  function _startMediaWatcher() {
+    if (process.platform !== 'win32') return;
+    if (_mediaPs) return;
+    const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+  Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
+function Await($winrtTask, $resultType) {
+  $asTask = $asTaskGeneric.MakeGenericMethod($resultType)
+  $netTask = $asTask.Invoke($null, @($winrtTask))
+  $netTask.Wait(-1) | Out-Null
+  $netTask.Result
+}
+[void][Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
+[void][Windows.Media.Control.GlobalSystemMediaTransportControlsSession,Windows.Media.Control,ContentType=WindowsRuntime]
+[void][Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime]
+$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+while ($true) {
+  try {
+    $session = $mgr.GetCurrentSession()
+    if ($session) {
+      $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+      $playback = $session.GetPlaybackInfo()
+      $payload = @{
+        ok = $true
+        title = $props.Title
+        artist = $props.Artist
+        album = $props.AlbumTitle
+        appId = $session.SourceAppUserModelId
+        status = $playback.PlaybackStatus.ToString()
+      }
+    } else {
+      $payload = @{ ok = $true; empty = $true }
+    }
+    $json = $payload | ConvertTo-Json -Compress
+    [Console]::Out.WriteLine($json)
+    [Console]::Out.Flush()
+  } catch {
+    $errPayload = @{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+    [Console]::Out.WriteLine($errPayload)
+    [Console]::Out.Flush()
+  }
+  Start-Sleep -Milliseconds 1500
+}`.trim();
+    try {
+      _mediaPs = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
+      let buf = '';
+      _mediaPs.stdout?.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          const s = line.trim();
+          if (!s) continue;
+          _mediaLastJson = s;
+          try {
+            const wc = _mainWin?.webContents;
+            if (wc && !wc.isDestroyed()) wc.send('media-info-changed', s);
+          } catch {}
+        }
+      });
+      _mediaPs.on('error', () => { _mediaPs = null; });
+      _mediaPs.on('exit',  () => { _mediaPs = null; _mediaLastJson = null; });
+    } catch (err) {
+      console.warn('[media] watcher spawn failed:', err.message);
+      _mediaPs = null;
+    }
+  }
+  app.on('will-quit', () => { try { _mediaPs?.kill(); } catch {} });
+  _startMediaWatcher();
+
+  // Returns the last-seen SMTC JSON (or null) for renderer cold-load.
+  ipcMain.handle('media-info', () => _mediaLastJson);
+
+  // Send a single media key. Maps to VK_MEDIA_* via PowerShell + the
+  // user32 keybd_event P/Invoke. One-shot so each call is its own
+  // PowerShell invocation — acceptable latency (~150 ms) for button
+  // presses. Returns { ok } or { ok:false, error } so the renderer
+  // can surface failures.
+  ipcMain.handle('media-command', async (_e, cmd) => {
+    if (process.platform !== 'win32') return { ok: false, error: 'media keys: windows-only' };
+    const VK = { playpause: 0xB3, next: 0xB0, prev: 0xB1, stop: 0xB2, mute: 0xAD, voldown: 0xAE, volup: 0xAF };
+    const code = VK[String(cmd || '').toLowerCase()];
+    if (!code) return { ok: false, error: `unknown media command: ${cmd}` };
+    // SINGLE-quoted here-string (@'...'@) — PS doesn't interpolate or
+    // require backslash-escapes inside it, and the embedded C# can
+    // use plain "user32.dll" without escaping. Earlier double-quoted
+    // version was producing \"user32.dll\" in the PS script which
+    // failed C# compilation, so every button silently no-op'd.
+    const ps = [
+      `Add-Type @'`,
+      `using System;`,
+      `using System.Runtime.InteropServices;`,
+      `public class M { [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo); }`,
+      `'@`,
+      `[M]::keybd_event(${code}, 0, 0, 0)`,
+      `Start-Sleep -Milliseconds 30`,
+      `[M]::keybd_event(${code}, 0, 2, 0)`,
+    ].join('\n');
+    return await new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true }, (err) => {
+        if (err) resolve({ ok: false, error: err.message });
+        else resolve({ ok: true });
+      });
+    });
+  });
+
+  // ── System volume watcher ─────────────────────────────────────────
+  // Persistent PowerShell that queries IAudioEndpointVolume every
+  // ~400 ms and emits { level: 0-100, muted: bool } JSON lines. The
+  // renderer subscribes via onVolumeInfoChanged to keep the media
+  // panel's gauge + mute chip in sync with the actual OS state, even
+  // when the user adjusts volume from outside the dashboard (taskbar
+  // mixer, keyboard hotkeys on another app, etc.).
+  let _volPs = null;
+  let _volLastJson = null;
+  const _VOL_CSHARP = String.raw`
+$type = @"
+using System;
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume {
+  int f1(); int f2(); int f3(); int f4(); int f5(); int f6(); int f7(); int f8(); int f9();
+  int SetMasterVolumeLevelScalar(float level, Guid context);
+  int GetMasterVolumeLevelScalar(out float level);
+  int f12(); int f13();
+  int SetMute(bool mute, Guid context);
+  int GetMute(out bool mute);
+}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice {
+  int Activate(ref Guid id, int clsCtx, int activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object aev);
+}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceEnumerator {
+  int f1();
+  int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorComObject { }
+public class AudioVolume {
+  static IAudioEndpointVolume Get() {
+    IMMDeviceEnumerator e = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+    IMMDevice dev;
+    Marshal.ThrowExceptionForHR(e.GetDefaultAudioEndpoint(0, 1, out dev));
+    Guid iid = typeof(IAudioEndpointVolume).GUID;
+    object obj;
+    Marshal.ThrowExceptionForHR(dev.Activate(ref iid, 23, 0, out obj));
+    return (IAudioEndpointVolume)obj;
+  }
+  public static float GetLevel() { float l; Get().GetMasterVolumeLevelScalar(out l); return l; }
+  public static bool GetMute() { bool m; Get().GetMute(out m); return m; }
+  public static void SetLevel(float l) { Get().SetMasterVolumeLevelScalar(l, Guid.Empty); }
+  public static void SetMute(bool m) { Get().SetMute(m, Guid.Empty); }
+}
+"@
+Add-Type -TypeDefinition $type
+`;
+  function _startVolumeWatcher() {
+    if (process.platform !== 'win32') return;
+    if (_volPs) return;
+    const script = _VOL_CSHARP + `
+while ($true) {
+  try {
+    $level = [Math]::Round([AudioVolume]::GetLevel() * 100)
+    $muted = [AudioVolume]::GetMute()
+    [Console]::Out.WriteLine('{"ok":true,"level":' + $level + ',"muted":' + $muted.ToString().ToLower() + '}')
+  } catch {
+    [Console]::Out.WriteLine('{"ok":false}')
+  }
+  [Console]::Out.Flush()
+  Start-Sleep -Milliseconds 400
+}`;
+    try {
+      _volPs = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
+      let buf = '';
+      _volPs.stdout?.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          const s = line.trim();
+          if (!s) continue;
+          _volLastJson = s;
+          try {
+            const wc = _mainWin?.webContents;
+            if (wc && !wc.isDestroyed()) wc.send('volume-info-changed', s);
+          } catch {}
+        }
+      });
+      _volPs.on('error', () => { _volPs = null; });
+      _volPs.on('exit',  () => { _volPs = null; _volLastJson = null; });
+    } catch (err) {
+      console.warn('[volume] watcher spawn failed:', err.message);
+      _volPs = null;
+    }
+  }
+  app.on('will-quit', () => { try { _volPs?.kill(); } catch {} });
+  _startVolumeWatcher();
+  ipcMain.handle('volume-info', () => _volLastJson);
+  // Set absolute master volume (0-100). Spawns a one-shot PowerShell
+  // that loads the same COM helper and calls SetLevel — the watcher
+  // then pushes the new value back to the renderer on its next tick
+  // so the gauge stays authoritative against the OS, not optimistic.
+  ipcMain.handle('volume-set', async (_e, level) => {
+    if (process.platform !== 'win32') return { ok: false, error: 'windows-only' };
+    const n = Math.max(0, Math.min(100, Number(level) || 0));
+    const ps = _VOL_CSHARP + `\n[AudioVolume]::SetLevel(${(n / 100).toFixed(4)})`;
+    return await new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true }, (err) => {
+        if (err) resolve({ ok: false, error: err.message });
+        else resolve({ ok: true });
+      });
+    });
+  });
+
   // Open an absolute path in the OS default app — used for clicking
   // images in the gallery list. Path must resolve under one of our two
   // managed roots so the renderer can't ask main to launch arbitrary files.
@@ -4848,6 +5437,73 @@ function registerIpc() {
     try {
       fs.renameSync(oldP, newP);
       return { ok: true, path: newP };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Move a file or folder into a destination directory. Source and
+  // destination must both live inside a managed root (gallery / docs /
+  // downloads / music). Cross-root moves ARE allowed — the renderer
+  // already validated the dest is one of our managed paths, and the
+  // backing store doesn't care which root the bytes end up in.
+  // Collision: if dst/<name> already exists, suffix " (2)", " (3)" etc.
+  function _uniqueDest(dir, base) {
+    let candidate = path.join(dir, base);
+    if (!fs.existsSync(candidate)) return candidate;
+    const ext = path.extname(base);
+    const stem = base.slice(0, base.length - ext.length);
+    for (let i = 2; i < 1000; i++) {
+      candidate = path.join(dir, `${stem} (${i})${ext}`);
+      if (!fs.existsSync(candidate)) return candidate;
+    }
+    throw new Error('too many collisions');
+  }
+  ipcMain.handle('explore-move', async (_e, srcAbs, destDir) => {
+    try {
+      const src = path.resolve(String(srcAbs || ''));
+      const dst = path.resolve(String(destDir || ''));
+      if (!_pathInsideManagedRoot(src)) return { ok: false, error: 'src outside managed roots' };
+      if (!_pathInsideManagedRoot(dst)) return { ok: false, error: 'dest outside managed roots' };
+      const stat = fs.statSync(src);
+      if (!fs.statSync(dst).isDirectory()) return { ok: false, error: 'dest is not a directory' };
+      // Block moving a dir into itself or into its own descendant.
+      if (stat.isDirectory() && (dst === src || dst.startsWith(src + path.sep))) {
+        return { ok: false, error: 'cannot move a folder into itself' };
+      }
+      const target = _uniqueDest(dst, path.basename(src));
+      if (target === src) return { ok: true, path: src }; // no-op
+      try {
+        fs.renameSync(src, target);
+      } catch (err) {
+        // Cross-volume rename fails with EXDEV — fall back to recursive
+        // copy + remove so cross-root moves still work.
+        if (err.code === 'EXDEV') {
+          fs.cpSync(src, target, { recursive: true });
+          fs.rmSync(src, { recursive: true, force: true });
+        } else { throw err; }
+      }
+      return { ok: true, path: target, origPath: src };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Copy a file or folder into a destination directory. Same routing /
+  // collision rules as explore-move, but the source stays in place.
+  ipcMain.handle('explore-copy', async (_e, srcAbs, destDir) => {
+    try {
+      const src = path.resolve(String(srcAbs || ''));
+      const dst = path.resolve(String(destDir || ''));
+      if (!_pathInsideManagedRoot(src)) return { ok: false, error: 'src outside managed roots' };
+      if (!_pathInsideManagedRoot(dst)) return { ok: false, error: 'dest outside managed roots' };
+      const stat = fs.statSync(src);
+      if (!fs.statSync(dst).isDirectory()) return { ok: false, error: 'dest is not a directory' };
+      if (stat.isDirectory() && (dst === src || dst.startsWith(src + path.sep))) {
+        return { ok: false, error: 'cannot copy a folder into itself' };
+      }
+      const target = _uniqueDest(dst, path.basename(src));
+      fs.cpSync(src, target, { recursive: true });
+      return { ok: true, path: target, origPath: src };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -5143,12 +5799,62 @@ $out | ConvertTo-Json -Compress
   // activity is continuous.
   let _screencapPollTimer = null;
   let _screencapLastIdle = Number.POSITIVE_INFINITY;
+  // Persistent PowerShell child that prints the current foreground-window
+  // HWND every ~200 ms. We use the most-recent value to gate snap
+  // triggers — see the poll tick below. Spawned only when the captured
+  // source is a single window; whole-screen captures don't need it.
+  let _foregroundPs = null;
+  let _foregroundHwnd = 0;
+  let _screencapTargetHwnd = 0;
+  function _stopForegroundWatcher() {
+    if (_foregroundPs) {
+      try { _foregroundPs.kill(); } catch {}
+      _foregroundPs = null;
+    }
+    _foregroundHwnd = 0;
+  }
+  function _startForegroundWatcher() {
+    _stopForegroundWatcher();
+    if (process.platform !== 'win32') return;
+    const ps = `
+$src = @'
+using System;
+using System.Runtime.InteropServices;
+public class FG { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }
+'@
+Add-Type -TypeDefinition $src
+while ($true) {
+  $h = [FG]::GetForegroundWindow().ToInt64()
+  [Console]::Out.WriteLine($h)
+  [Console]::Out.Flush()
+  Start-Sleep -Milliseconds 200
+}`.trim();
+    try {
+      _foregroundPs = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true });
+      let buf = '';
+      _foregroundPs.stdout?.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          const n = parseInt(line.trim(), 10);
+          if (Number.isFinite(n) && n > 0) _foregroundHwnd = n;
+        }
+      });
+      _foregroundPs.on('error', () => { _foregroundPs = null; });
+      _foregroundPs.on('exit', () => { _foregroundPs = null; _foregroundHwnd = 0; });
+    } catch {
+      _foregroundPs = null;
+    }
+  }
   function _stopScreencapWatcher() {
     if (_screencapPollTimer) {
       clearInterval(_screencapPollTimer);
       _screencapPollTimer = null;
     }
     _screencapLastIdle = Number.POSITIVE_INFINITY;
+    _screencapTargetHwnd = 0;
+    _stopForegroundWatcher();
   }
   // Each SNAP session writes into its own timestamped subfolder under
   // gallery/screencap/. Created on watch-start, used by screencap-save
@@ -5156,7 +5862,7 @@ $out | ConvertTo-Json -Compress
   // next SNAP toggle creates a fresh folder.
   let _screencapSessionDir = null;
 
-  ipcMain.handle('screencap-watch-start', () => {
+  ipcMain.handle('screencap-watch-start', (_e, opts) => {
     _stopScreencapWatcher();
     try {
       const d = new Date();
@@ -5168,18 +5874,37 @@ $out | ConvertTo-Json -Compress
       console.warn('[screencap] session folder failed:', err.message);
       _screencapSessionDir = null;
     }
+    // Parse the captured source id. "window:<HWND>" → gate triggers by
+    // whether that HWND is currently the OS foreground (so a click in
+    // Notepad doesn't snap a frame of the Cinema 4D window we're
+    // recording). "screen:<idx>" → snap on any input (the whole monitor
+    // is the target; no foreground gating possible without HMONITOR
+    // mapping per click).
+    const sid = String(opts?.sourceId || '');
+    if (sid.startsWith('window:')) {
+      const h = parseInt(sid.split(':')[1], 10);
+      if (Number.isFinite(h) && h > 0) {
+        _screencapTargetHwnd = h;
+        _startForegroundWatcher();
+      }
+    }
     _screencapLastIdle = powerMonitor.getSystemIdleTime();
     _screencapPollTimer = setInterval(() => {
       if (!_mainWin || _mainWin.isDestroyed()) return;
       const idle = powerMonitor.getSystemIdleTime();
-      // Idle time dropping (or staying at 0) means there was input
-      // since the last poll. Fire one trigger; renderer throttles.
-      if (idle < _screencapLastIdle || idle === 0) {
-        try { _mainWin.webContents.send('screencap-trigger'); } catch {}
-      }
+      const inputFired = (idle < _screencapLastIdle || idle === 0);
       _screencapLastIdle = idle;
+      if (!inputFired) return;
+      // Window-scoped capture: only fire if the OS foreground window
+      // matches the source we're recording. Falls open (fires anyway)
+      // when the watcher hasn't reported yet, so the first snap after
+      // a session start isn't lost waiting on PowerShell init.
+      if (_screencapTargetHwnd && _foregroundHwnd && _foregroundHwnd !== _screencapTargetHwnd) {
+        return;
+      }
+      try { _mainWin.webContents.send('screencap-trigger'); } catch {}
     }, 250);
-    return { ok: true, sessionDir: _screencapSessionDir };
+    return { ok: true, sessionDir: _screencapSessionDir, targetHwnd: _screencapTargetHwnd };
   });
   ipcMain.handle('screencap-watch-stop', () => {
     _stopScreencapWatcher();
@@ -5216,9 +5941,29 @@ $out | ConvertTo-Json -Compress
       const n = (cfg?.userName || '').toString().trim();
       if (n) prefix = n;
     } catch {}
-    // Sanitize: strip filesystem-illegal characters from the username so
-    // a name like "A/B" can't break out of the folder.
-    const safePrefix = prefix.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim() || 'USER';
+    return _nextNamedSeqName(dir, prefix, ext);
+  }
+
+  // Boil a Windows window title down to something filename-friendly. Most
+  // titles look like "App Name vX - Document - More", so we take the
+  // first segment (before " - " / em-dash / en-dash) which is usually the
+  // app/program name. Then strip filesystem-illegal characters and clamp
+  // length so a wordy title can't blow up the path. Returns '' for empty
+  // input so callers can fall back to a generic prefix.
+  function _programNameFromTitle(title) {
+    const raw = String(title || '').trim();
+    if (!raw) return '';
+    const firstSeg = raw.split(/\s+[-–—]\s+/)[0] || raw;
+    const safe = firstSeg.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
+    return safe.slice(0, 32);
+  }
+
+  // Sequence helper with an explicit prefix. Used by SNAP / REC where we
+  // want `SNAP Cinema 4D 0001.jpg` / `REC Chrome 0007.mp4` style names —
+  // a fixed leading word plus a program/source name, both followed by a
+  // shared 4-digit counter that climbs forever in the folder.
+  async function _nextNamedSeqName(dir, prefix, ext) {
+    const safePrefix = String(prefix || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim() || 'CAPTURE';
     let files = [];
     try { files = await fs.promises.readdir(dir); } catch {}
     const esc = safePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -5238,20 +5983,31 @@ $out | ConvertTo-Json -Compress
 
   // Save a JPEG (renderer sends a base64 data URL or raw base64).
   // Returns the absolute path written so the renderer can show toast.
-  ipcMain.handle('screencap-save', (_e, dataUrl) => {
+  // SNAP handler. Renderer passes (dataUrl, opts?) where opts.sourceName
+  // is the mirror source's window/screen title (e.g. "Cinema 4D R25.117
+  // - [Untitled 2] - Main"). We boil that down to a program name and
+  // build `SNAP {program} {NNNN}.jpg`. The counter climbs across all
+  // SNAP files in the dir regardless of program — easier to skim
+  // chronologically. Sessions remain bucketed by folder.
+  ipcMain.handle('screencap-save', async (_e, dataUrl, opts) => {
     try {
       const m = String(dataUrl || '').match(/^data:image\/jpe?g;base64,(.+)$/);
       const b64 = m ? m[1] : String(dataUrl || '');
       if (!b64) return { ok: false, error: 'empty' };
-      // Active session folder when SNAP is on; fall back to the root
-      // screencap/ dir if a save somehow fires outside a session (e.g.
-      // race during shutdown).
-      const dir = _screencapSessionDir || path.join(galleryFolderPath(), 'screencap');
+      // Always folderize — if no watch session is active, auto-create
+      // an ad-hoc session folder so snaps never end up loose at the
+      // gallery/screencap/ root.
+      if (!_screencapSessionDir) {
+        const d = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const adhoc = `session-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+        _screencapSessionDir = path.join(galleryFolderPath(), 'screencap', adhoc);
+      }
+      const dir = _screencapSessionDir;
       fs.mkdirSync(dir, { recursive: true });
-      const d = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const base = `screencap-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3,'0')}`;
-      const { full, name } = _uniquePath(dir, base, '.jpg');
+      const program = _programNameFromTitle(opts?.sourceName);
+      const prefix = program ? `SNAP ${program}` : 'SNAP';
+      const { full, name } = await _nextNamedSeqName(dir, prefix, '.jpg');
       fs.writeFileSync(full, Buffer.from(b64, 'base64'));
       return { ok: true, path: full, name };
     } catch (err) {
@@ -5279,6 +6035,14 @@ $out | ConvertTo-Json -Compress
       return null;
     }
   })();
+  // Hand ffmpeg + a cache dir to the thumbnails module so EXPLORE
+  // can request previews for videos / TIFF / HEIC / RAW files. The
+  // cache lives next to the proxies cache so userdata/ is self-
+  // contained (matches the portable-build pattern).
+  thumbnails.init({
+    ffmpegBin: _ffmpegBin,
+    cacheDir: path.join(portableDataDir(), 'thumb-cache'),
+  });
   async function _probeFfmpeg() {
     if (!_ffmpegBin) {
       console.warn('[ffmpeg] no binary path resolved');
@@ -5319,6 +6083,226 @@ $out | ConvertTo-Json -Compress
     return _ffmpegInfo || await _probeFfmpeg();
   });
 
+  // ── EDIT proxy cache ──────────────────────────────────────────────
+  // Long-GOP H.264/HEVC sources scrub badly through the <video> element
+  // because each seek has to decode forward from a keyframe that can
+  // be seconds away. The proxy pipeline transcodes every source touched
+  // by the EDIT room into a small short-GOP H.264 file in a cache dir.
+  // The renderer plays the proxy for scrub/preview while the EXPORT
+  // path still uses the original. Proxies are keyed by md5 of
+  // (srcPath + size + mtime) so a source edit invalidates its proxy
+  // automatically. (proxyCacheDir() is hoisted to module top-level —
+  // see the comment there for why.)
+  // Cache version — bump when the ffmpeg params change so old proxies
+  // on disk are ignored. v11 keeps v7's encoder settings (libx264
+  // ultrafast / NVENC p1 ll) that we know don't error on this source,
+  // and only changes the quality dial (CRF 23 → 18). v10's preset
+  // slow / NVENC p7 hit the same EINVAL teardown that v8/v9 did —
+  // probably an NVENC preset compatibility issue on this driver.
+  const _PROXY_VERSION = 'v11-540p-q18-v7preset';
+  function _proxyKeyFor(srcPath) {
+    try {
+      const st = fs.statSync(srcPath);
+      const crypto = require('crypto');
+      const h = crypto.createHash('md5');
+      h.update(_PROXY_VERSION);
+      h.update('|');
+      h.update(srcPath);
+      h.update('|');
+      h.update(String(st.size));
+      h.update('|');
+      h.update(String(Math.floor(st.mtimeMs)));
+      return h.digest('hex').slice(0, 24);
+    } catch { return null; }
+  }
+  function _proxyAbs(key) {
+    return path.join(proxyCacheDir(), `${key}.mp4`);
+  }
+  const _proxyState = new Map(); // srcPath -> 'generating' | 'ready' | 'failed'
+  const _proxyProc  = new Map(); // srcPath -> child process
+  async function _ensureProxy(srcPath, sender) {
+    if (!_ffmpegInfo) await _probeFfmpeg();
+    if (!_ffmpegInfo?.available) return { status: 'failed', error: 'ffmpeg unavailable' };
+    const key = _proxyKeyFor(srcPath);
+    if (!key) return { status: 'failed', error: 'cannot stat source' };
+    const out = _proxyAbs(key);
+    if (fs.existsSync(out)) {
+      _proxyState.set(srcPath, 'ready');
+      return { status: 'ready', key, rel: `${key}.mp4` };
+    }
+    if (_proxyState.get(srcPath) === 'generating') {
+      return { status: 'generating', key, rel: `${key}.mp4` };
+    }
+    // Spawn ffmpeg with SCRUB-OPTIMIZED params — these are designed to
+    // generate fast on long recordings and to seek-decode fast in the
+    // editor's <video> element, NOT to preserve source quality. The
+    // EXPORT pipeline still uses the original file, so this proxy is
+    // strictly a scrub/preview cache.
+    //
+    //   scale=-2:270   — 270p (≈480×270) is the smallest resolution
+    //                    the editor's viewer panel can still read at;
+    //                    cuts pixels-per-frame ~4× vs 540p.
+    //   fps=15         — caps framerate at 15 fps. For a 60-fps source
+    //                    that's 4× fewer frames to encode AND decode.
+    //                    Scrub doesn't care about smooth motion.
+    //   g=1            — every frame is a keyframe so any seek lands
+    //                    on one decode. The whole reason the proxy
+    //                    exists — without this the file would scrub
+    //                    no better than the source.
+    //   tune=fastdecode (libx264) — disables CABAC + loop filter; the
+    //                    file gets slightly larger but decode is much
+    //                    faster, which is the metric that matters here.
+    //   ac=1, b:a=48k  — barely-there mono audio. Lets the user hear
+    //                    they're in roughly the right region during
+    //                    scrub without a 96k stereo overhead.
+    const tmp = out + '.partial';
+    try { fs.unlinkSync(tmp); } catch {}
+    // Proxy config:
+    //   scale=-2:540        — 540p; clear enough to recognize content
+    //                         while still small enough to scrub fast.
+    //   fps=15              — caps framerate. For a 60fps source this
+    //                         is 4× fewer frames to encode and decode.
+    //   format=yuv420p      — force 8-bit 4:2:0 chroma in the FILTER
+    //                         chain (most reliable way; Chromium will
+    //                         refuse 10-bit / 4:2:2 sources otherwise).
+    //   g=1                 — every frame a keyframe; any seek lands
+    //                         on exactly one I-frame decode → instant.
+    //   crf=23 / qp=23      — libx264 "visually transparent" / NVENC
+    //                         equivalent.
+    //   +faststart          — moov atom at the head so Chromium's
+    //                         demuxer finds it on the first read.
+    //   -an                 — no audio in the proxy.
+    //   -f mp4              — explicit muxer (the `.partial` temp name
+    //                         would otherwise confuse format detection).
+    const useNvenc = _ffmpegInfo.hasNvenc;
+    const args = [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', srcPath,
+      // v7-known-working filter chain. Don't touch.
+      '-vf', 'scale=-2:540,fps=15,format=yuv420p',
+      '-an',
+    ];
+    if (useNvenc) {
+      // v7's NVENC preset (p1 / ll). Just dropping qp from 23 to 18
+      // for higher quality — the preset itself is the bit we know
+      // doesn't error on this source/driver.
+      args.push('-c:v', 'h264_nvenc', '-preset', 'p1', '-tune', 'll',
+                '-qp', '18', '-g', '1', '-profile:v', 'main');
+    } else {
+      // v7's libx264 preset (ultrafast). Just dropping CRF from 23
+      // to 18.
+      args.push('-c:v', 'libx264', '-preset', 'ultrafast',
+                '-crf', '18', '-g', '1', '-keyint_min', '1', '-sc_threshold', '0',
+                '-profile:v', 'main');
+    }
+    args.push('-movflags', '+faststart', '-f', 'mp4', tmp);
+    _proxyState.set(srcPath, 'generating');
+    const t0 = Date.now();
+    console.log('[proxy] start', { src: srcPath, encoder: useNvenc ? 'h264_nvenc' : 'libx264' });
+    const { spawn } = require('child_process');
+    const proc = spawn(_ffmpegBin, args, { windowsHide: true });
+    _proxyProc.set(srcPath, proc);
+    // Forward ffmpeg stderr to console so encode errors surface in
+    // the dev terminal — the renderer only sees pass/fail, not why.
+    let _proxyStderr = '';
+    proc.stderr?.on('data', (chunk) => {
+      const s = String(chunk);
+      _proxyStderr += s;
+      if (_proxyStderr.length > 16384) _proxyStderr = _proxyStderr.slice(-8192);
+    });
+    const emit = (payload) => { try { sender?.send?.('edit-proxy-done', payload); } catch {} };
+    proc.on('error', (err) => {
+      _proxyProc.delete(srcPath);
+      _proxyState.set(srcPath, 'failed');
+      try { fs.unlinkSync(tmp); } catch {}
+      console.warn('[proxy] error', srcPath, err.message);
+      emit({ srcPath, status: 'failed', error: err.message });
+    });
+    proc.on('exit', async (code) => {
+      _proxyProc.delete(srcPath);
+      const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);
+      if (code === 0) {
+        try { fs.renameSync(tmp, out); }
+        catch (e) {
+          _proxyState.set(srcPath, 'failed');
+          console.warn('[proxy] rename failed', srcPath, e.message);
+          emit({ srcPath, status: 'failed', error: e.message });
+          return;
+        }
+        // Sanity-check the output before declaring victory — an ffmpeg
+        // build with a missing codec can exit 0 but write a near-empty
+        // container.
+        let outSize = 0;
+        try { outSize = fs.statSync(out).size; } catch {}
+        if (outSize < 1024) {
+          try { fs.unlinkSync(out); } catch {}
+          _proxyState.set(srcPath, 'failed');
+          console.warn('[proxy] output too small', srcPath, outSize, 'bytes; stderr:', _proxyStderr.slice(-400));
+          emit({ srcPath, status: 'failed', error: `output ${outSize}b — likely encoder issue` });
+          return;
+        }
+        // Re-demux + decode 1 frame to verify the file is actually
+        // openable. Chromium's FFmpegDemuxer is strict about MP4
+        // structure; if ffmpeg itself can't reopen its own output,
+        // there's no point handing the broken file to the browser.
+        const verify = await new Promise((resolve) => {
+          execFile(_ffmpegBin,
+            ['-hide_banner', '-loglevel', 'error', '-i', out, '-frames:v', '1', '-f', 'null', '-'],
+            { windowsHide: true, maxBuffer: 256 * 1024 },
+            (err, _stdout, stderr) => resolve({ err, stderr: String(stderr || '') }));
+        });
+        if (verify.err) {
+          try { fs.unlinkSync(out); } catch {}
+          _proxyState.set(srcPath, 'failed');
+          const tail = verify.stderr.slice(-300);
+          console.warn('[proxy] verification failed', srcPath, verify.err.message, tail);
+          emit({ srcPath, status: 'failed', error: `verify failed: ${tail}` });
+          return;
+        }
+        _proxyState.set(srcPath, 'ready');
+        console.log('[proxy] ready', { src: srcPath, elapsedSec, size: outSize, out });
+        emit({ srcPath, status: 'ready', key, rel: `${key}.mp4`, elapsedSec, size: outSize });
+      } else {
+        _proxyState.set(srcPath, 'failed');
+        try { fs.unlinkSync(tmp); } catch {}
+        console.warn('[proxy] ffmpeg exit', code, 'elapsed=', elapsedSec, 'stderr:', _proxyStderr.slice(-800));
+        emit({ srcPath, status: 'failed', error: `ffmpeg exit ${code}: ${_proxyStderr.slice(-200)}` });
+      }
+    });
+    return { status: 'generating', key, rel: `${key}.mp4` };
+  }
+  ipcMain.handle('edit-proxy-ensure', async (ev, srcPath) => {
+    return _ensureProxy(srcPath, ev.sender);
+  });
+  ipcMain.handle('edit-proxy-status', async (_ev, srcPath) => {
+    const key = _proxyKeyFor(srcPath);
+    if (!key) return { status: 'none' };
+    if (fs.existsSync(_proxyAbs(key))) return { status: 'ready', key, rel: `${key}.mp4` };
+    const s = _proxyState.get(srcPath);
+    if (s === 'generating') return { status: 'generating', key, rel: `${key}.mp4` };
+    if (s === 'failed')     return { status: 'failed' };
+    return { status: 'none' };
+  });
+  // Session-scoped cleanup. Renderer calls these when a clip leaves
+  // the timeline (deleteOne) or export finishes (clearAll). Also
+  // drops the in-memory _proxyState/_proxyProc entries so the next
+  // ensure() of the same path starts fresh instead of seeing
+  // "generating" from a stale run.
+  ipcMain.handle('edit-proxy-delete-one', async (_ev, srcPath) => {
+    const proc = _proxyProc.get(srcPath);
+    if (proc) { try { proc.kill(); } catch {} _proxyProc.delete(srcPath); }
+    _proxyState.delete(srcPath);
+    const ok = proxyDeleteOne(srcPath);
+    return { ok };
+  });
+  ipcMain.handle('edit-proxy-clear-all', async () => {
+    for (const [, proc] of _proxyProc) { try { proc.kill(); } catch {} }
+    _proxyProc.clear();
+    _proxyState.clear();
+    const removed = proxyClearAll();
+    return { removed };
+  });
+
   // GPU diagnostic — surfaces Chromium's GPU-feature-status block to
   // the renderer so we can confirm hardware acceleration is on. Maps
   // to the same data chrome://gpu shows. Triggered from the renderer
@@ -5357,7 +6341,7 @@ $out | ConvertTo-Json -Compress
     const format  = (opts?.format === 'webm' || opts?.format === 'mkv' || opts?.format === 'mp4') ? opts.format : 'mp4';
     const outH    = Number(opts?.outH) > 0 ? Math.round(opts.outH) : 0; // 0 = keep source
     const bps     = Number(opts?.bitsPerSec) > 0 ? Math.round(opts.bitsPerSec) : 5_000_000;
-    const holdMs  = Math.max(33, Number(opts?.holdMs) || 1000);
+    const holdMs  = Math.max(8, Number(opts?.holdMs) || 1000);
     const useGpu  = !!opts?.useGpu;
     const codecReq = String(opts?.codec || 'h264');
     if (paths.length < 2) return { ok: false, error: 'need at least 2 input frames' };
@@ -5382,10 +6366,25 @@ $out | ConvertTo-Json -Compress
     // Output path: gallery/videos/<USER> NNNN.<ext>. Prefix uses the
     // configured userName (cfg.userName) when set, else literal "USER".
     // Counter auto-increments across runs by scanning existing files.
+    // A nameHint (e.g. the source snap-folder's name) takes precedence
+    // so a stitched session folder lands as `session-…<NN>.<ext>` next
+    // to its peers, with `-2`, `-3` … if the basename is taken.
     const dir = path.join(galleryFolderPath(), 'videos');
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     const ext = '.' + format;
-    const { full: outPath, name: outName } = await _nextUserSeqName(dir, ext);
+    let outPath, outName;
+    const hint = typeof opts?.nameHint === 'string'
+      ? opts.nameHint.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim().slice(0, 96)
+      : '';
+    if (hint) {
+      const seq = _uniquePath(dir, hint, ext);
+      outPath = seq.full;
+      outName = seq.name;
+    } else {
+      const seq = await _nextUserSeqName(dir, ext);
+      outPath = seq.full;
+      outName = seq.name;
+    }
 
     // Pick the encoder. GPU path uses h264_nvenc / hevc_nvenc; CPU path
     // uses libx264 / libx265. For WebM we always use VP9 (CPU — no
@@ -5445,7 +6444,7 @@ $out | ConvertTo-Json -Compress
       '-maxrate', String(Math.round(bps * 1.5)),
       '-bufsize', String(bps * 2),
       '-pix_fmt', 'yuv420p',
-      '-r', String(Math.max(1, Math.min(60, Math.round(1000 / holdMs)))),
+      '-r', String(Math.max(1, Math.min(120, Math.round(1000 / holdMs)))),
     ];
     if (format === 'mp4') args.push('-movflags', '+faststart');
     args.push('-progress', 'pipe:2'); // emit key=value progress on stderr
@@ -5577,6 +6576,18 @@ $out | ConvertTo-Json -Compress
     if (opts?.sepia)  filters.push('colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131');
     if (opts?.invert) filters.push('negate');
     if (opts?.denoise) filters.push('hqdn3d=1.5:1.5:6:6');
+    // Temporal-only denoise — separate option from the general
+    // `denoise` flag above so the timeline EDIT room's "DENOISE TMP"
+    // toggle can request pure temporal smoothing (spatial 0, temporal
+    // proportional to strength). hqdn3d params:
+    //   luma_spatial=0 chroma_spatial=0 luma_tmp=N chroma_tmp=N
+    // where N maps strength 0-100 → 0-18 (ffmpeg's reasonable range
+    // for temporal denoising; >18 starts producing motion ghosting).
+    if (opts?.denoiseTemporal) {
+      const s = Math.max(0, Math.min(100, Number(opts?.denoiseTemporalStrength ?? 60)));
+      const tmp = ((s / 100) * 18).toFixed(2);
+      filters.push(`hqdn3d=0:0:${tmp}:${tmp}`);
+    }
     // 4) Speed change — apply LAST so trim is consumed in real seconds.
     //    setpts adjusts video timing; atempo adjusts audio. atempo only
     //    accepts 0.5..2.0 per pass, so chain two passes for >2× / <0.5×.
@@ -5593,34 +6604,118 @@ $out | ConvertTo-Json -Compress
     if (Math.abs(aFactor - 1) > 0.005) aFilters.push(`atempo=${aFactor.toFixed(3)}`);
     if (opts?.reverse) aFilters.push('areverse');
     if (volume !== 100) aFilters.push(`volume=${(volume / 100).toFixed(3)}`);
-    // Output codec — prefer NVENC h264 for fast export, fall back to
-    // libx264 which is universally available. Tuned for SPEED here
-    // (NVENC p2/preset-fast) since the user wants exports fast; the
-    // bitrate is generous enough that quality stays good. Profile
-    // and level are pinned so the result plays in Chromium <video>.
-    let vcodec, preset;
-    if (info.hasNvenc) {
-      vcodec = 'h264_nvenc';
-      // p2 = fast NVENC preset (p1 is fastest, p7 is slowest/quality).
-      // CQ 21 ≈ near-visually-lossless at this resolution.
-      preset = ['-preset', 'p2', '-tune', 'hq', '-rc', 'vbr', '-cq', '21'];
-    } else if (info.hasQsv) {
-      vcodec = 'h264_qsv';
-      preset = ['-preset', 'veryfast'];
-    } else if (info.hasAmf) {
-      vcodec = 'h264_amf';
-      preset = ['-quality', 'speed'];
+    // ── Output-options pass (filename / format / quality / fps / height)
+    // The EDIT room's export modal sends these; legacy callers omit
+    // them and we fall back to the historical defaults (MP4 / H.264 /
+    // High quality / source FPS / source height).
+    const outputFormat  = String(opts?.outputFormat || 'mp4-h264');
+    const outputQuality = String(opts?.outputQuality || 'high');
+    const outputBitrate = Number(opts?.outputBitrate) || 0;       // Mbps
+    const outputFps     = Number(opts?.outputFps) || 0;            // 0 = keep
+    const outputHeight  = Number(opts?.outputHeight) || 0;          // 0 = keep
+    // Quality → CRF/CQ table. Lower number = higher quality. NVENC
+    // and x264/x265 share a roughly comparable scale here.
+    const Q_MAP = {
+      best:   { crf: 16, cq: 18 },
+      high:   { crf: 20, cq: 21 },
+      medium: { crf: 24, cq: 25 },
+      low:    { crf: 28, cq: 30 },
+      custom: { crf: 20, cq: 21 }, // unused — bitrate overrides
+    };
+    const Q = Q_MAP[outputQuality] || Q_MAP.high;
+    // Resolve target codec from the format key. Each branch picks the
+    // hardware encoder when available and falls back to its software
+    // equivalent. NVENC h.264 is the historical default.
+    let vcodec, preset, containerExt;
+    const wantH265 = outputFormat === 'mp4-h265' || outputFormat === 'mov-hevc';
+    const wantVp9  = outputFormat === 'webm-vp9';
+    if (wantVp9) {
+      // libvpx-vp9 has no hardware path in standard ffmpeg builds.
+      vcodec = 'libvpx-vp9';
+      preset = ['-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-crf', String(Q.crf), '-b:v', '0'];
+      containerExt = '.webm';
+    } else if (wantH265) {
+      if (info.hasNvenc) {
+        vcodec = 'hevc_nvenc';
+        preset = ['-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', String(Q.cq)];
+      } else {
+        vcodec = 'libx265';
+        preset = ['-preset', 'medium', '-crf', String(Q.crf)];
+      }
+      containerExt = outputFormat === 'mov-hevc' ? '.mov' : '.mp4';
     } else {
-      vcodec = 'libx264';
-      preset = ['-preset', 'veryfast', '-crf', '20'];
+      // Default MP4 / H.264 path.
+      if (info.hasNvenc) {
+        vcodec = 'h264_nvenc';
+        preset = ['-preset', 'p2', '-tune', 'hq', '-rc', 'vbr', '-cq', String(Q.cq)];
+      } else if (info.hasQsv) {
+        vcodec = 'h264_qsv';
+        preset = ['-preset', 'veryfast', '-global_quality', String(Q.crf)];
+      } else if (info.hasAmf) {
+        vcodec = 'h264_amf';
+        preset = ['-quality', 'speed', '-qp_i', String(Q.crf), '-qp_p', String(Q.crf)];
+      } else {
+        vcodec = 'libx264';
+        preset = ['-preset', 'veryfast', '-crf', String(Q.crf)];
+      }
+      containerExt = '.mp4';
+    }
+    // Custom bitrate — override the quality flags with VBR at the
+    // user-specified Mbps. Keep the preset (speed knob) intact.
+    if (outputQuality === 'custom' && outputBitrate > 0) {
+      const kbps = Math.round(outputBitrate * 1000);
+      // Strip any CRF/CQ-related flags the preset set so they don't
+      // fight the bitrate. We rebuild a small bitrate preset here.
+      const speedOnly = preset.filter((_, i, arr) => {
+        const prev = arr[i - 1];
+        return !['-crf','-cq','-global_quality','-qp_i','-qp_p','-b:v'].includes(prev) &&
+               !['-crf','-cq','-global_quality','-qp_i','-qp_p','-b:v'].includes(arr[i]);
+      });
+      preset = [...speedOnly, '-b:v', `${kbps}k`, '-maxrate', `${kbps * 2}k`, '-bufsize', `${kbps * 2}k`];
     }
     // Profile / level pinned to a combo Chromium's <video> always
     // accepts. NVENC default sometimes emits a level Chromium chokes
     // on; explicit -profile/-level is harmless on every backend.
-    const profileFlags = ['-profile:v', 'high', '-level', '4.1'];
+    // H.265 / VP9 don't use the H.264 profile-string; skip them.
+    const profileFlags = (wantH265 || wantVp9) ? [] : ['-profile:v', 'high', '-level', '4.1'];
+    // Resolution scaling — append AFTER the user's filter chain so it
+    // operates on the final composited frame. Uses -2 for the width to
+    // preserve aspect ratio and snap to an even pixel count (required
+    // by yuv420p).
+    if (outputHeight > 0) {
+      filters.push(`scale=-2:${outputHeight}`);
+    }
     const dir = path.join(galleryFolderPath(), 'recordings');
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-    const { full: outPath, name: outName } = await _nextUserSeqName(dir, '.mp4');
+    // Resolve output path. Custom names get sanitised + de-collided;
+    // an empty name falls back to the historical USER NNNN sequence.
+    const requestedName = String(opts?.outputName || '').trim();
+    let outPath, outName;
+    if (requestedName) {
+      // Strip any extension the user typed (we control the container
+      // ext based on FORMAT) and sanitise.
+      const sanitized = requestedName
+        .replace(/\.[^.]+$/, '')
+        .replace(/[^A-Za-z0-9 _\-]/g, '')
+        .trim()
+        .slice(0, 64);
+      if (sanitized) {
+        let base = sanitized;
+        let candidate = path.join(dir, `${base}${containerExt}`);
+        let n = 2;
+        while (fs.existsSync(candidate)) {
+          base = `${sanitized} ${n++}`;
+          candidate = path.join(dir, `${base}${containerExt}`);
+          if (n > 999) { base = ''; break; }
+        }
+        if (base) { outPath = candidate; outName = `${base}${containerExt}`; }
+      }
+    }
+    if (!outPath) {
+      const seq = await _nextUserSeqName(dir, containerExt);
+      outPath = seq.full;
+      outName = seq.name;
+    }
     // Build the input list. Each clip is either a video (trim/concat
     // straight from the file) or an image (loop the still for N
     // seconds via `-loop 1 -t N -i image.png`, with silent audio
@@ -5738,15 +6833,29 @@ $out | ConvertTo-Json -Compress
       else                 fc += `;[ca]anull[outa]`;
       args.push('-filter_complex', fc, '-map', '[outv]', '-map', '[outa]');
     }
+    // Output FPS — modal value wins if set, else fall back to the
+    // project FPS that the renderer reported (legacy callers' default
+    // is 30). Clamped to a sane editor range so accidental 999 fps
+    // requests can't produce a 100GB file.
+    const finalFps = (outputFps > 0)
+      ? Math.max(15, Math.min(120, outputFps))
+      : projFps;
     args.push(
       '-c:v', vcodec,
       ...profileFlags,
       ...preset,
       '-pix_fmt', 'yuv420p',
-      '-r', String(projFps),
+      '-r', String(finalFps),
     );
-    if (opts?.mute) args.push('-an');
-    else            args.push('-c:a', 'aac', '-b:a', '160k');
+    // Audio codec — match the container. WebM needs opus/vorbis; MP4/MOV
+    // are happy with aac. Mute strips the audio stream entirely.
+    if (opts?.mute) {
+      args.push('-an');
+    } else if (containerExt === '.webm') {
+      args.push('-c:a', 'libopus', '-b:a', '128k');
+    } else {
+      args.push('-c:a', 'aac', '-b:a', '160k');
+    }
     // -progress pipe:2 streams machine-parsable progress on stderr;
     // we sniff it and forward to the renderer for the progress bar.
     args.push('-progress', 'pipe:2');
@@ -5807,6 +6916,128 @@ $out | ConvertTo-Json -Compress
     });
   });
 
+  // ── MUSIC ROOM file ops ────────────────────────────────────────────
+  // Rename / delete / trim operations scoped to the managed music
+  // folder. Kept isolated from the EXPLORE managed-root machinery so
+  // touching the music library can't accidentally reach gallery/docs.
+  // Every handler resolves the caller's rel path against the music
+  // root and refuses anything that escapes it.
+  function _resolveMusicAbs(rel) {
+    const root = musicFolderPath();
+    const abs = path.resolve(root, String(rel || ''));
+    if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+    return abs;
+  }
+  const _musicRelOf = (abs) =>
+    path.relative(musicFolderPath(), abs).split(path.sep).join('/');
+
+  ipcMain.handle('music-rename', (_e, rel, newName) => {
+    try {
+      const abs = _resolveMusicAbs(rel);
+      if (!abs || abs === musicFolderPath()) return { ok: false, error: 'invalid path' };
+      if (!fs.existsSync(abs)) return { ok: false, error: 'file not found' };
+      const ext = path.extname(abs);
+      // Strip path separators / illegal Windows filename chars and any
+      // duplicate extension the user typed; we always re-attach the
+      // original extension so the file type can't be changed by accident.
+      let clean = String(newName || '')
+        .replace(/[\\/:*?"<>|]/g, '')
+        .trim()
+        .replace(/\.+$/, '')
+        .trim();
+      if (path.extname(clean).toLowerCase() === ext.toLowerCase()) {
+        clean = clean.slice(0, clean.length - ext.length);
+      }
+      if (!clean) return { ok: false, error: 'invalid name' };
+      const target = path.join(path.dirname(abs), clean + ext);
+      if (path.resolve(target) === abs) return { ok: true, rel: _musicRelOf(abs), name: path.basename(abs) };
+      if (fs.existsSync(target)) return { ok: false, error: 'a file with that name already exists' };
+      fs.renameSync(abs, target);
+      return { ok: true, rel: _musicRelOf(target), name: path.basename(target) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Send a music file to the OS Recycle Bin. The renderer shows the
+  // confirm dialog; this just validates + trashes (recoverable from
+  // Windows). shell.trashItem throws on a missing/locked file.
+  ipcMain.handle('music-delete', async (_e, rel) => {
+    try {
+      const abs = _resolveMusicAbs(rel);
+      if (!abs || abs === musicFolderPath()) return { ok: false, error: 'invalid path' };
+      if (!fs.existsSync(abs)) return { ok: false, error: 'file not found' };
+      await shell.trashItem(abs);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Trim a music file to [inSec, outSec) IN PLACE (overwrites the
+  // original). ffmpeg input-seek + stream copy → lossless and near
+  // instant; we write a sibling temp file first, then atomically rename
+  // it over the source so a failed/partial encode never destroys the
+  // original. -map 0:a? keeps only audio (drops embedded cover-art
+  // video streams that stream-copy can't always re-mux on a hard cut).
+  ipcMain.handle('music-trim', async (_e, opts) => {
+    try {
+      const abs = _resolveMusicAbs(opts?.rel);
+      if (!abs || !fs.existsSync(abs)) return { ok: false, error: 'file not found' };
+      const info = _ffmpegInfo || await _probeFfmpeg();
+      if (!info?.available) return { ok: false, error: 'ffmpeg not available' };
+      const inSec = Math.max(0, Number(opts?.inSec) || 0);
+      const outSec = Number(opts?.outSec);
+      if (!Number.isFinite(outSec) || outSec <= inSec + 0.05) {
+        return { ok: false, error: 'invalid trim range' };
+      }
+      const dur = outSec - inSec;
+      const ext = path.extname(abs) || '.mp3';
+      const tmp = path.join(path.dirname(abs), `.trimtmp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+      const args = [
+        '-hide_banner', '-y',
+        '-ss', inSec.toFixed(3),
+        '-i', abs,
+        '-t', dur.toFixed(3),
+        '-map', '0:a?',
+        '-c', 'copy',
+        tmp,
+      ];
+      const run = await new Promise((resolve) => {
+        const proc = spawn(info.path, args, { windowsHide: true });
+        let stderr = '';
+        proc.stderr?.on('data', (c) => {
+          stderr += c.toString('utf8');
+          if (stderr.length > 8192) stderr = stderr.slice(-8192);
+        });
+        proc.on('error', (e) => resolve({ ok: false, error: e.message }));
+        proc.on('close', (code) => resolve(code === 0
+          ? { ok: true }
+          : { ok: false, error: `ffmpeg exit ${code}: ${stderr.split('\n').slice(-4).join(' | ')}` }));
+      });
+      if (!run.ok) { try { fs.unlinkSync(tmp); } catch {} return run; }
+      let sz = 0;
+      try { sz = fs.statSync(tmp).size; } catch {}
+      if (sz < 64) { try { fs.unlinkSync(tmp); } catch {} return { ok: false, error: 'trim produced an empty file' }; }
+      // Overwrite the original. Retry once if the file is briefly locked
+      // (a renderer <audio> may still be releasing its handle).
+      try {
+        fs.renameSync(tmp, abs);
+      } catch (err) {
+        if (err.code === 'EPERM' || err.code === 'EBUSY') {
+          await new Promise((r) => setTimeout(r, 250));
+          fs.renameSync(tmp, abs);
+        } else {
+          try { fs.unlinkSync(tmp); } catch {}
+          throw err;
+        }
+      }
+      return { ok: true, rel: _musicRelOf(abs), name: path.basename(abs), size: sz, duration: dur };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   // Save a generated output to gallery/generated/<kind>/. bytes is a
   // Uint8Array (Buffer-like) handed back from the renderer; ext is the
   // file extension WITH leading dot ('.png', '.mp4', '.wav', etc.).
@@ -5852,43 +7083,382 @@ $out | ConvertTo-Json -Compress
 
   // ── SCREEN RECORD: stream MediaRecorder chunks to a temp file,
   // transcode to MP4 on stop ────────────────────────────────────────
-  // The renderer owns the MediaRecorder (it has the MediaStream).
-  // Each ondataavailable Blob gets sent here as a Uint8Array and
-  // appended to a write stream — long recordings don't blow renderer
-  // memory. Chromium emits a WebM container; on stop we run ffmpeg
-  // to remux + re-encode that into a proper H.264/AAC .mp4 (which is
-  // what gallery / external tools / share targets all expect).
-  const _screenrecs = new Map(); // id → { stream, tmpPath, name, finalPath, mime, isMp4 }
+  // LIVE-PIPE SCREEN RECORDING (OBS-style):
+  //   Renderer pumps raw I420 video frames + raw f32le interleaved PCM
+  //   straight to a long-lived ffmpeg child via two extra stdio fds
+  //   (fd 3 = video, fd 4 = audio). ffmpeg NVENC-encodes the video and
+  //   AAC-encodes the audio LIVE and writes the .mp4 with +faststart
+  //   (moov atom relocated to the front on finalize → seekable in
+  //   every Windows player). No tmp.webm, no stop-time transcode pass.
+  //   AUDIO_LEAD_S below is the static lipsync compensation.
+  const _screenrecs = new Map(); // id → { proc, vStream, aStream, finalPath, name, profileKey, targetBps, stderrTail }
   ipcMain.handle('screenrec-start', async (_e, opts) => {
     try {
-      const dir = path.join(galleryFolderPath(), 'recordings');
+      // Audio-only mode (REC ROOM "PCM" button): capture just the mixer
+      // audio and save a high-quality 320k MP3 to the MUSIC folder. No
+      // video pipeline at all.
+      const audioOnly = opts?.audioOnly === true;
+      const dir = audioOnly
+        ? musicFolderPath()
+        : path.join(galleryFolderPath(), 'recordings');
       fs.mkdirSync(dir, { recursive: true });
-      // Detect what the renderer's MediaRecorder is producing. If it's
-      // MP4 (hardware H.264) we write straight to the final .mp4 and
-      // skip the transcode on stop — saves CPU AND wall-time. If it's
-      // WebM (software VP8/VP9), we keep the existing temp-then-
-      // transcode flow.
-      const mime  = String(opts?.mime || '');
-      const isMp4 = /^video\/mp4/.test(mime);
-      const { full, name } = await _nextUserSeqName(dir, '.mp4');
-      const tmpPath = isMp4
-        ? full // write straight to the final file
-        : full.replace(/\.mp4$/i, '') + '.tmp.webm';
-      const stream = fs.createWriteStream(tmpPath);
+      const info = _ffmpegInfo || await _probeFfmpeg();
+      if (!info?.available) {
+        return { ok: false, error: 'ffmpeg unavailable — cannot record without ffmpeg-static' };
+      }
+      // Filename = REC + program (from window title) + QUALITY profile
+      // tag + FPS tag + counter. Audio-only uses a simpler AUDIO tag.
+      const program = _programNameFromTitle(opts?.sourceName);
+      const profileTag = String(opts?.profileKey || '').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'CUSTOM';
+      const fpsTag = (() => {
+        const f = Number(opts?.fps);
+        return (Number.isFinite(f) && f > 0) ? `${Math.round(f)}fps` : '30fps';
+      })();
+      const prefix = audioOnly
+        ? ['REC', program || '', 'AUDIO'].filter(Boolean).join(' ')
+        : ['REC', program || '', profileTag, fpsTag].filter(Boolean).join(' ');
+      const { full: finalPath, name } = await _nextNamedSeqName(dir, prefix, audioOnly ? '.mp3' : '.mp4');
+
+      // Stream params from the renderer.
+      const W  = Math.max(2, Math.round(Number(opts?.width)  || 1920));
+      const H  = Math.max(2, Math.round(Number(opts?.height) || 1080));
+      const fps = Math.max(1, Math.round(Number(opts?.fps) || 30));
+      const sampleRate = Math.max(8000, Math.round(Number(opts?.sampleRate) || 48000));
+      const channels   = Math.max(1, Math.min(8, Math.round(Number(opts?.channels) || 2)));
+      const hasAudio   = opts?.hasAudio !== false;
+      // PHASE A — when true the renderer's WebCodecs VideoEncoder already
+      // produced finished H.264 (annex-b) on fd 3, so ffmpeg muxes it with
+      // `-c:v copy` and does ZERO video encoding. Ignored for audioOnly.
+      const encodedInput = opts?.encodedInput === true && !audioOnly;
+      // CHUNKED RECORDING — split long records into finalized ~N-second
+      // MP4 segments so a crash/sleep only loses the in-progress chunk.
+      // The single-file +faststart path lost the ENTIRE recording when
+      // the moov atom was never written (machine slept mid-record). Each
+      // completed segment is closed + flushed to disk immediately, so it
+      // survives a crash. Default ON for video; audio-only MP3 has no
+      // moov-atom fragility so it stays single-file.
+      const chunked = opts?.chunked !== false && !audioOnly;
+      const chunkSeconds = Math.max(10, Math.round(Number(opts?.chunkSeconds) || 300));
+      // Segments live next to the joined file: "<base> part001.mp4", etc.
+      // On clean Stop they're losslessly concatenated into finalPath and
+      // KEPT (not deleted) as a crash-safe backup.
+      const segmentPattern = chunked ? finalPath.replace(/\.mp4$/i, ' part%03d.mp4') : null;
+      // Output-target appender — shared by both video input branches
+      // (legacy raw-RGBA and Phase A `-c:v copy`). Chunked → segment
+      // muxer; otherwise the legacy single +faststart MP4. Splits land on
+      // keyframes; both paths carry a 2 s GOP so chunks are within ~2 s of
+      // the target length.
+      const appendVideoOutput = (a) => {
+        if (chunked) {
+          a.push(
+            '-f', 'segment',
+            '-segment_time', String(chunkSeconds),
+            '-segment_format', 'mp4',
+            '-reset_timestamps', '1',
+            '-segment_start_number', '1',
+            segmentPattern,
+          );
+        } else {
+          a.push('-movflags', '+faststart', finalPath);
+        }
+      };
+
+      const targetBps  = Number(opts?.videoBitsPerSecond) || 5_000_000;
+      const profileKey = String(opts?.profileKey || 'custom');
+      const targetK = Math.max(500, Math.round(targetBps / 1000));
+      const maxK    = Math.round(targetK * 1.5);
+      const bufK    = Math.round(targetK * 2);
+
+      const vcodec = audioOnly ? 'mp3' : (info.hasNvenc ? 'h264_nvenc' : 'libx264');
+      const codecFlags = info.hasNvenc
+        // -preset p4 = NVENC's balanced default. Proven on this ffmpeg-static.
+        ? ['-preset', 'p4', '-b:v', `${targetK}k`, '-maxrate', `${maxK}k`, '-bufsize', `${bufK}k`]
+        : ['-preset', 'ultrafast', '-crf', String(
+            targetBps <=  6_000_000 ? 23 :
+            targetBps <= 20_000_000 ? 19 : 16
+          )];
+
+      // Audio sync compensation — shifts audio PTS EARLIER by N seconds
+      // via `-af asetpts=PTS-N/TB`. Compensates for the intrinsic
+      // content-age delay of the audio pipeline (WASAPI loopback
+      // capturing from the output buffer ~20-50ms after playback +
+      // audify worker batch buffer + ~21ms AudioWorklet quantum). The
+      // sync gate handles the *startup* alignment (both pipes' PTS 0
+      // come from the same real-time moment); this knob handles the
+      // residual content-age mismatch that the gate can't see.
+      //
+      // 0.0 → audio runs as captured (~100ms behind video).
+      // 0.1 → shifts audio earlier by 100ms — typical WASAPI loopback
+      //       compensation. Verified iteratively against talking-head.
+      // Negative values shift audio LATER (e.g. -0.05) for sources
+      // where video is the slower pipeline.
+      // The 0.50 default compensates for the RAW path's ~300ms canvas
+      // readback (drawImage + getImageData). Phase A (encodedInput) GPU-
+      // encodes the VideoFrame directly and skips that readback entirely,
+      // so it needs the much smaller pre-canvas lead (~0.17) instead —
+      // using 0.50 there would shift audio ~300ms too early.
+      const AUDIO_LEAD_S = encodedInput ? 0.17 : 0.50;
+
+      let args;
+      if (audioOnly) {
+        // Audio-only: a single f32le PCM input on fd 4 → high-quality
+        // 320k CBR MP3 (libmp3lame, the max standard MP3 bitrate). No
+        // video input/map/filter and no +faststart (MP3 has no moov
+        // atom). fd 3 is left unused. No AUDIO_LEAD shift — there's no
+        // video to lip-sync against, so the audio is written as captured.
+        args = [
+          '-hide_banner', '-y',
+          '-f', 'f32le',
+          '-ar', String(sampleRate),
+          '-ac', String(channels),
+          '-thread_queue_size', '256',
+          '-i', 'pipe:4',
+          '-c:a', 'libmp3lame', '-b:a', '320k',
+          finalPath,
+        ];
+      } else if (encodedInput) {
+        // PHASE A — pre-encoded H.264 elementary stream on fd 3. ffmpeg
+        // does NO video work: `-c:v copy` muxes the renderer's GPU-encoded
+        // annex-b access units straight into the MP4. Frame cadence is
+        // still the renderer's constant-rate emitter, so `-r fps` stamps
+        // CFR PTS exactly as the rawvideo path did and the audio sync
+        // gate / AUDIO_LEAD behaviour is unchanged. fd 4 = f32le PCM.
+        args = [
+          '-hide_banner', '-y',
+          '-f', 'h264',
+          '-framerate', String(fps),
+          '-thread_queue_size', '256',
+          '-i', 'pipe:3',
+        ];
+        if (hasAudio) {
+          args.push(
+            '-f', 'f32le',
+            '-ar', String(sampleRate),
+            '-ac', String(channels),
+            '-thread_queue_size', '256',
+            '-i', 'pipe:4',
+          );
+        }
+        args.push('-map', '0:v:0');
+        if (hasAudio) args.push('-map', '1:a:0');
+        args.push('-c:v', 'copy');
+        if (hasAudio) {
+          args.push('-c:a', 'aac', '-b:a', '160k');
+          if (AUDIO_LEAD_S !== 0) {
+            args.push('-af', `asetpts=PTS-${AUDIO_LEAD_S}/TB`);
+          }
+        }
+        appendVideoOutput(args);
+      } else {
+        args = [
+          '-hide_banner', '-y',
+          // Video input: raw RGBA from fd 3. The renderer rasterizes each
+          // VideoFrame through a 2D canvas (drawImage + getImageData)
+          // because VideoFrame.copyTo's format conversion is unreliable
+          // in this Chromium build (it no-ops cross-format requests and
+          // returns the source's native format with wrong stride metadata,
+          // producing green-fringed or stride-skewed output). Canvas
+          // raster always yields tight 4-byte RGBA in CPU memory. ffmpeg's
+          // swscaler then converts RGBA → yuv420p for NVENC.
+          '-f', 'rawvideo',
+          '-pixel_format', 'rgba',
+          '-video_size', `${W}x${H}`,
+          '-framerate', String(fps),
+          '-thread_queue_size', '256',
+          '-i', 'pipe:3',
+        ];
+        if (hasAudio) {
+          args.push(
+            // Audio input: raw f32le interleaved PCM from fd 4.
+            '-f', 'f32le',
+            '-ar', String(sampleRate),
+            '-ac', String(channels),
+            '-thread_queue_size', '256',
+            '-i', 'pipe:4',
+          );
+        }
+        // Explicit stream mapping — without this, ffmpeg's default
+        // mapping can be confused by two raw-format pipe inputs and
+        // either drop the audio stream or fail to advance one of them.
+        args.push('-map', '0:v:0');
+        if (hasAudio) args.push('-map', '1:a:0');
+        args.push(
+          '-c:v', vcodec,
+          ...codecFlags,
+          // GOP = 2 s — keeps seek granularity tight without hurting
+          // compression efficiency at our 5-40 Mbps targets.
+          '-g', String(fps * 2),
+          // Explicit pixel-format conversion chain. BGRA in → yuv420p out
+          // (what h264_nvenc wants). Leaving this implicit (via -pix_fmt
+          // alone) can produce garbled output on some ffmpeg-static builds
+          // when the input is raw BGRA from a pipe; making the swscaler
+          // step explicit in the filter chain is the proven-stable form.
+          '-vf', 'format=yuv420p,setsar=1',
+        );
+        if (hasAudio) {
+          args.push('-c:a', 'aac', '-b:a', '160k');
+          if (AUDIO_LEAD_S !== 0) {
+            args.push('-af', `asetpts=PTS-${AUDIO_LEAD_S}/TB`);
+          }
+        }
+        // Output target — single +faststart MP4, or chunked segments.
+        // +faststart re-muxes the moov atom to the FRONT at finalize so
+        // the .mp4 is scrubbable in every Windows player. The chunked
+        // path's segments carry moov-at-end (still playable) and the
+        // joined file gets +faststart applied on concat at Stop.
+        appendVideoOutput(args);
+      }
+
+      // Write a spawn-line to the diagnostic log so a quick ffmpeg
+      // failure is debuggable without DevTools. _writeDiag is fire-and-
+      // forget; on disk failure we just lose the line.
+      const _writeDiag = (line) => {
+        try {
+          const p = _recDiagPath();
+          fs.mkdirSync(path.dirname(p), { recursive: true });
+          fs.appendFileSync(p, `[${new Date().toISOString()}] ${line}\n`);
+        } catch {}
+      };
+      _writeDiag(`MAIN_FFMPEG_SPAWN ${JSON.stringify({ path: info.path, args })}`);
+
+      let proc;
+      try {
+        proc = spawn(info.path, args, {
+          // stdio: stdin ignored, stdout/stderr piped for diagnostics,
+          // fd 3 + fd 4 are extra pipes we'll write raw streams to.
+          stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+      } catch (err) {
+        _writeDiag(`MAIN_FFMPEG_SPAWN_THREW ${err?.message || String(err)}`);
+        return { ok: false, error: `ffmpeg spawn threw: ${err?.message || String(err)}` };
+      }
+
+      const vStream = audioOnly ? null : proc.stdio[3];
+      const aStream = (hasAudio || audioOnly) ? proc.stdio[4] : null;
+      // Without hasAudio, ffmpeg never opens fd 4 — but the stdio array
+      // still allocates the pipe. Close it immediately so writes from
+      // a stale renderer don't accumulate in the pipe buffer.
+      if (!hasAudio && !audioOnly) { try { proc.stdio[4]?.end?.(); } catch {} }
+      // Audio-only never reads fd 3 — close the unused video pipe so it
+      // doesn't sit open for the life of the recording.
+      if (audioOnly) { try { proc.stdio[3]?.end?.(); } catch {} }
+
+      let stderrTail = '';
+      proc.stderr?.on('data', (chunk) => {
+        stderrTail += chunk.toString('utf8');
+        if (stderrTail.length > 16384) stderrTail = stderrTail.slice(-16384);
+      });
       const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      _screenrecs.set(id, { stream, tmpPath, finalPath: full, name, mime, isMp4 });
-      return { ok: true, id, path: tmpPath, name, encoder: isMp4 ? 'hw-h264' : 'sw-vp8/9' };
+      const rec = {
+        proc, vStream, aStream, finalPath, name,
+        profileKey, targetBps, vcodec,
+        chunked, dir,
+        startedAt: Date.now(),
+        get stderrTail() { return stderrTail; },
+        exitCode: null,
+        exitSignal: null,
+      };
+      proc.on('exit', (code, signal) => {
+        rec.exitCode = code;
+        rec.exitSignal = signal;
+        // If ffmpeg dies BEFORE the renderer calls stop, write a loud
+        // line to the diag log with the tail of its stderr so the user
+        // can paste it without DevTools.
+        if (_screenrecs.has(id)) {
+          const tail = stderrTail.split('\n').slice(-12).join(' | ');
+          _writeDiag(`MAIN_FFMPEG_EXIT_EARLY ${JSON.stringify({ code, signal, stderr: tail })}`);
+        }
+      });
+      // Detached error listeners so an EPIPE/exit-during-write never
+      // crashes main. The renderer's write IPC sees `{ok:false}` and
+      // moves on; we log via the exit handler above.
+      proc.on('error', (err) => {
+        rec.spawnError = err?.message || String(err);
+        _writeDiag(`MAIN_FFMPEG_PROC_ERROR ${rec.spawnError}`);
+      });
+      vStream?.on?.('error', () => {});
+      aStream?.on?.('error', () => {});
+
+      _screenrecs.set(id, rec);
+      return {
+        ok: true, id, path: finalPath, name,
+        encoder: encodedInput ? 'webcodecs-copy' : vcodec,
+        videoSize: { width: W, height: H }, fps,
+        sampleRate, channels,
+        chunked, chunkSeconds: chunked ? chunkSeconds : 0,
+      };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   });
-  ipcMain.handle('screenrec-chunk', (_e, id, bytes) => {
-    const rec = _screenrecs.get(id);
-    if (!rec) return { ok: false, error: 'unknown recording id' };
+  // Diagnostic log — renderer appends one line per recording lifecycle
+  // event. Persisted to <gallery>/rec-diagnostic.log so the user can
+  // open or paste it after a stall. Truncated to 64 KB on each open
+  // so the file doesn't grow forever.
+  function _recDiagPath() { return path.join(galleryFolderPath(), 'rec-diagnostic.log'); }
+  ipcMain.handle('screenrec-log-diag', (_e, line) => {
     try {
-      // `bytes` arrives as a Buffer-like (Electron serializes Uint8Array
-      // and ArrayBuffer over IPC). Buffer.from handles both.
-      rec.stream.write(Buffer.from(bytes));
+      const p = _recDiagPath();
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      // Trim if huge.
+      try {
+        const st = fs.statSync(p);
+        if (st.size > 64 * 1024) {
+          const tail = fs.readFileSync(p, 'utf8').slice(-32 * 1024);
+          fs.writeFileSync(p, '... (older lines trimmed) ...\n' + tail);
+        }
+      } catch {}
+      const stamp = new Date().toISOString();
+      fs.appendFileSync(p, `[${stamp}] ${String(line || '')}\n`);
+      return { ok: true, path: p };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('screenrec-log-diag-path', () => ({ ok: true, path: _recDiagPath() }));
+
+  // Wrap whatever IPC delivered into a Node Buffer that views the
+  // underlying bytes — without reinterpretation. Critical for the
+  // audio path: `bytes` is a Float32Array, and the generic
+  // `Buffer.from(typedArray)` takes the array-like path (iterates
+  // values, stores each as a single byte). For audio samples in the
+  // [-1, 1] range that truncates EVERY sample to 0 → ffmpeg sees a
+  // stream of zero bytes → silent recording. The .buffer/.byteOffset/
+  // .byteLength path treats the TypedArray as a raw byte view of its
+  // underlying ArrayBuffer, which is what we need.
+  function _toRawByteBuffer(bytes) {
+    if (Buffer.isBuffer(bytes)) return bytes;
+    if (ArrayBuffer.isView(bytes)) return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes instanceof ArrayBuffer) return Buffer.from(bytes);
+    return Buffer.from(bytes);
+  }
+  // Raw I420 video frames from the renderer's MediaStreamTrackProcessor
+  // pump. bytes = exactly width*height*1.5 of yuv420p planar data per
+  // frame; ffmpeg reads contiguous frames off the pipe at the configured
+  // -framerate. Returns immediately — backpressure happens at the pipe
+  // level (Node's writable returns false when its internal buffer fills,
+  // but with NVENC keeping pace at ~realtime+ we expect the buffer to
+  // drain freely).
+  ipcMain.handle('screenrec-write-video', (_e, id, bytes) => {
+    const rec = _screenrecs.get(id);
+    if (!rec || !rec.vStream) return { ok: false, error: 'unknown recording id' };
+    try {
+      rec.vStream.write(_toRawByteBuffer(bytes));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Raw f32le interleaved PCM from the renderer's AudioWorklet PCM tap.
+  // Channel order = standard speakers layout (L,R,...). Sample rate +
+  // channel count were fixed at screenrec-start and must match what
+  // ffmpeg was told via `-ar` / `-ac`.
+  ipcMain.handle('screenrec-write-audio', (_e, id, bytes) => {
+    const rec = _screenrecs.get(id);
+    if (!rec || !rec.aStream) return { ok: false, error: 'audio not configured' };
+    try {
+      rec.aStream.write(_toRawByteBuffer(bytes));
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -6002,87 +7572,62 @@ while ($true) {
   });
 
   ipcMain.handle('screenrec-stop', async (_e, id) => {
-    const rec = _screenrecs.get(id);
-    if (!rec) return { ok: false, error: 'unknown recording id' };
-    _screenrecs.delete(id);
-    // Step 1 — close the temp file so anything else can read it.
-    await new Promise((r) => rec.stream.end(r));
-    // Fast path: recorder was already producing MP4 bytes (hardware
-    // H.264). The file IS the final .mp4 — no transcode needed.
-    if (rec.isMp4) {
-      let size = 0;
-      try { size = fs.statSync(rec.finalPath).size; } catch {}
-      return { ok: true, path: rec.finalPath, name: rec.name, size, encoder: 'hw-h264-mediarecorder' };
-    }
-    // Slow path: WebM → MP4 transcode (software-encoded VP8/9 input).
-    const info = _ffmpegInfo || await _probeFfmpeg();
-    const tmpPath   = rec.tmpPath;
-    const finalPath = rec.finalPath;
-    if (!info?.available) {
-      try { fs.renameSync(tmpPath, finalPath); }
-      catch (err) { return { ok: false, error: 'no ffmpeg and rename failed: ' + err.message }; }
+    try {
+      const rec = _screenrecs.get(id);
+      if (!rec) return { ok: false, error: 'unknown recording id' };
+      _screenrecs.delete(id);
+      const { proc, vStream, aStream, finalPath, name, vcodec, profileKey, targetBps } = rec;
+      // Step 1 — close both input pipes. ffmpeg sees EOF on each input,
+      // writes the +faststart-relocated moov atom + trailer, then exits.
+      try { vStream?.end?.(); } catch {}
+      try { aStream?.end?.(); } catch {}
+      // Step 2 — wait for ffmpeg to finish, or 60s, whichever comes
+      // first. +faststart re-mux on a long recording can take several
+      // seconds. The proc might have already exited before stop was
+      // called (early failure) — check rec.exitCode for that case.
+      const exit = await new Promise((resolve) => {
+        let done = false;
+        const finish = (code, signal) => {
+          if (done) return;
+          done = true;
+          try { clearTimeout(watchdog); } catch {}
+          resolve({ code, signal });
+        };
+        const watchdog = setTimeout(() => {
+          if (done) return;
+          try { proc.kill('SIGKILL'); } catch {}
+          finish(-1, 'TIMEOUT');
+        }, 60_000);
+        try { proc.once('exit', (code, signal) => finish(code, signal)); } catch {}
+        if (rec.exitCode != null) finish(rec.exitCode, rec.exitSignal);
+      });
+      const tail = (rec.stderrTail || '').split('\n').slice(-8).join(' | ');
       let size = 0;
       try { size = fs.statSync(finalPath).size; } catch {}
-      return { ok: true, path: finalPath, name: rec.name, size, encoder: 'webm-passthrough' };
-    }
-    const vcodec = info.hasNvenc ? 'h264_nvenc' : 'libx264';
-    // Pin to High profile + Level 4.1 — broadest Chromium <video>
-    // compatibility. NVENC's default ("High" profile) sometimes
-    // emits a Level Chromium chokes on; libx264 defaults to High@auto
-    // which is fine but be explicit anyway.
-    const profileFlags = ['-profile:v', 'high', '-level', '4.1'];
-    const preset = info.hasNvenc
-      ? ['-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '23']
-      : ['-preset', 'medium', '-crf', '20'];
-    const args = [
-      '-hide_banner', '-y',
-      '-i', tmpPath,
-      // Re-encode video to H.264 yuv420p so it's universally playable.
-      '-c:v', vcodec,
-      ...profileFlags,
-      ...preset,
-      '-pix_fmt', 'yuv420p',
-      // Re-encode audio to AAC; if the WebM had no audio, ffmpeg
-      // silently drops the missing stream rather than erroring.
-      '-c:a', 'aac', '-b:a', '160k',
-      '-movflags', '+faststart',
-      finalPath,
-    ];
-    const result = await new Promise((resolve) => {
-      const proc = spawn(info.path, args, { windowsHide: true });
-      let stderr = '';
-      proc.stderr?.on('data', (chunk) => {
-        stderr += chunk.toString('utf8');
-        if (stderr.length > 16384) stderr = stderr.slice(-16384);
-      });
-      proc.on('error', (err) => resolve({ ok: false, error: err.message }));
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          resolve({ ok: false, error: `ffmpeg exit ${code}: ${stderr.split('\n').slice(-6).join(' | ')}` });
-          return;
+      if (exit.code !== 0) {
+        // ffmpeg failed during the run. A 0-byte / tiny file is just
+        // garbage — drop it. If something was written, surface a
+        // warning so the user knows it may be partial.
+        if (size < 16 * 1024) {
+          try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch {}
+          return { ok: false, error: `ffmpeg exit ${exit.code}${exit.signal ? ' ('+exit.signal+')' : ''}: ${tail}` };
         }
-        let size = 0;
-        try { size = fs.statSync(finalPath).size; } catch {}
-        resolve({ ok: true, path: finalPath, name: rec.name, size, encoder: vcodec });
-      });
-    });
-    if (result.ok) {
-      // Transcode succeeded — drop the temp WebM.
-      try { fs.unlinkSync(tmpPath); } catch {}
-    } else {
-      // Failed — keep the temp as a fallback so the user doesn't lose
-      // the recording entirely. Rename it to the final path so it
-      // shows up in the captures list.
-      try {
-        if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
-        fs.renameSync(tmpPath, finalPath);
-        let size = 0; try { size = fs.statSync(finalPath).size; } catch {}
-        return { ok: true, path: finalPath, name: rec.name, size, encoder: 'webm-fallback', warning: result.error };
-      } catch (err) {
-        return { ok: false, error: result.error };
+        return {
+          ok: true, path: finalPath, name, size,
+          encoder: vcodec, profile: profileKey, targetBps,
+          warning: `ffmpeg exited ${exit.code} — file may be partial. stderr: ${tail}`,
+        };
       }
+      return {
+        ok: true, path: finalPath, name, size,
+        encoder: vcodec, profile: profileKey, targetBps,
+      };
+    } catch (err) {
+      // Last-ditch — never let stop crash main. The recording slot has
+      // already been deleted at this point, so subsequent stop calls
+      // would return 'unknown id'.
+      return { ok: false, error: `screenrec-stop threw: ${err?.message || String(err)}` };
     }
-    return result;
   });
 
   ipcMain.handle('youtube-set-opacity', (_e, opacity) => {
@@ -6102,7 +7647,13 @@ while ($true) {
   };
   ipcMain.handle('yt:search',         ytHandler('results', (q, o) => yt.search(q, o || {})));
   ipcMain.handle('yt:search-general', ytHandler('results', (q, o) => yt.searchGeneral(q, o || {})));
+  ipcMain.handle('yt:browse-trending',ytHandler('results', (o) => yt.browseTrending(o || {})));
   ipcMain.handle('yt:get-stream',     ytHandler('stream',  (u) => yt.getStreamUrl(u)));
+  // High-quality MSE path — returns matched video-only + audio-only
+  // URLs the renderer can stitch via MediaSource. Falls back to a
+  // combined URL inside the response when separate streams aren't
+  // available for the video.
+  ipcMain.handle('yt:get-streams',    ytHandler('streams', (u, o) => yt.getSeparateStreams(u, o || {})));
   ipcMain.handle('yt:get-metadata',   ytHandler('meta',    (u) => yt.getMetadata(u)));
 
   // yt:get-audio-stream — audio-only stream URL for the browser's
@@ -6362,6 +7913,68 @@ while ($true) {
     return next;
   });
 
+  // ── MAIL · read-only IMAP client ─────────────────────────────────
+  // All errors stringify back to the renderer as { ok:false, error } so
+  // a flaky network or wrong password doesn't crash the main process.
+  // Status pushes (`mail:status`) let the renderer mark connecting /
+  // connected / disconnected without polling.
+  mailService.init({
+    dataDir: portableDataDir(),
+    onStatus: (s) => {
+      if (_mainWin && !_mainWin.isDestroyed()) {
+        try { _mainWin.webContents.send('mail:status', s); } catch {}
+      }
+    },
+  });
+  const _mailWrap = (fn) => async (_e, ...args) => {
+    try { return { ok: true, ...(await fn(...args)) }; }
+    catch (err) {
+      // ImapFlow swallows the actual server response in err.message
+      // ("Command failed") and stashes the useful text on
+      // err.responseText. Surface that to the UI so the user sees
+      // "Application-specific password required" / "Invalid
+      // credentials" instead of a generic "Command failed".
+      const detail = err && err.responseText ? `${err.message}: ${err.responseText}` : (err && err.message) || String(err);
+      return { ok: false, error: detail };
+    }
+  };
+  ipcMain.handle('mail:has-creds',    _mailWrap(async ()       => ({ hasCreds: mailService.hasCreds() })));
+  ipcMain.handle('mail:get-creds',    _mailWrap(async ()       => ({ creds:    mailService.getCredsInfo() })));
+  ipcMain.handle('mail:save-creds',   _mailWrap(async (creds)  => ({ creds:    mailService.saveCreds(creds || {}) })));
+  ipcMain.handle('mail:clear-creds',  _mailWrap(async ()       => { mailService.clearCreds(); await mailService.disconnect(); return {}; }));
+  ipcMain.handle('mail:connect',      _mailWrap(async ()       => await mailService.connect()));
+  ipcMain.handle('mail:disconnect',   _mailWrap(async ()       => { await mailService.disconnect(); return {}; }));
+  ipcMain.handle('mail:list-inbox',   _mailWrap(async (opts)   => await mailService.listInbox(opts || {})));
+  ipcMain.handle('mail:get-message',  _mailWrap(async (uid)    => ({ message: await mailService.getMessage(uid) })));
+  ipcMain.handle('mail:send',         _mailWrap(async (msg)    => await mailService.sendMessage(msg || {})));
+
+  // Contacts — independent service, namespaced under mail:contacts:*
+  // so the renderer side keeps everything mail-related under one bridge.
+  contactsService.init({ dataDir: portableDataDir() });
+  ipcMain.handle('mail:contacts:list',   _mailWrap(async ()        => ({ contacts: contactsService.list() })));
+  ipcMain.handle('mail:contacts:add',    _mailWrap(async (c)       => ({ contact:  contactsService.add(c || {}) })));
+  ipcMain.handle('mail:contacts:update', _mailWrap(async (id, p)   => ({ contact:  contactsService.update(id, p || {}) })));
+  ipcMain.handle('mail:contacts:remove', _mailWrap(async (id)      => contactsService.remove(id)));
+
+  // Google OAuth + People API — used by the mail room's "Import from
+  // Google" action. Generic enough that future Calendar/Drive surfaces
+  // can reuse the same oauth module.
+  googleOauth.init({ dataDir: portableDataDir() });
+  ipcMain.handle('mail:google:status',           _mailWrap(async ()    => ({
+    hasSetup:     googleOauth.hasSetup(),
+    isAuthorized: googleOauth.isAuthorized(),
+    info:         googleOauth.getSetupInfo(),
+  })));
+  ipcMain.handle('mail:google:setup',            _mailWrap(async (c)   => ({ info: googleOauth.setup(c || {}) })));
+  ipcMain.handle('mail:google:clear-setup',      _mailWrap(async ()    => { googleOauth.clearSetup(); return {}; }));
+  ipcMain.handle('mail:google:authorize',        _mailWrap(async ()    => await googleOauth.authorize({ scopes: [googlePeople.SCOPE] })));
+  ipcMain.handle('mail:google:disconnect',       _mailWrap(async ()    => { googleOauth.disconnect(); return {}; }));
+  ipcMain.handle('mail:google:import-contacts',  _mailWrap(async ()    => {
+    const incoming = await googlePeople.listContacts();
+    const merged   = contactsService.bulkMerge(incoming);
+    return { ...merged, contacts: contactsService.list() };
+  }));
+
 }
 
 // ─── DISK I/O ──────────────────────────────────────────────────────
@@ -6483,7 +8096,7 @@ function startHttpServer() {
   async function handleApi(route, req) {
     if (route === '/api/system-info'      && req.method === 'GET') return getSystemInfo();
     if (route === '/api/storage-info'     && req.method === 'GET') return await getStorageInfo();
-    if (route === '/api/temps-info'       && req.method === 'GET') return await getTempsInfo();
+    if (route === '/api/temps-info'       && req.method === 'GET') return await getTempsInfoCached();
     if (route === '/api/net-info'         && req.method === 'GET') return await getNetInfo();
     if (route === '/api/disk-info'        && req.method === 'GET') return await getDiskIo();
     if (route === '/api/screen-sources'   && req.method === 'GET') return await getScreenSources();
@@ -6593,6 +8206,60 @@ function portableDataDir() {
   return app.getPath('userData');
 }
 
+// Proxy cache dir is hoisted to module top-level because the
+// dash3d-file:// protocol handler (registered inside app.whenReady)
+// resolves the 'proxy' hostname through this function. Previously
+// proxyCacheDir was scoped inside registerIpc() and threw
+// ReferenceError on every proxy URL fetch — the catch in the
+// protocol handler swallowed it as "bad url" (HTTP 400), which is
+// why the EDIT viewer's <video> got `DEMUXER_ERROR_COULD_NOT_OPEN`
+// the first time the renderer tried to load a freshly-generated
+// proxy. The file on disk was fine; the route was returning 400.
+function proxyCacheDir() {
+  const dir = path.join(portableDataDir(), 'proxies');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return dir;
+}
+
+// Session-scoped cache hygiene. The EDIT room's project state isn't
+// persisted, so neither should the proxies be — they're a derived
+// cache of "what's currently on the timeline" and nothing more.
+//   • app launch → proxyClearAll() (in app.whenReady)
+//   • clip removed + no other clip points at that source → proxyDeleteOne
+//   • export succeeds → proxyClearAll() again
+// proxyDeleteOne resolves the same hash key as _proxyKeyFor so the
+// renderer only needs to send srcPath, never the hashed filename.
+function proxyClearAll() {
+  const dir = proxyCacheDir();
+  let removed = 0;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      // Skip subdirs; only sweep files we own (.mp4 + .partial leftovers).
+      if (!/\.(mp4|partial)$/i.test(name)) continue;
+      try { fs.unlinkSync(path.join(dir, name)); removed++; } catch {}
+    }
+  } catch {}
+  if (removed) console.log('[proxy] cleared', removed, 'cached file(s) from', dir);
+  return removed;
+}
+function proxyDeleteOne(srcPath) {
+  try {
+    const st = fs.statSync(srcPath);
+    const crypto = require('crypto');
+    const h = crypto.createHash('md5');
+    // Must match _proxyKeyFor exactly. The version constant is
+    // duplicated here for now — keeping it small enough to inline.
+    h.update('v11-540p-q18-v7preset');
+    h.update('|'); h.update(srcPath);
+    h.update('|'); h.update(String(st.size));
+    h.update('|'); h.update(String(Math.floor(st.mtimeMs)));
+    const key = h.digest('hex').slice(0, 24);
+    const file = path.join(proxyCacheDir(), `${key}.mp4`);
+    fs.unlinkSync(file);
+    return true;
+  } catch { return false; }
+}
+
 function configFilePath() {
   return path.join(portableDataDir(), 'config.json');
 }
@@ -6643,6 +8310,43 @@ async function writeConfig(partial) {
 // Multi-source fallback chain: systeminformation → nvidia-smi → LHM/OHM
 // WMI namespace. Each later source fills in fields the earlier ones
 // missed.
+
+// ── Temps cache ─────────────────────────────────────────────────────
+// getTempsInfo is expensive: it can chain si.graphics() (WMI/COM,
+// ~50–200 ms) + nvidia-smi.exe (process spawn, ~50–500 ms). Without
+// caching, polling at 10 Hz would saturate a CPU core just on
+// process-creation overhead.
+//
+// Lazy invalidation: under TTL we return the last value with zero
+// work. Concurrent calls during a refresh share the same in-flight
+// promise — important because the renderer's refreshTemps loop and
+// the HTTP /api/temps-info route can both arrive at once on a multi-
+// client setup (browser tab + Electron window) and they'd otherwise
+// trigger parallel nvidia-smi spawns.
+//
+// Cost when idle: zero. Cost under load: at most one underlying
+// refresh per TTL window regardless of caller count.
+const TEMPS_CACHE_TTL_MS = 1500;
+let _tempsCache    = { ts: 0, data: null };
+let _tempsInflight = null;
+async function getTempsInfoCached() {
+  const now = Date.now();
+  if (_tempsCache.data && now - _tempsCache.ts < TEMPS_CACHE_TTL_MS) {
+    return _tempsCache.data;
+  }
+  // Coalesce concurrent refreshers onto a single in-flight promise.
+  if (_tempsInflight) return _tempsInflight;
+  _tempsInflight = (async () => {
+    try {
+      const fresh = await getTempsInfo();
+      _tempsCache = { ts: Date.now(), data: fresh };
+      return fresh;
+    } finally {
+      _tempsInflight = null;
+    }
+  })();
+  return _tempsInflight;
+}
 
 async function getTempsInfo() {
   const result = { cpu: null, cpuPower: null, gpus: [], sources: [] };

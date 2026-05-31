@@ -40,6 +40,19 @@ let view = 'library';          // 'library' | 'playlists' | 'playlist' | 'add'
 let openPlaylistId = null;     // which playlist 'playlist'/'add' views target
 let _creatingPlaylist = false; // inline "new playlist" input is showing
 let _renamingId = null;        // playlist id whose name is being edited
+let _renamingTrackRel = null;  // library track rel being renamed inline
+
+// ── Trim modal state ────────────────────────────────────────────────
+let _trimEls = null;           // resolved DOM refs (null if markup absent)
+let _trimAudio = null;         // dedicated <audio> for the modal preview
+let _trimRel = null;           // track being trimmed
+let _trimDur = 0;              // full source duration (s)
+let _trimIn = 0;
+let _trimOut = 0;
+let _trimPreviewing = false;   // PREVIEW playing the selection only
+let _trimSeeking = false;      // user is dragging the scrub bar
+let _trimRaf = 0;
+let _trimBusy = false;         // ffmpeg trim in flight
 
 window._bgmState = window._bgmState || { playing: false, genre: '', volume: 0.5 };
 
@@ -243,10 +256,19 @@ function trackRow(rel, opts = {}) {
     : opts.addToggle
       ? `<button type="button" class="bgm-item-x bgm-item-add${opts.inPlaylist ? ' is-in' : ''}" data-act="toggle-track" data-rel="${esc(rel)}" title="${opts.inPlaylist ? 'Remove from playlist' : 'Add to playlist'}">${opts.inPlaylist ? '✓' : '+'}</button>`
       : '';
+  // Library rows get a hover cluster: rename, trim, delete.
+  const libActions = opts.libActions
+    ? `<span class="bgm-row-actions">`
+      + `<button type="button" class="bgm-item-x" data-act="rename-track" data-rel="${esc(rel)}" title="Rename">✎</button>`
+      + `<button type="button" class="bgm-item-x" data-act="trim-track" data-rel="${esc(rel)}" title="Trim">✂</button>`
+      + `<button type="button" class="bgm-item-x bgm-act-del" data-act="del-track" data-rel="${esc(rel)}" title="Delete (Recycle Bin)">✕</button>`
+      + `</span>`
+    : '';
   return `<div class="${cls}" data-act="${esc(opts.act || 'play')}" data-rel="${esc(rel)}">`
        + `<span class="bgm-item-eq">${playing ? '▶' : ''}</span>`
        + `<span class="bgm-item-name">${esc(trackName(rel))}</span>`
        + btn
+       + libActions
        + `</div>`;
 }
 function renderLibrary() {
@@ -256,7 +278,14 @@ function renderLibrary() {
          + ` or use <b>BROWSE</b>.</div>`;
   }
   return `<div class="bgm-list-head">LIBRARY · ${library.length} TRACK${library.length === 1 ? '' : 'S'}</div>`
-       + library.map((t) => trackRow(t.rel)).join('');
+       + library.map((t) => (
+           _renamingTrackRel === t.rel
+             ? `<div class="bgm-item bgm-item-input">`
+               + `<span class="bgm-item-eq">✎</span>`
+               + `<input type="text" class="bgm-inline-input" data-rename-track="${esc(t.rel)}" value="${esc(trackName(t.rel))}" maxlength="120">`
+               + `</div>`
+             : trackRow(t.rel, { libActions: true })
+         )).join('');
 }
 function renderPlaylists() {
   let html = '';
@@ -387,6 +416,17 @@ function onListClick(e) {
       }
       break;
     }
+    case 'rename-track':
+      _renamingTrackRel = rel;
+      renderList();
+      bgmListEl.querySelector(`[data-rename-track="${CSS.escape(rel)}"]`)?.focus();
+      break;
+    case 'trim-track':
+      _openTrim(rel);
+      break;
+    case 'del-track':
+      _deleteTrack(rel);
+      break;
     default: break;
   }
 }
@@ -394,6 +434,7 @@ function onListKeydown(e) {
   const input = e.target.closest('.bgm-inline-input');
   if (!input) return;
   if (e.key === 'Enter') {
+    if (input.dataset.renameTrack) { _commitTrackRename(input.dataset.renameTrack, input.value); return; }
     const name = input.value.trim();
     const renameId = input.dataset.rename;
     if (renameId) {
@@ -412,8 +453,230 @@ function onListKeydown(e) {
   } else if (e.key === 'Escape') {
     _creatingPlaylist = false;
     _renamingId = null;
+    _renamingTrackRel = null;
     renderList();
   }
+}
+
+// ── Library file ops (rename / delete) ──────────────────────────────
+async function _commitTrackRename(rel, raw) {
+  const name = String(raw || '').trim();
+  _renamingTrackRel = null;
+  if (!name || name === trackName(rel)) { renderList(); return; }
+  let res = null;
+  try { res = await window.dash?.musicRename?.(rel, name); }
+  catch (err) { res = { ok: false, error: err?.message }; }
+  if (!res?.ok) {
+    renderList();
+    window.alert('Rename failed: ' + (res?.error || 'unknown error'));
+    return;
+  }
+  // Follow the file in playback state so the rename doesn't desync.
+  if (curRel === rel) { curRel = res.rel; window._bgmState.genre = trackName(res.rel); updateNow(); }
+  const qi = queue.indexOf(rel);
+  if (qi >= 0) queue[qi] = res.rel;
+  await scanLibrary();
+  renderList();
+}
+
+async function _deleteTrack(rel) {
+  const ok = window.confirm(`Delete "${trackName(rel)}"?\nIt will be moved to the Recycle Bin.`);
+  if (!ok) return;
+  // Release the playing handle first so the OS can move the file.
+  if (curRel === rel) {
+    stopPlayback();
+    if (audioEl) { try { audioEl.removeAttribute('src'); audioEl.load(); } catch {} }
+  }
+  let res = null;
+  try { res = await window.dash?.musicDelete?.(rel); }
+  catch (err) { res = { ok: false, error: err?.message }; }
+  if (!res?.ok) {
+    window.alert('Delete failed: ' + (res?.error || 'unknown error'));
+    return;
+  }
+  queue = queue.filter((r) => r !== rel);
+  let plChanged = false;
+  for (const p of playlists) {
+    const before = p.tracks.length;
+    p.tracks = p.tracks.filter((r) => r !== rel);
+    if (p.tracks.length !== before) plChanged = true;
+  }
+  if (plChanged) savePlaylists();
+  await scanLibrary();
+  renderList();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TRIM MODAL — scrub to set IN/OUT on a dedicated <audio>, PREVIEW the
+// selection, then SAVE overwrites the source file in place via the
+// music-trim IPC (lossless stream-copy in main). All refs resolved in
+// init(); _openTrim/_closeTrim manage visibility + the preview element.
+// ════════════════════════════════════════════════════════════════════
+function _fmtT(s) {
+  s = Math.max(0, Number(s) || 0);
+  const m = Math.floor(s / 60);
+  return `${m}:${(s - m * 60).toFixed(1).padStart(4, '0')}`;
+}
+function _trimSetSaveEnabled(on) { if (_trimEls?.save) _trimEls.save.disabled = !on; }
+function _trimSetPlayIcon(playing) { if (_trimEls?.play) _trimEls.play.textContent = playing ? '❚❚' : '▶'; }
+function _setTrimStatus(msg, kind) {
+  if (!_trimEls) return;
+  _trimEls.status.hidden = !msg;
+  _trimEls.status.textContent = msg || '';
+  _trimEls.status.className = 'bgm-trim-status' + (kind ? ' is-' + kind : '');
+}
+function _trimUpdatePlayhead() {
+  if (!_trimEls || !_trimAudio) return;
+  const d = _trimDur || 1;
+  const t = Math.min(_trimDur, Math.max(0, _trimAudio.currentTime || 0));
+  if (!_trimSeeking) _trimEls.seek.value = String(Math.round((t / d) * 1000));
+  _trimEls.pos.textContent = _fmtT(t);
+}
+function _trimTick() {
+  if (!_trimAudio) { _trimRaf = 0; return; }
+  if (_trimPreviewing && _trimAudio.currentTime >= _trimOut) {
+    _trimAudio.pause();
+    _trimPreviewing = false;
+  }
+  _trimUpdatePlayhead();
+  _trimRaf = _trimAudio.paused ? 0 : requestAnimationFrame(_trimTick);
+}
+function _trimUpdate() {
+  if (!_trimEls) return;
+  const d = _trimDur || 0;
+  _trimIn = Math.max(0, Math.min(_trimIn, d));
+  _trimOut = Math.max(0, Math.min(_trimOut || d, d));
+  if (_trimOut < _trimIn) { const x = _trimIn; _trimIn = _trimOut; _trimOut = x; }
+  _trimEls.in.textContent = _fmtT(_trimIn);
+  _trimEls.out.textContent = _fmtT(_trimOut);
+  const newLen = Math.max(0, _trimOut - _trimIn);
+  _trimEls.newlen.textContent = _fmtT(newLen);
+  const inFrac = d > 0 ? _trimIn / d : 0;
+  const outFrac = d > 0 ? _trimOut / d : 1;
+  _trimEls.bar.style.setProperty('--in', inFrac.toFixed(4));
+  _trimEls.bar.style.setProperty('--out', outFrac.toFixed(4));
+  // Valid only when there's a real cut to make (not the whole file).
+  const valid = d > 0 && newLen > 0.05 && !(inFrac <= 0.001 && outFrac >= 0.999);
+  _trimSetSaveEnabled(valid && !_trimBusy);
+  _trimUpdatePlayhead();
+}
+function _openTrim(rel) {
+  if (!_trimEls || !rel) return;
+  _trimRel = rel;
+  // Pause library playback so we don't double up audio.
+  if (audioEl && !audioEl.paused) audioEl.pause();
+  if (!_trimAudio) {
+    _trimAudio = new Audio();
+    _trimAudio.preload = 'metadata';
+    _trimAudio.addEventListener('loadedmetadata', () => {
+      _trimDur = Number.isFinite(_trimAudio.duration) ? _trimAudio.duration : 0;
+      _trimIn = 0; _trimOut = _trimDur;
+      _trimEls.dur.textContent = _fmtT(_trimDur);
+      _trimUpdate();
+    });
+    _trimAudio.addEventListener('play',  () => { _trimSetPlayIcon(true); if (!_trimRaf) _trimRaf = requestAnimationFrame(_trimTick); });
+    _trimAudio.addEventListener('pause', () => { _trimSetPlayIcon(false); _trimPreviewing = false; });
+    _trimAudio.addEventListener('ended', () => { _trimSetPlayIcon(false); _trimPreviewing = false; });
+  }
+  _trimPreviewing = false;
+  _trimBusy = false;
+  _trimDur = 0; _trimIn = 0; _trimOut = 0;
+  _trimEls.name.textContent = trackName(rel);
+  _trimEls.dur.textContent = '0:00.0';
+  _trimEls.seek.value = '0';
+  _setTrimStatus('', null);
+  _trimSetSaveEnabled(false);
+  _trimSetPlayIcon(false);
+  _trimAudio.src = relToUrl(rel);
+  try { _trimAudio.currentTime = 0; } catch {}
+  _trimEls.root.hidden = false;
+  _trimUpdate();
+}
+function _closeTrim() {
+  if (_trimRaf) { cancelAnimationFrame(_trimRaf); _trimRaf = 0; }
+  if (_trimAudio) { try { _trimAudio.pause(); _trimAudio.removeAttribute('src'); _trimAudio.load(); } catch {} }
+  _trimPreviewing = false;
+  _trimRel = null;
+  if (_trimEls) _trimEls.root.hidden = true;
+}
+async function _saveTrim() {
+  if (_trimBusy || !_trimRel) return;
+  const rel = _trimRel;
+  const inSec = _trimIn, outSec = _trimOut;
+  if (!(outSec > inSec + 0.05)) return;
+  _trimBusy = true;
+  _trimSetSaveEnabled(false);
+  _setTrimStatus('TRIMMING…', 'busy');
+  // Release every handle on the file before main overwrites it.
+  if (_trimAudio) { try { _trimAudio.pause(); _trimAudio.removeAttribute('src'); _trimAudio.load(); } catch {} }
+  const wasLoaded = (curRel === rel);
+  const wasPlaying = wasLoaded && !!window._bgmState.playing;
+  if (wasLoaded) {
+    stopPlayback();
+    if (audioEl) { try { audioEl.removeAttribute('src'); audioEl.load(); } catch {} }
+  }
+  let res = null;
+  try { res = await window.dash?.musicTrim?.({ rel, inSec, outSec }); }
+  catch (err) { res = { ok: false, error: err?.message }; }
+  if (!res?.ok) {
+    _trimBusy = false;
+    _setTrimStatus('FAILED · ' + (res?.error || 'unknown error'), 'error');
+    if (_trimAudio) { _trimAudio.src = relToUrl(rel); }   // rebind for retry
+    _trimUpdate();
+    return;
+  }
+  await scanLibrary();
+  if (wasPlaying) {
+    const idx = library.findIndex((t) => t.rel === rel);
+    if (idx >= 0) playQueue(library.map((t) => t.rel), idx);
+  }
+  renderList();
+  _trimBusy = false;
+  _closeTrim();
+}
+function _wireTrim() {
+  if (!_trimEls) return;
+  _trimEls.seek.addEventListener('input', () => {
+    _trimSeeking = true;
+    const d = _trimDur || 0;
+    const t = ((parseInt(_trimEls.seek.value, 10) || 0) / 1000) * d;
+    if (_trimAudio) { try { _trimAudio.currentTime = t; } catch {} }
+    _trimEls.pos.textContent = _fmtT(t);
+  });
+  _trimEls.seek.addEventListener('change', () => { _trimSeeking = false; });
+  _trimEls.play.addEventListener('click', () => {
+    _deps?.playSfx?.('click');
+    if (!_trimAudio) return;
+    _trimPreviewing = false;
+    if (_trimAudio.paused) _trimAudio.play()?.catch?.(() => {});
+    else _trimAudio.pause();
+  });
+  _trimEls.preview.addEventListener('click', () => {
+    _deps?.playSfx?.('click');
+    if (!_trimAudio || _trimDur <= 0) return;
+    try { _trimAudio.currentTime = _trimIn; } catch {}
+    _trimPreviewing = true;
+    _trimAudio.play()?.catch?.(() => {});
+  });
+  _trimEls.setIn.addEventListener('click', () => {
+    _deps?.playSfx?.('click');
+    if (_trimAudio) _trimIn = _trimAudio.currentTime;
+    if (_trimIn > _trimOut) _trimOut = _trimDur;
+    _trimUpdate();
+  });
+  _trimEls.setOut.addEventListener('click', () => {
+    _deps?.playSfx?.('click');
+    if (_trimAudio) _trimOut = _trimAudio.currentTime;
+    if (_trimOut < _trimIn) _trimIn = 0;
+    _trimUpdate();
+  });
+  _trimEls.cancel.addEventListener('click', () => { _deps?.playSfx?.('click'); _closeTrim(); });
+  _trimEls.save.addEventListener('click', () => { _deps?.playSfx?.('click'); _saveTrim(); });
+  // Backdrop click (outside the card) closes; Escape closes too.
+  _trimEls.root.addEventListener('click', (e) => { if (e.target === _trimEls.root) _closeTrim(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && _trimEls && !_trimEls.root.hidden && !_trimBusy) _closeTrim();
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -645,11 +908,49 @@ export async function init(deps) {
   bgmListEl?.addEventListener('click', onListClick);
   bgmListEl?.addEventListener('keydown', onListKeydown);
 
+  // Trim modal — resolve refs + wire once. Absent markup → feature off.
+  const trimRoot = document.getElementById('bgm-trim');
+  if (trimRoot) {
+    _trimEls = {
+      root:    trimRoot,
+      name:    document.getElementById('bgm-trim-name'),
+      bar:     document.getElementById('bgm-trim-bar'),
+      seek:    document.getElementById('bgm-trim-seek'),
+      pos:     document.getElementById('bgm-trim-pos'),
+      dur:     document.getElementById('bgm-trim-dur'),
+      play:    document.getElementById('bgm-trim-play'),
+      preview: document.getElementById('bgm-trim-preview'),
+      setIn:   document.getElementById('bgm-trim-set-in'),
+      setOut:  document.getElementById('bgm-trim-set-out'),
+      in:      document.getElementById('bgm-trim-in'),
+      out:     document.getElementById('bgm-trim-out'),
+      newlen:  document.getElementById('bgm-trim-newlen'),
+      status:  document.getElementById('bgm-trim-status'),
+      cancel:  document.getElementById('bgm-trim-cancel'),
+      save:    document.getElementById('bgm-trim-save'),
+    };
+    _wireTrim();
+  }
+
   setVolume(window._bgmState.volume);
   syncTransport();
   updateNow();
   await scanLibrary();
   renderList();
+  // Cross-room sync: EXPLORE mutates a music file → re-scan so the
+  // library list mirrors disk. Coalesced via rAF so a burst of moves
+  // only triggers one IPC roundtrip.
+  let _musicRescanQueued = false;
+  window.addEventListener('dash:files-changed', (ev) => {
+    const which = ev?.detail?.which;
+    if (which && which !== 'music') return;
+    if (_musicRescanQueued) return;
+    _musicRescanQueued = true;
+    requestAnimationFrame(async () => {
+      _musicRescanQueued = false;
+      try { await scanLibrary(); renderList(); } catch {}
+    });
+  });
 }
 
 export async function activate() {

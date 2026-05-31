@@ -4,6 +4,45 @@
 //
 //   init(deps)  — one-time: build the pane, wire IPC + buttons
 //   activate()  — VISUALIZER tab shown: refresh the gallery file list
+
+import { groupSequences, extOf } from '../util/sequences.js';
+import { setupProfiles } from './rec/profiles.js';
+import { setupOverlays } from './rec/overlays.js';
+import { setupScreencap } from './rec/screencap.js';
+import { setupCrop } from './rec/crop.js';
+import { setupTransport } from './rec/transport.js';
+import { setupContextMenu } from './rec/context.js';
+import { setupCamFilters } from './rec/cam-filters.js';
+import { setupLutApplier } from './rec/lut.js';
+import { pickEncoderConfig, createEncoder } from './rec/wc-encoder.js';
+
+// PHASE A experiment flag — WebCodecs GPU-encoded capture instead of the
+// raw-RGBA-to-ffmpeg pump. OFF by default; opt in with
+//   localStorage.setItem('dash.rec.webcodecs', '1')
+// in DevTools (then start a new recording). Any probe/encoder failure
+// silently falls back to the proven raw-RGBA path.
+function _wcEncodeEnabled() {
+  try { return localStorage.getItem('dash.rec.webcodecs') === '1'; }
+  catch { return false; }
+}
+
+// CHUNKED RECORDING — split long records into finalized ~5-min MP4
+// segments so a sleep/crash only loses the in-progress chunk instead of
+// the whole file. ON by default; disable per-machine with
+//   localStorage.setItem('dash.rec.chunked', '0')
+function _chunkedRecEnabled() {
+  try { return localStorage.getItem('dash.rec.chunked') !== '0'; }
+  catch { return true; }
+}
+// Chunk length in seconds (default 300 = 5 min). Override with
+//   localStorage.setItem('dash.rec.chunkSeconds', '120')
+function _chunkSeconds() {
+  try {
+    const v = parseInt(localStorage.getItem('dash.rec.chunkSeconds'), 10);
+    return (Number.isFinite(v) && v >= 10) ? v : 300;
+  } catch { return 300; }
+}
+
 let _ready = false;
 let _activateImpl = null;
 
@@ -39,7 +78,14 @@ export function init(deps) {
   const visualizerListEl = document.getElementById('visualizer-list');
   const visualizerVideoEl = document.getElementById('visualizer-video');
   const visualizerWrapEl = visualizerPane?.querySelector('.visualizer-player-wrap');
-  const visualizerNowEl = document.getElementById('visualizer-now');
+  // Toolbar status / diagnostic readout. Lives at the right end of the
+  // rec-room button row and surfaces things like REC frame/audio counts,
+  // URL load errors, and mic capture failures. (Kept the legacy
+  // `visualizerNowEl` name so every existing call site that writes to it
+  // continues to work; the variable now points at the toolbar console
+  // rather than a now-playing label under the player.)
+  const visualizerNowEl = document.getElementById('visualizer-console')
+    || document.getElementById('visualizer-now');
   let _visualizerEntries = [];
   let _visualizerCurrent = null;
   // Subdir within the gallery root. '' = top of gallery; otherwise a
@@ -80,21 +126,28 @@ export function init(deps) {
       visualizerListEl.appendChild(empty);
       return;
     }
-    for (const e of entries) {
+    // Collapse same-prefix numbered runs (snap-001.jpg, snap-002.jpg, …)
+    // into one representative row per sequence — see util/sequences.js.
+    const grouped = groupSequences(entries);
+    for (const e of grouped) {
       const row = document.createElement('li');
       row.className = 'visualizer-row'
         + (e.isDir ? ' is-dir' : '')
+        + (e.isSeq ? ' is-seq' : '')
         + (_visualizerCurrent === e.path ? ' is-playing' : '')
         + (_visualizerSelected.has(e.path) ? ' is-selected' : '');
       row.dataset.path  = e.path;
       row.dataset.rel   = e.rel;
       row.dataset.isDir = String(e.isDir);
       row.dataset.name  = e.name;
-      row.title = e.path;
+      if (e.isSeq) row.dataset.seqCount = String(e.seqCount);
+      row.title = e.isSeq ? `${e.path}  (+ ${e.seqCount - 1} more frames)` : e.path;
       // Make video AND image rows draggable into the editor's
       // timeline. The custom mime carries the path + a `kind` token so
       // the drop target knows whether to set up a video or still-image
-      // clip without re-checking the extension.
+      // clip without re-checking the extension. Sequence rows also
+      // carry the full member-path list so a single drop becomes N
+      // back-to-back clips on the EDIT timeline.
       const isVidRow = !e.isDir && _VIDEO_RENDER_RE.test(e.name);
       const isImgRow = !e.isDir && _IMG_RENDER_RE.test(e.name);
       if (isVidRow || isImgRow) {
@@ -104,15 +157,29 @@ export function init(deps) {
           ev.dataTransfer.setData('application/x-dash3d-kind', isImgRow ? 'image' : 'video');
           ev.dataTransfer.setData('text/plain', e.name);
           ev.dataTransfer.effectAllowed = 'copy';
+          if (e.isSeq && Array.isArray(e.seqPaths)) {
+            ev.dataTransfer.setData('application/x-edit-clip-seq', JSON.stringify(e.seqPaths));
+          }
         });
       }
-      // Lead glyph hints at the type without taking grid space.
-      const glyph = e.isDir ? '▣ '
-        : _VIDEO_KNOWN_RE.test(e.name) ? '▶ '
-        : _IMG_KNOWN_RE.test(e.name) ? '◇ '
-        : '∙ ';
+      const ext = extOf(e.name);
+      const baseName = e.name.replace(/\.[^.]+$/, '');
+      const safeName = baseName.replace(/</g, '&lt;');
+      const seqBadge = e.isSeq ? `<span class="visualizer-row-seq">× ${e.seqCount}</span>` : '';
+      const extBadge = (!e.isDir && ext) ? `<span class="visualizer-row-ext">${ext}</span>` : '';
+      // Inline thumbnail. Sequence rows show the first frame, which is
+      // exactly the snap-capture preview we want at a glance.
+      const thumb = e.isDir
+        ? `<div class="visualizer-row-thumb"><span class="visualizer-row-thumb-glyph">▣</span></div>`
+        : isImgRow
+          ? `<div class="visualizer-row-thumb"><img draggable="false" loading="lazy" alt="" src="dash3d-file://gallery/${encodeURI(e.rel)}"></div>`
+          : `<div class="visualizer-row-thumb"><span class="visualizer-row-thumb-glyph">${isVidRow ? '▶' : '∙'}</span></div>`;
       row.innerHTML =
-        `<span class="visualizer-row-name">${glyph}${e.name.replace(/</g, '&lt;')}</span>` +
+        thumb +
+        `<div class="visualizer-row-namebox">` +
+          `<span class="visualizer-row-name">${safeName}</span>` +
+          seqBadge + extBadge +
+        `</div>` +
         `<span class="visualizer-row-size">${e.isDir ? '—' : fmtBytes(e.size)}</span>` +
         `<span class="visualizer-row-time">${fmtFileTime(e.mtime)}</span>`;
       visualizerListEl.appendChild(row);
@@ -177,18 +244,8 @@ export function init(deps) {
     }
     // Auto-disable CROP when starting playback. CROP applies to the
     // live mirror; once a recorded file is on screen the user wants
-    // the full frame, not a cropped subregion. Mirror the click-handler
-    // side-effects so the toggle button, overlay, and FIT view all
-    // reflect the new state.
-    if (_cropActive) {
-      _cropActive = false;
-      const btn = document.getElementById('visualizer-crop-btn');
-      if (btn) {
-        btn.classList.remove('is-active');
-        btn.textContent = 'CROP';
-      }
-      try { _refreshCropFitView(); } catch {}
-    }
+    // the full frame, not a cropped subregion.
+    try { _crop?.deactivate(); } catch {}
     // Switch out of still-image mode (in case the last click was a snap).
     const stillEl = document.getElementById('visualizer-still');
     if (stillEl) stillEl.src = '';
@@ -201,10 +258,9 @@ export function init(deps) {
     // was leaving the element in a state where the subsequent
     // play() click from the toolbar would silently reject).
     visualizerVideoEl.src = url;
-    // Honour the saved mute preference — without this, the element
-    // would inherit the force-mute it picked up during a prior mirror
-    // session and recordings would play silently.
-    if (typeof _applyMute === 'function') _applyMute(!!_recRoomMutedPref);
+    // (Mirror's force-mute used to be reset here. Mirror now stays
+    // muted independently of playback so the source-playback path
+    // doesn't need to restore anything.)
     // `is-playing` here means "a video is loaded" (toggles the empty
     // overlay off) — keep adding it even though we're not actively
     // playing. CSS that depends on it stays correct.
@@ -222,21 +278,31 @@ export function init(deps) {
   // rule that media plays in this pane and nowhere else.
   // Source dimensions — updated whenever a mirror starts, a recording's
   // metadata loads, or a still snap loads. Drives the wrap's aspect
-  // (auto-fit always wins now — no manual portrait/landscape toggle)
-  // and the FIT-crop preview pipeline below.
+  // (auto-fit always wins now — no manual portrait/landscape toggle).
   let _lastSourceW = 0;
   let _lastSourceH = 0;
-  let _cropFitActive = false;
+  // Reduced-fraction aspect label (1920×1080 → "16:9"). Snaps to common
+  // monitor ratios so 1366×768 (technically 683:384) reads as "16:9"
+  // rather than a noisy fraction. Used by the MIRROR NOW string so the
+  // user can confirm a 16:9 capture is actually 16:9 without DevTools.
+  function _aspectLabel(w, h) {
+    if (!w || !h) return '?';
+    const r = w / h;
+    const COMMON = [
+      [32, 9], [21, 9], [16, 9], [16, 10], [3, 2], [4, 3], [5, 4], [1, 1],
+      [9, 16], [10, 16], [2, 3], [3, 4], [4, 5], [9, 21],
+    ];
+    for (const [a, b] of COMMON) {
+      if (Math.abs(r - a / b) / (a / b) < 0.01) return `${a}:${b}`;
+    }
+    const gcd = (x, y) => (y ? gcd(y, x % y) : x);
+    const g = gcd(w, h);
+    return `${w / g}:${h / g}`;
+  }
   function _refreshWrapShape() {
     if (!visualizerWrapEl) return;
-    // FIT+CROP active → wrap reshapes to the crop region's pixel
-    // aspect, so the cropped fill fills the wrap with no letterbox.
-    // Otherwise → wrap matches the raw source aspect.
     let w = 0, h = 0;
-    if (_cropFitActive && _cropActive && _lastSourceW > 0 && _lastSourceH > 0) {
-      w = Math.max(1, _cropRect.w * _lastSourceW);
-      h = Math.max(1, _cropRect.h * _lastSourceH);
-    } else if (_lastSourceW > 0 && _lastSourceH > 0) {
+    if (_lastSourceW > 0 && _lastSourceH > 0) {
       w = _lastSourceW;
       h = _lastSourceH;
     }
@@ -286,215 +352,29 @@ export function init(deps) {
     if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
   }
 
-  // ── Transport controls ──────────────────────────────────────────────
-  // List of playable video entries from the current view. Used by the
-  // play/pause + prev/next transport so they skip over folders and
-  // image files that the gallery browser also surfaces.
-  function _playableEntries() {
-    return _visualizerEntries.filter((e) => !e.isDir && _VIDEO_KNOWN_RE.test(e.name));
-  }
-  function togglePlayPause() {
-    if (!visualizerVideoEl) return;
-    if (!visualizerVideoEl.currentSrc) {
-      const first = _playableEntries()[0];
-      if (first) playVisualizerEntry(first);
-      return;
-    }
-    if (visualizerVideoEl.paused) {
-      // Log a rejected play() — it used to be silently swallowed,
-      // which made "click play, nothing happens" indistinguishable
-      // from a real bug. Now we'll see the actual reason in dev
-      // tools (autoplay-policy, unsupported codec, etc.).
-      visualizerVideoEl.play().catch((err) => {
-        console.warn('[rec-room] play() rejected:', err?.name, err?.message);
-      });
-    }
-    else visualizerVideoEl.pause();
-  }
-  function playRelative(step) {
-    const playable = _playableEntries();
-    if (!playable.length) return;
-    const idx = playable.findIndex((e) => e.path === _visualizerCurrent);
-    let nextIdx;
-    if (idx < 0) {
-      nextIdx = step > 0 ? 0 : playable.length - 1;
-    } else {
-      nextIdx = (idx + step + playable.length) % playable.length;
-    }
-    playVisualizerEntry(playable[nextIdx]);
-  }
-  function updatePlayPauseIcon() {
-    const btn = document.getElementById('visualizer-playpause-btn');
-    if (!btn) return;
-    const playing = visualizerVideoEl && !visualizerVideoEl.paused && !!visualizerVideoEl.currentSrc;
-    // Toggle visibility on the two embedded SVGs (.vis-play-icon /
-    // .vis-pause-icon). currentColor is bound to the parent button's
-    // `color`, so they pick up the theme automatically.
-    const playIcon  = btn.querySelector('.vis-play-icon');
-    const pauseIcon = btn.querySelector('.vis-pause-icon');
-    if (playIcon)  playIcon.hidden  = !!playing;
-    if (pauseIcon) pauseIcon.hidden = !playing;
-    btn.title = playing ? 'Pause' : 'Play';
-  }
-
-  // ── Themed playback control bar ──────────────────────────────────────
-  // Drives #visualizer-pc (the dashboard-styled replacement for the
-  // native <video> controls): play/pause, scrub seek, time, volume,
-  // fullscreen. Only shown for seekable file playback — hidden during
-  // the live mirror and still-image view.
-  const _pcEl      = document.getElementById('visualizer-pc');
-  const _pcPlayBtn = document.getElementById('vis-pc-play');
-  const _pcCurEl   = document.getElementById('vis-pc-cur');
-  const _pcDurEl   = document.getElementById('vis-pc-dur');
-  const _pcSeekEl  = document.getElementById('vis-pc-seek');
-  const _pcFillEl  = document.getElementById('vis-pc-fill');
-  const _pcBufEl   = document.getElementById('vis-pc-buffered');
-  const _pcKnobEl  = document.getElementById('vis-pc-knob');
-  const _pcMuteBtn = document.getElementById('vis-pc-mute');
-  const _pcVolEl   = document.getElementById('vis-pc-vol');
-  const _pcFsBtn   = document.getElementById('vis-pc-fs');
-
-  function _fmtClock(sec) {
-    if (!Number.isFinite(sec) || sec < 0) sec = 0;
-    const s = Math.floor(sec % 60);
-    const m = Math.floor(sec / 60);
-    return `${m}:${String(s).padStart(2, '0')}`;
-  }
-  // Two-SVG toggle buttons: svg[0] is the default glyph, svg[1] the
-  // alternate. `alt` true shows the second.
-  function _pcSwapIcon(btn, alt) {
-    const svgs = btn?.querySelectorAll('svg');
-    if (!svgs || svgs.length < 2) return;
-    svgs[0].hidden = !!alt;
-    svgs[1].hidden = !alt;
-  }
-  // Bar applies only to a real file source — a live mirror sets
-  // srcObject (not seekable) and stills have no <video> src at all.
-  function _pcVisible() {
-    return !!(visualizerVideoEl && visualizerVideoEl.src && !visualizerVideoEl.srcObject);
-  }
-  function _pcSync() {
-    if (!_pcEl) return;
-    const show = _pcVisible();
-    _pcEl.hidden = !show;
-    if (!show) return;
-    const v = visualizerVideoEl;
-    const dur = Number.isFinite(v.duration) ? v.duration : 0;
-    const cur = v.currentTime || 0;
-    const frac = dur > 0 ? Math.min(1, cur / dur) : 0;
-    if (_pcFillEl) _pcFillEl.style.width = `${frac * 100}%`;
-    if (_pcKnobEl) _pcKnobEl.style.left  = `${frac * 100}%`;
-    if (_pcCurEl)  _pcCurEl.textContent  = _fmtClock(cur);
-    if (_pcDurEl)  _pcDurEl.textContent  = _fmtClock(dur);
-    if (_pcBufEl) {
-      let bufFrac = 0;
-      try {
-        const b = v.buffered;
-        if (b && b.length && dur > 0) bufFrac = Math.min(1, b.end(b.length - 1) / dur);
-      } catch {}
-      _pcBufEl.style.width = `${bufFrac * 100}%`;
-    }
-    _pcSwapIcon(_pcPlayBtn, !v.paused);
-    _pcSwapIcon(_pcMuteBtn, v.muted || v.volume === 0);
-    if (_pcVolEl && document.activeElement !== _pcVolEl) {
-      _pcVolEl.value = String(Math.round((v.muted ? 0 : v.volume) * 100));
-    }
-  }
-  // Scrub: pointer drag anywhere on the seek track maps x → currentTime.
-  let _pcScrubbing = false;
-  function _pcSeekToEvent(ev) {
-    if (!_pcSeekEl || !visualizerVideoEl) return;
-    const r = _pcSeekEl.getBoundingClientRect();
-    if (r.width <= 0) return;
-    const frac = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
-    const dur = visualizerVideoEl.duration;
-    if (Number.isFinite(dur) && dur > 0) {
-      try { visualizerVideoEl.currentTime = frac * dur; } catch {}
-    }
-    _pcSync();
-  }
-  _pcSeekEl?.addEventListener('pointerdown', (ev) => {
-    _pcScrubbing = true;
-    _pcSeekEl.classList.add('is-scrubbing');
-    try { _pcSeekEl.setPointerCapture(ev.pointerId); } catch {}
-    _pcSeekToEvent(ev);
+  // ── Transport + themed playback control bar ─────────────────────
+  // Lives in ./rec/transport.js. Wires the big play/pause/prev/next
+  // buttons, the scrubber, volume, fullscreen, and the rAF-coalesced
+  // seek logic. Needs accessors into the gallery state so prev/next
+  // can navigate the playable-video subset.
+  setupTransport({
+    playSfx,
+    visualizerVideoEl,
+    getPlayable:    () => _visualizerEntries.filter((e) => !e.isDir && _VIDEO_KNOWN_RE.test(e.name)),
+    getCurrentPath: () => _visualizerCurrent,
+    playEntry:      (entry) => playVisualizerEntry(entry),
   });
-  _pcSeekEl?.addEventListener('pointermove', (ev) => { if (_pcScrubbing) _pcSeekToEvent(ev); });
-  const _pcEndScrub = (ev) => {
-    if (!_pcScrubbing) return;
-    _pcScrubbing = false;
-    _pcSeekEl.classList.remove('is-scrubbing');
-    try { _pcSeekEl.releasePointerCapture(ev.pointerId); } catch {}
-  };
-  _pcSeekEl?.addEventListener('pointerup', _pcEndScrub);
-  _pcSeekEl?.addEventListener('pointercancel', _pcEndScrub);
-  // Arrow keys nudge ±5s when the seek bar is focused.
-  _pcSeekEl?.addEventListener('keydown', (ev) => {
-    if (!visualizerVideoEl) return;
-    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
-      ev.preventDefault();
-      const d = ev.key === 'ArrowRight' ? 5 : -5;
-      try { visualizerVideoEl.currentTime = Math.max(0, (visualizerVideoEl.currentTime || 0) + d); } catch {}
-    }
-  });
-  _pcPlayBtn?.addEventListener('click', () => { togglePlayPause(); playSfx?.('click'); });
-  _pcMuteBtn?.addEventListener('click', () => {
-    if (!visualizerVideoEl) return;
-    visualizerVideoEl.muted = !visualizerVideoEl.muted;
-    _pcSync();
-  });
-  _pcVolEl?.addEventListener('input', () => {
-    if (!visualizerVideoEl) return;
-    const vol = Math.min(1, Math.max(0, (Number(_pcVolEl.value) || 0) / 100));
-    visualizerVideoEl.volume = vol;
-    if (vol > 0 && visualizerVideoEl.muted) visualizerVideoEl.muted = false;
-  });
-  _pcFsBtn?.addEventListener('click', () => {
-    const wrap = visualizerVideoEl?.closest('.visualizer-player-wrap');
-    if (!wrap) return;
-    if (document.fullscreenElement === wrap) {
-      try { document.exitFullscreen(); } catch {}
-    } else {
-      try { wrap.requestFullscreen?.(); } catch {}
-    }
-  });
-  // Keep the bar live off every relevant <video> event.
-  for (const ev of ['timeupdate', 'progress', 'play', 'pause', 'loadedmetadata',
-                     'loadeddata', 'emptied', 'volumechange', 'durationchange', 'seeked']) {
-    visualizerVideoEl?.addEventListener(ev, _pcSync);
-  }
 
   // List of image entries from the current view, ordered as displayed
   // (folders + the up-row are skipped). Used for shift-click range
   // selection so the range only includes selectable items.
-  function _imageEntriesInView() {
-    return _visualizerEntries.filter((e) => !e.isDir && _IMG_KNOWN_RE.test(e.name));
-  }
   function _repaintSelection() {
     if (!visualizerListEl) return;
     for (const row of visualizerListEl.querySelectorAll('.visualizer-row')) {
       row.classList.toggle('is-selected', _visualizerSelected.has(row.dataset.path));
     }
-    _refreshProcessBtn();
     _refreshDeleteBtn();
     if (typeof _refreshEditBtn === 'function') _refreshEditBtn();
-  }
-  function _refreshProcessBtn() {
-    const btn = document.getElementById('visualizer-process-btn');
-    if (!btn) return;
-    // Enable when the selection has any folder (folders get expanded to
-    // their image children at PROCESS time) OR ≥2 standalone images.
-    let folders = 0, images = 0;
-    for (const p of _visualizerSelected) {
-      const ent = _visualizerEntries.find((x) => x.path === p);
-      if (!ent) continue;
-      if (ent.isDir) folders++;
-      else if (_IMG_KNOWN_RE.test(ent.name)) images++;
-    }
-    btn.disabled = folders === 0 && images < 2;
-    if (folders > 0) btn.textContent = `PROCESS (${folders === 1 ? 'folder' : folders + ' folders'})`;
-    else if (images >= 2) btn.textContent = `PROCESS (${images})`;
-    else btn.textContent = 'PROCESS';
   }
   function _refreshDeleteBtn() {
     const btn = document.getElementById('visualizer-delete-btn');
@@ -577,107 +457,21 @@ export function init(deps) {
     }
   });
 
-  // ── Rec-room context menu: COPY (files to clipboard) + DELETE.
-  // Mirrors the EXPLORE pane's right-click. COPY uses the existing
-  // clipboardCopyFiles IPC (Windows CF_HDROP via PowerShell) so paths
-  // can be pasted into File Explorer, Photos, chat apps, etc. If the
-  // right-clicked row isn't already in the selection we switch the
-  // selection to just that row first so the menu actions match what's
-  // visually highlighted.
-  let _recCtxMenu = null;
-  function _hideRecCtxMenu() {
-    _recCtxMenu?.remove();
-    _recCtxMenu = null;
-  }
-  async function _copyVisualizerSelection() {
-    const paths = [..._visualizerSelected];
-    if (!paths.length) return;
-    try {
-      const r = await window.dash?.clipboardCopyFiles?.(paths);
-      if (!r?.ok) console.warn('[rec-room] copy failed:', r?.error);
-    } catch (err) { console.warn('[rec-room] copy threw:', err); }
-  }
-  async function _deleteVisualizerSelection() {
-    const targets = _visualizerSelected.size
-      ? [..._visualizerSelected]
-      : (_visualizerCurrent ? [_visualizerCurrent] : []);
-    if (!targets.length) return;
-    if (_visualizerCurrent && targets.includes(_visualizerCurrent)) {
-      try { visualizerVideoEl?.pause(); } catch {}
-      try { visualizerVideoEl?.removeAttribute('src'); visualizerVideoEl?.load(); } catch {}
-      _visualizerCurrent = null;
-      visualizerWrapEl?.classList.remove('is-playing', 'is-still');
-      if (visualizerNowEl) visualizerNowEl.textContent = '—';
-    }
-    for (const abs of targets) {
-      try {
-        const r = await window.dash?.exploreDelete?.(abs);
-        if (!r?.ok) console.warn('[rec-room] delete failed:', abs, r?.error);
-      } catch {}
-    }
-    _clearVisualizerSelection();
-    await refreshVisualizer();
-  }
-  function _showRecCtxMenu(x, y) {
-    _hideRecCtxMenu();
-    const menu = document.createElement('div');
-    menu.className = 'explore-context-menu';
-    menu.innerHTML =
-      '<button type="button" class="explore-context-item" data-action="copy">COPY</button>' +
-      '<button type="button" class="explore-context-item" data-action="delete">DELETE</button>';
-    document.body.appendChild(menu);
-    const r = menu.getBoundingClientRect();
-    const px = Math.min(x, window.innerWidth  - r.width  - 4);
-    const py = Math.min(y, window.innerHeight - r.height - 4);
-    menu.style.left = `${px}px`;
-    menu.style.top  = `${py}px`;
-    _recCtxMenu = menu;
-    menu.addEventListener('click', (ev) => {
-      const a = ev.target?.dataset?.action;
-      if (a === 'copy')   _copyVisualizerSelection();
-      if (a === 'delete') _deleteVisualizerSelection();
-      _hideRecCtxMenu();
-    });
-    menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  }
-  visualizerListEl?.addEventListener('contextmenu', (ev) => {
-    const row = ev.target.closest('.visualizer-row');
-    if (!row) return;
-    if (row.dataset.action === 'up' || row.dataset.isDir === 'true') return;
-    ev.preventDefault();
-    const p = row.dataset.path;
-    if (!_visualizerSelected.has(p)) {
-      _visualizerSelected = new Set([p]);
-      _visualizerAnchor = p;
-      _repaintSelection();
-    }
-    _showRecCtxMenu(ev.clientX, ev.clientY);
-  });
-  document.addEventListener('mousedown', (ev) => {
-    if (_recCtxMenu && !_recCtxMenu.contains(ev.target)) _hideRecCtxMenu();
-  }, true);
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && _recCtxMenu) _hideRecCtxMenu();
-    // Delete / Ctrl+C in the rec room — only fires when the rec-room
-    // list owns the active element so it doesn't conflict with the
-    // explore pane or text inputs.
-    const focusInList = document.activeElement === visualizerListEl
-      || visualizerListEl?.contains(document.activeElement);
-    const recRoomVisible = visualizerPane?.classList?.contains('is-visible');
-    if (!recRoomVisible) return;
-    // The visualizer list isn't normally focused (no tabindex), so also
-    // accept key events when the rec-room pane is the visible mode AND
-    // there's a non-empty selection — that's the user's clear signal
-    // that they're acting on the rec-room.
-    if (!focusInList && !_visualizerSelected.size) return;
-    if (ev.target.matches?.('input, textarea, [contenteditable=""], [contenteditable="true"]')) return;
-    if (ev.key === 'Delete') {
-      ev.preventDefault();
-      _deleteVisualizerSelection();
-    } else if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'c' || ev.key === 'C')) {
-      ev.preventDefault();
-      _copyVisualizerSelection();
-    }
+  // ── Rec-room context menu + delete/undo ───────────────────────────
+  // Lives in ./rec/context.js. Selection/current-playing state lives
+  // here in visualizer.js (it's touched everywhere); the module gets
+  // accessor functions so reassignments are visible across the closure.
+  setupContextMenu({
+    visualizerListEl, visualizerVideoEl, visualizerWrapEl,
+    visualizerNowEl, visualizerPane,
+    getSelected: () => _visualizerSelected,
+    setSelected: (s) => { _visualizerSelected = s; },
+    setAnchor:   (p) => { _visualizerAnchor = p; },
+    getCurrent:  () => _visualizerCurrent,
+    clearCurrent: () => { _visualizerCurrent = null; },
+    repaintSelection: () => _repaintSelection(),
+    clearSelection:   () => _clearVisualizerSelection(),
+    refreshVisualizer: () => refreshVisualizer(),
   });
   // Double-click on a folder enters it. Single-click no longer navigates so
   // selecting / right-clicking folders doesn't dump the user into them.
@@ -691,74 +485,6 @@ export function init(deps) {
     refreshVisualizer();
   });
   document.getElementById('visualizer-refresh-btn')  ?.addEventListener('click', () => refreshVisualizer());
-  document.getElementById('visualizer-playpause-btn')?.addEventListener('click', togglePlayPause);
-  document.getElementById('visualizer-prev-btn')     ?.addEventListener('click', () => playRelative(-1));
-  document.getElementById('visualizer-next-btn')     ?.addEventListener('click', () => playRelative(+1));
-  // Session-scoped undo stack for deletions. Each entry remembers the
-  // managed-trash path + original path so a single button-click can
-  // restore the most recent batch. Cleared on app restart (the file
-  // remains in <root>/.trash so it's still recoverable via Empty Trash
-  // → OS Recycle Bin if needed).
-  // Shared with EXPLORE via window — app.js seeds window._visualizerUndoStack
-  // at boot so deletes made before REC ROOM is opened still land here.
-  const _visualizerUndoStack = (window._visualizerUndoStack = window._visualizerUndoStack || []);
-  function _refreshUndoBtn() {
-    const btn = document.getElementById('visualizer-undo-btn');
-    if (!btn) return;
-    btn.disabled = _visualizerUndoStack.length === 0;
-    btn.textContent = _visualizerUndoStack.length > 1
-      ? `UNDO (${_visualizerUndoStack.length})` : 'UNDO';
-  }
-  window._visualizerRefreshUndoBtn = _refreshUndoBtn;
-  document.getElementById('visualizer-delete-btn')   ?.addEventListener('click', async () => {
-    const targets = _visualizerSelected.size
-      ? [..._visualizerSelected]
-      : (_visualizerCurrent ? [_visualizerCurrent] : []);
-    if (!targets.length) return;
-    if (_visualizerCurrent && targets.includes(_visualizerCurrent)) {
-      try { visualizerVideoEl?.pause(); } catch {}
-      try { visualizerVideoEl?.removeAttribute('src'); visualizerVideoEl?.load(); } catch {}
-      _visualizerCurrent = null;
-      visualizerWrapEl?.classList.remove('is-playing', 'is-still');
-      if (visualizerNowEl) visualizerNowEl.textContent = '—';
-    }
-    const batch = [];
-    for (const abs of targets) {
-      try {
-        const r = await window.dash?.exploreDelete?.(abs);
-        if (r?.ok && r.trashPath && r.origPath) {
-          batch.push({ origPath: r.origPath, trashPath: r.trashPath, name: r.name });
-        } else if (!r?.ok) {
-          console.warn('[rec-room] delete failed:', abs, r?.error);
-        }
-      } catch (err) { console.warn('[rec-room] delete threw:', err); }
-    }
-    if (batch.length) {
-      _visualizerUndoStack.push({ batch, at: Date.now() });
-      _refreshUndoBtn();
-      if (visualizerNowEl) visualizerNowEl.textContent = `DELETED ${batch.length} · UNDO READY`;
-    }
-    _clearVisualizerSelection();
-    await refreshVisualizer();
-  });
-  document.getElementById('visualizer-undo-btn')?.addEventListener('click', async () => {
-    const entry = _visualizerUndoStack.pop();
-    if (!entry) return;
-    _refreshUndoBtn();
-    let restored = 0;
-    for (const item of entry.batch) {
-      try {
-        const r = await window.dash?.exploreRestore?.({
-          origPath: item.origPath, trashPath: item.trashPath,
-        });
-        if (r?.ok) restored++;
-        else console.warn('[rec-room] restore failed:', item.name, r?.error);
-      } catch (err) { console.warn('[rec-room] restore threw:', err); }
-    }
-    if (visualizerNowEl) visualizerNowEl.textContent = `RESTORED ${restored}/${entry.batch.length}`;
-    await refreshVisualizer();
-  });
-  _refreshUndoBtn();
 
   // ── §rec-split ── DRAGGABLE SPLITTER ──────────────────────────────
   // Slim horizontal bar between the player/edit area and the captures
@@ -766,28 +492,49 @@ export function init(deps) {
   // is stored in cfg.recSplitPct so it survives restarts.
   const recSplitEl = document.getElementById('visualizer-split');
   const _CLAMP = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+  // Upper bound on the player-wrap height. When the bottom strip is
+  // visible we cap at 85% so the mixer/sources/cameras row stays at
+  // least a sliver visible; when collapsed we lift to 100% so the
+  // player can be dragged all the way down with nothing underneath.
+  function _isPortrait() { return !!visualizerPane?.classList.contains('is-portrait-source'); }
+  function _splitMaxPct() {
+    if (_isPortrait()) return visualizerPane?.classList.contains('is-bottom-collapsed') ? 100 : 80;
+    return visualizerPane?.classList.contains('is-bottom-collapsed') ? 100 : 85;
+  }
+  function _splitVarName() { return _isPortrait() ? '--rec-portrait-pct' : '--rec-split-pct'; }
+  function _splitCfgKey()  { return _isPortrait() ? 'recPortraitPct' : 'recSplitPct'; }
+  function _splitDefault() { return _isPortrait() ? 35 : 60; }
   function _applyRecSplit(pct) {
     if (!visualizerPane) return;
-    const v = _CLAMP(Number(pct) || 60, 20, 85);
-    visualizerPane.style.setProperty('--rec-split-pct', `${v}%`);
+    const v = _CLAMP(Number(pct) || _splitDefault(), 15, _splitMaxPct());
+    visualizerPane.style.setProperty(_splitVarName(), `${v}%`);
   }
   (async () => {
     try {
       const cfg = (await window.dash?.getConfig?.()) || {};
-      if (Number.isFinite(cfg.recSplitPct)) _applyRecSplit(cfg.recSplitPct);
-      else _applyRecSplit(60);
-    } catch { _applyRecSplit(60); }
+      // Restore both axes from config so a user who toggles between
+      // landscape and portrait gets the size they last set for each.
+      const lp = Number.isFinite(cfg.recSplitPct)    ? cfg.recSplitPct    : 60;
+      const pp = Number.isFinite(cfg.recPortraitPct) ? cfg.recPortraitPct : 35;
+      visualizerPane?.style.setProperty('--rec-split-pct',    `${_CLAMP(lp, 15, 100)}%`);
+      visualizerPane?.style.setProperty('--rec-portrait-pct', `${_CLAMP(pp, 15, 100)}%`);
+    } catch {
+      visualizerPane?.style.setProperty('--rec-split-pct',    '60%');
+      visualizerPane?.style.setProperty('--rec-portrait-pct', '35%');
+    }
   })();
   let _splitDragging = false;
-  let _splitStartY = 0;
+  let _splitStart = 0;
   let _splitStartPct = 60;
+  let _splitDragAxis = 'y'; // captured at pointerdown so a mid-drag
+                            // orientation toggle can't confuse the math
   recSplitEl?.addEventListener('pointerdown', (e) => {
     if (!visualizerPane) return;
     _splitDragging = true;
-    _splitStartY = e.clientY;
-    const paneRect = visualizerPane.getBoundingClientRect();
-    const curPctStr = getComputedStyle(visualizerPane).getPropertyValue('--rec-split-pct').trim();
-    _splitStartPct = parseFloat(curPctStr) || 60;
+    _splitDragAxis = _isPortrait() ? 'x' : 'y';
+    _splitStart = _splitDragAxis === 'x' ? e.clientX : e.clientY;
+    const curPctStr = getComputedStyle(visualizerPane).getPropertyValue(_splitVarName()).trim();
+    _splitStartPct = parseFloat(curPctStr) || _splitDefault();
     recSplitEl.classList.add('is-dragging');
     recSplitEl.setPointerCapture?.(e.pointerId);
     e.preventDefault();
@@ -795,24 +542,60 @@ export function init(deps) {
   recSplitEl?.addEventListener('pointermove', (e) => {
     if (!_splitDragging || !visualizerPane) return;
     const paneRect = visualizerPane.getBoundingClientRect();
-    if (paneRect.height <= 0) return;
-    const dy = e.clientY - _splitStartY;
-    const deltaPct = (dy / paneRect.height) * 100;
-    const next = _CLAMP(_splitStartPct + deltaPct, 20, 85);
-    visualizerPane.style.setProperty('--rec-split-pct', `${next}%`);
+    if (_splitDragAxis === 'x') {
+      if (paneRect.width <= 0) return;
+      // Player sits on the RIGHT in portrait mode, so dragging the
+      // splitter LEFT enlarges the player → invert the sign.
+      const dx = e.clientX - _splitStart;
+      const deltaPct = -(dx / paneRect.width) * 100;
+      const next = _CLAMP(_splitStartPct + deltaPct, 15, _splitMaxPct());
+      visualizerPane.style.setProperty('--rec-portrait-pct', `${next}%`);
+    } else {
+      if (paneRect.height <= 0) return;
+      const dy = e.clientY - _splitStart;
+      const deltaPct = (dy / paneRect.height) * 100;
+      const next = _CLAMP(_splitStartPct + deltaPct, 20, _splitMaxPct());
+      visualizerPane.style.setProperty('--rec-split-pct', `${next}%`);
+    }
   });
   function _endSplitDrag() {
     if (!_splitDragging) return;
     _splitDragging = false;
     recSplitEl?.classList.remove('is-dragging');
     if (visualizerPane) {
-      const curPctStr = getComputedStyle(visualizerPane).getPropertyValue('--rec-split-pct').trim();
-      const v = parseFloat(curPctStr) || 60;
-      window.dash?.setConfig?.({ recSplitPct: v });
+      const varName = _splitDragAxis === 'x' ? '--rec-portrait-pct' : '--rec-split-pct';
+      const cfgKey  = _splitDragAxis === 'x' ? 'recPortraitPct'    : 'recSplitPct';
+      const curPctStr = getComputedStyle(visualizerPane).getPropertyValue(varName).trim();
+      const v = parseFloat(curPctStr) || _splitDefault();
+      window.dash?.setConfig?.({ [cfgKey]: v });
     }
   }
   recSplitEl?.addEventListener('pointerup',     _endSplitDrag);
   recSplitEl?.addEventListener('pointercancel', _endSplitDrag);
+
+  // Bottom-strip collapse toggle. Hides the MIXER / CAMERAS / FILTERS
+  // row so the player wrap can use the full pane height. The topbar
+  // REC indicator (managed independently in _startScreenrec /
+  // _stopScreenrec) stays visible whenever a recording is running, so
+  // the user never loses the "still capturing" signal while collapsed.
+  const bottomCollapseBtn = document.getElementById('visualizer-bottom-collapse');
+  function _setBottomCollapsed(collapsed) {
+    if (!visualizerPane) return;
+    visualizerPane.classList.toggle('is-bottom-collapsed', !!collapsed);
+    bottomCollapseBtn?.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+  (async () => {
+    try {
+      const cfg = (await window.dash?.getConfig?.()) || {};
+      if (cfg.recRoomBottomCollapsed) _setBottomCollapsed(true);
+    } catch {}
+  })();
+  bottomCollapseBtn?.addEventListener('click', async () => {
+    const next = !visualizerPane?.classList.contains('is-bottom-collapsed');
+    _setBottomCollapsed(next);
+    try { await window.dash?.setConfig?.({ recRoomBottomCollapsed: next }); } catch {}
+    playSfx?.('click');
+  });
 
   // ── §rec-edit ── EDIT MODE (trim + filters) ────────────────────
   // Opens a split-pane editor on the currently-playing video. The
@@ -874,15 +657,6 @@ export function init(deps) {
     sliders: {
       brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
       sharpen: 0, vignette: 0, speed: 100, volume: 100,
-    },
-  };
-  // Mirror process popover filter state — same shape so the same
-  // helpers serialize both into a -vf string.
-  const _procFilterState = {
-    auto: false,
-    denoise: false,
-    sliders: {
-      brightness: 100, contrast: 100, saturation: 100, hue: 0, blur: 0,
     },
   };
   function _editIsIdentity(s, flags) {
@@ -1426,78 +1200,6 @@ export function init(deps) {
     el.addEventListener('mousedown', onDown);
   }
 
-  // Wire each track body to accept drops from the captures list.
-  // The drag payload is the dragged row's data-path; we look up the
-  // entry to get its name + probed duration.
-  function _wireTrackDrop(trackId) {
-    const trackEl = _editTrackEl(trackId);
-    if (!trackEl) return;
-    trackEl.addEventListener('dragover', (e) => {
-      // Only accept drops if the drag carries a recording path.
-      if (e.dataTransfer?.types?.includes('application/x-dash3d-capture')) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy';
-        trackEl.classList.add('is-drag-over');
-      }
-    });
-    trackEl.addEventListener('dragleave', () => trackEl.classList.remove('is-drag-over'));
-    trackEl.addEventListener('drop', (e) => {
-      e.preventDefault();
-      trackEl.classList.remove('is-drag-over');
-      const path = e.dataTransfer.getData('application/x-dash3d-capture');
-      const kindHint = e.dataTransfer.getData('application/x-dash3d-kind');
-      if (!path) return;
-      const entry = _visualizerEntries.find((x) => x.path === path);
-      if (!entry) return;
-      const isVideo = _VIDEO_RENDER_RE.test(entry.name);
-      const isImage = _IMG_RENDER_RE.test(entry.name);
-      if (!isVideo && !isImage) return;
-      // Audio track only accepts video (we pull audio out of it on export).
-      if (trackId === 'A1' && isImage) return;
-      const rect = trackEl.getBoundingClientRect();
-      const startSec = Math.max(0, (e.clientX - rect.left) / _editProject.pxPerSec);
-      if (isImage || kindHint === 'image') {
-        // Images have no duration to probe — drop straight in with the
-        // default duration (3s, resizable later).
-        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'image' }, startSec);
-        return;
-      }
-      // Video: probe duration off-screen so the clip bar is sized
-      // correctly even before the user previews it.
-      const probe = document.createElement('video');
-      probe.preload = 'metadata';
-      probe.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-      probe.addEventListener('loadedmetadata', () => {
-        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'video', duration: probe.duration || 5 }, startSec);
-        try { probe.remove(); } catch {}
-      });
-      probe.addEventListener('error', () => {
-        _addEditClip(trackId, { path: entry.path, name: entry.name, kind: 'video', duration: 5 }, startSec);
-        try { probe.remove(); } catch {}
-      });
-    });
-  }
-
-  function _initEditTimeline() {
-    ['V2', 'V1', 'A1'].forEach(_wireTrackDrop);
-    const fpsSel = document.getElementById('vis-edit-tl-fps');
-    const resSel = document.getElementById('vis-edit-tl-res');
-    const zoomEl = document.getElementById('vis-edit-tl-zoom');
-    fpsSel?.addEventListener('change', () => { _editProject.fps = parseInt(fpsSel.value, 10) || 30; });
-    resSel?.addEventListener('change', () => {
-      const [w, h] = String(resSel.value || '1920x1080').split('x').map((n) => parseInt(n, 10));
-      _editProject.width = w || 1920;
-      _editProject.height = h || 1080;
-    });
-    zoomEl?.addEventListener('input', () => {
-      _editProject.pxPerSec = parseInt(zoomEl.value, 10) || 50;
-      _renderEditRuler();
-      _renderEditTracks();
-    });
-    _renderEditRuler();
-    _renderEditTracks();
-  }
-
   // Re-point the preview at the first V1 clip (or the supplied clip).
   // For a video clip, both <video> elements get its src. For an image
   // clip, the <video>s are hidden and the <img>s show the still — pan
@@ -1562,72 +1264,13 @@ export function init(deps) {
     }
   }
   function _refreshEditBtn() {
-    // The OLD inline editor here (the disabled _openEditor below) is
-    // dead code now — replaced by the standalone EDIT ROOM combo-pane
-    // (see features/edit.js). This button now hands the currently-
-    // playing video off to EDIT ROOM via window._editHandoff and a
-    // combo-mode switch. The button is enabled whenever a playable
-    // video is loaded in the REC ROOM player.
+    // The button hands the currently-playing video off to EDIT ROOM
+    // (features/edit.js) via window._editHandoff + a combo-mode switch.
+    // Enabled whenever a playable video is loaded in the REC ROOM player.
     if (!editBtn) return;
     const hasVideo = _visualizerCurrent && _VIDEO_RENDER_RE.test(_visualizerCurrent);
     editBtn.hidden = false;
     editBtn.disabled = !hasVideo;
-  }
-  // Open editor on the current playing video or image.
-  function _openEditor() {
-    // Editor disabled — see _refreshEditBtn note above.
-    return;
-    // eslint-disable-next-line no-unreachable
-    if (!_visualizerCurrent) return;
-    if (!_VIDEO_RENDER_RE.test(_visualizerCurrent) && !_IMG_RENDER_RE.test(_visualizerCurrent)) return;
-    _editState.src = _visualizerCurrent;
-    _editState.open = true;
-    document.body.classList.add('is-editing');
-    // Pause the main player while editing so audio doesn't double up.
-    try { visualizerVideoEl?.pause(); } catch {}
-    if (editPane) editPane.hidden = false;
-    if (visualizerWrapEl) visualizerWrapEl.style.display = 'none';
-    const url = `dash3d-file://gallery/${encodeURI((_visualizerEntries.find((e) => e.path === _editState.src)?.rel) || '')}`;
-    // Force metadata fetch (via .load()) so the video element gets its
-    // intrinsic dimensions BEFORE first paint. Without this, Chromium
-    // sometimes lazy-loads metadata only on first play, and the video
-    // renders stretched-to-container until the user hits play.
-    if (editOrigVid) { editOrigVid.src = url; try { editOrigVid.load(); } catch {} }
-    if (editOutVid)  { editOutVid.src  = url; try { editOutVid.load();  } catch {} }
-    if (editNameEl)  editNameEl.textContent = _editState.src.split(/[\\/]/).pop();
-    if (editStatusEl) { editStatusEl.textContent = ''; editStatusEl.className = 'vis-edit-status'; }
-    // Open paused — user has to press play to start. Otherwise the
-    // load() above can let the video auto-start when its metadata
-    // arrives (Chromium auto-resumes some preloaded media).
-    try { editOrigVid?.pause(); editOutVid?.pause(); } catch {}
-    try { if (editOrigVid) editOrigVid.currentTime = 0; if (editOutVid) editOutVid.currentTime = 0; } catch {}
-    // Seed the V1 track with the just-opened clip so the timeline
-    // isn't empty on first open.
-    const seedName = _editState.src.split(/[\\/]/).pop();
-    const seedKind = _IMG_RENDER_RE.test(seedName) ? 'image' : 'video';
-    _editProject.tracks.V2 = [];
-    _editProject.tracks.V1 = [{
-      id: ++_editClipSeq,
-      path: _editState.src,
-      name: seedName,
-      kind: seedKind,
-      srcDuration: seedKind === 'image' ? 3 : 0,
-      in: 0,
-      out: seedKind === 'image' ? 3 : 5,
-      start: 0,
-      track: 'V1',
-    }];
-    _editProject.tracks.A1 = [];
-    _editProject.selectedClipId = null;
-    _editProject.duration = _editTotalDuration();
-    _initEditTimeline();
-    // If we opened from an image still, immediately retarget so the
-    // <img> preview shows (skipping the video-load path).
-    if (seedKind === 'image') _retargetEditorAnchor(_editProject.tracks.V1[0]);
-    // Start each clip at fit (scale 1, no pan) — leftover pan from a
-    // previous clip is rarely what the user wants.
-    _editView.scale = 1; _editView.tx = 0; _editView.ty = 0;
-    _applyEditPreview();
   }
   function _closeEditor() {
     _editState.open = false;
@@ -1857,8 +1500,7 @@ export function init(deps) {
     }
     _dragHandle = null;
   });
-  // Slider wiring — generic factory so the EDIT panel and the PROCESS
-  // popover use the same code path.
+  // Slider wiring — generic factory for the EDIT panel filter controls.
   function _bindSlider(id, valSel, state, key, suffix, decimals) {
     const slider = document.getElementById(id);
     const valEl  = document.querySelector(`.vis-edit-filter-val[data-for="${valSel}"]`);
@@ -1879,11 +1521,6 @@ export function init(deps) {
   _bindSlider('vis-edit-saturation',  'saturation', _editState, 'saturation', '%',  0);
   _bindSlider('vis-edit-hue',         'hue',        _editState, 'hue',        '°',  0);
   _bindSlider('vis-edit-blur',        'blur',       _editState, 'blur',       'px', 1);
-  _bindSlider('vis-proc-brightness',  'proc-brightness', _procFilterState, 'brightness', '%',  0);
-  _bindSlider('vis-proc-contrast',    'proc-contrast',   _procFilterState, 'contrast',   '%',  0);
-  _bindSlider('vis-proc-saturation',  'proc-saturation', _procFilterState, 'saturation', '%',  0);
-  _bindSlider('vis-proc-hue',         'proc-hue',        _procFilterState, 'hue',        '°',  0);
-  _bindSlider('vis-proc-blur',        'proc-blur',       _procFilterState, 'blur',       'px', 1);
   // New EDIT sliders.
   _bindSlider('vis-edit-sharpen',  'sharpen',  _editState, 'sharpen',  '%', 0);
   _bindSlider('vis-edit-vignette', 'vignette', _editState, 'vignette', '%', 0);
@@ -1912,8 +1549,6 @@ export function init(deps) {
   }
   _wireToggle(editAutoBtn,    _editState, 'auto',    _applyEditPreview);
   _wireToggle(editDenoiseBtn, _editState, 'denoise', _applyEditPreview);
-  _wireToggle(document.getElementById('vis-proc-auto'),    _procFilterState, 'auto',    null);
-  _wireToggle(document.getElementById('vis-proc-denoise'), _procFilterState, 'denoise', null);
   // EFFECTS toggles: B&W / sepia / invert (mutex — picking one clears
   // the others), reverse, mute. flipH/flipV (TRANSFORM) handled here too
   // since they also use the same toggle pattern.
@@ -2346,41 +1981,357 @@ export function init(deps) {
   // the `_refreshEditBtn();` calls added next to each `_refreshDeleteBtn()`
   // callsite).
   _refreshEditBtn();
-  // Expose process-filter state so the existing PROCESS submission
-  // can read it without us threading it through every helper.
-  window._procFilterState = _procFilterState;
 
-  // ── MUTE toggle ─────────────────────────────────────────────────
-  // Drives visualizerVideoEl.muted. Persists the user's preference
-  // separately from the live element state — the mirror needs to
-  // force-mute (so audio doesn't double up since the source already
-  // plays through the OS speakers), but that shouldn't permanently
-  // override what the user picked for recording playback. _applyMute()
-  // is called whenever we transition between playback modes to keep
-  // the live state in sync with the saved preference.
+  // ── SOUND toggle (recording-audio gate) ─────────────────────────
+  // The mirror video element is always muted — the source app is
+  // already playing through the OS speakers, so anything we'd play
+  // from the mirror would double the user's audio. The button used
+  // to toggle that mute, which is what was causing the doubling.
+  //
+  // It now controls a single flag, `_recCaptureAudio`, that
+  // determines whether _startScreenrec spins up the WASAPI loopback
+  // track. Default is TRUE (recordings get audio). The button is
+  // `is-active` (lit/red) when the flag is OFF — a deliberate
+  // warning style: "your next recording will be silent."
   const muteBtn = document.getElementById('visualizer-mute-btn');
-  let _recRoomMutedPref = false;
-  function _paintMuteBtn(muted) {
+  let _recCaptureAudio = true;
+  // Surface on the closure scope so _startScreenrec can read it.
+  function _shouldCaptureAudio() { return _recCaptureAudio; }
+  function _paintSoundBtn() {
     if (!muteBtn) return;
-    muteBtn.textContent = muted ? 'SOUND' : 'MUTE';
-    muteBtn.title = muted ? 'Audio muted — click to unmute' : 'Audio on — click to mute';
-    muteBtn.classList.toggle('is-active', !!muted);
-  }
-  function _applyMute(muted) {
-    if (visualizerVideoEl) visualizerVideoEl.muted = !!muted;
-    _paintMuteBtn(!!muted);
+    muteBtn.textContent = 'SOUND';
+    muteBtn.title = _recCaptureAudio
+      ? 'System audio capture ON — click to mute all system sources'
+      : 'System audio capture OFF — click to enable';
+    // Normal toggle: lit = ON. Use the MIXER rows to control
+    // per-source levels and mutes; this button is the global gate.
+    muteBtn.classList.toggle('is-active', _recCaptureAudio);
   }
   muteBtn?.addEventListener('click', async () => {
-    _recRoomMutedPref = !_recRoomMutedPref;
-    _applyMute(_recRoomMutedPref);
-    try { await window.dash?.setConfig?.({ recRoomMuted: _recRoomMutedPref }); } catch {}
+    _recCaptureAudio = !_recCaptureAudio;
+    _paintSoundBtn();
+    try { await window.dash?.setConfig?.({ recRoomCaptureAudio: _recCaptureAudio }); } catch {}
+    _renderMixer();
     playSfx?.('click');
   });
+
+  // ── MIC toggle (mic capture into the recording) ─────────────────
+  // Mirror of SOUND: lit when OFF, default ON. The permission grant
+  // is deferred to recording start so the mic doesn't sit open
+  // between sessions; this button just controls the flag.
+  const micBtn = document.getElementById('visualizer-mic-btn');
+  let _recCaptureMic = true;
+  function _shouldCaptureMic() { return _recCaptureMic; }
+  function _paintMicBtn() {
+    if (!micBtn) return;
+    micBtn.textContent = 'MIC';
+    micBtn.title = _recCaptureMic
+      ? 'Microphone capture ON — click to mute all mics'
+      : 'Microphone capture OFF — click to enable';
+    // Normal toggle: lit = ON. Per-mic levels live in the MIXER.
+    micBtn.classList.toggle('is-active', _recCaptureMic);
+  }
+  micBtn?.addEventListener('click', async () => {
+    _recCaptureMic = !_recCaptureMic;
+    _paintMicBtn();
+    try { await window.dash?.setConfig?.({ recRoomCaptureMic: _recCaptureMic }); } catch {}
+    _renderMixer();
+    playSfx?.('click');
+  });
+
+  // ── MIXER (pre-record audio bus) ────────────────────────────────
+  // Per-source mute + volume that the recorder honors. State is
+  // keyed by source kind: 'system' / 'mic' / 'window'. Sources only
+  // render in the panel when their owning toggle is on (SOUND for
+  // system, MIC for mic, mirror-audio-tracks-present for window).
+  const _mixer = {
+    system: { muted: false, vol: 100 },
+    mic:    { muted: false, vol: 100 },
+    window: { muted: false, vol: 100 },
+  };
+  const _mixerRowsEl = document.getElementById('visualizer-mixer-rows');
+  function _activeMixerSources() {
+    const active = [];
+    if (_recCaptureAudio) active.push({ kind: 'system', label: 'SYSTEM' });
+    if (_recCaptureMic)   active.push({ kind: 'mic',    label: 'MIC' });
+    // Window audio shows up when the mirror exposes an audio track —
+    // depends on the source the user picked. Re-check on every render
+    // so picking a new source updates the panel.
+    if (_mirrorStream?.getAudioTracks?.().length) {
+      active.push({ kind: 'window', label: 'WINDOW' });
+    }
+    return active;
+  }
+  function _renderMixer() {
+    if (!_mixerRowsEl) return;
+    const sources = _activeMixerSources();
+    _mixerRowsEl.innerHTML = '';
+    if (!sources.length) {
+      const empty = document.createElement('div');
+      empty.className = 'visualizer-mixer-empty';
+      empty.textContent = 'NO ACTIVE SOURCES · TURN ON SOUND OR MIC TO ENABLE';
+      _mixerRowsEl.appendChild(empty);
+      return;
+    }
+    for (const src of sources) {
+      const state = _mixer[src.kind];
+      const row = document.createElement('div');
+      row.className = 'visualizer-mixer-row' + (state.muted ? ' is-muted' : '');
+      row.dataset.kind = src.kind;
+      const k = document.createElement('span'); k.className = 'visualizer-mixer-k'; k.textContent = src.label;
+      const mute = document.createElement('button');
+      mute.type = 'button';
+      mute.className = 'visualizer-mixer-mute' + (state.muted ? ' is-muted' : '');
+      mute.textContent = state.muted ? 'MUTED' : 'MUTE';
+      mute.title = state.muted ? 'Un-mute this source in the mix' : 'Mute this source in the mix';
+      mute.addEventListener('click', async () => {
+        state.muted = !state.muted;
+        await _persistMixer();
+        _renderMixer();
+        playSfx?.('click');
+      });
+      const slide = document.createElement('input');
+      slide.type = 'range'; slide.min = '0'; slide.max = '150'; slide.step = '1'; slide.value = String(state.vol);
+      const v = document.createElement('span'); v.className = 'visualizer-mixer-v'; v.textContent = String(state.vol);
+      slide.addEventListener('input', () => {
+        const next = parseInt(slide.value, 10);
+        if (Number.isFinite(next)) {
+          state.vol = next;
+          v.textContent = String(next);
+          // Hot-apply when a recording is active — gain nodes are
+          // kept on _screenrecState.mixerNodes for exactly this.
+          const mn = _screenrecState?.mixerNodes?.[src.kind];
+          if (mn?.gain) mn.gain.gain.value = (state.muted ? 0 : next / 100);
+        }
+      });
+      slide.addEventListener('change', _persistMixer);
+      // Peak-style level meter. Width is driven by a CSS --level custom
+      // property that _meterLoop sets every ~33 ms during recording.
+      // Idle (no recording) just stays at 0 — the dark bar is the
+      // "this source is wired but not active" cue.
+      const meter = document.createElement('div');
+      meter.className = 'visualizer-mixer-meter';
+      meter.title = 'Signal level — green/yellow/red = quiet/loud/clipping';
+      const meterFill = document.createElement('div');
+      meterFill.className = 'visualizer-mixer-meter-fill';
+      meter.appendChild(meterFill);
+      row.appendChild(k);
+      row.appendChild(mute);
+      row.appendChild(slide);
+      row.appendChild(v);
+      row.appendChild(meter);
+      _mixerRowsEl.appendChild(row);
+    }
+  }
+  async function _persistMixer() {
+    try { await window.dash?.setConfig?.({ recRoomMixer: _mixer }); } catch {}
+  }
+  window.addEventListener('rec-mirror-changed', _renderMixer);
+
   (async () => {
     const cfg = await window.dash?.getConfig?.() || {};
-    _recRoomMutedPref = !!cfg.recRoomMuted;
-    _applyMute(_recRoomMutedPref);
+    // Default ON; only OFF if explicitly disabled by a prior session.
+    _recCaptureAudio = cfg.recRoomCaptureAudio !== false;
+    _recCaptureMic   = cfg.recRoomCaptureMic   !== false;
+    if (cfg.recRoomMixer && typeof cfg.recRoomMixer === 'object') {
+      for (const k of ['system', 'mic', 'window']) {
+        if (cfg.recRoomMixer[k]) Object.assign(_mixer[k], cfg.recRoomMixer[k]);
+      }
+    }
+    _paintSoundBtn();
+    _paintMicBtn();
+    _renderMixer();
+    // Meter loop runs forever — it reads from _mon.{kind}.analyser
+    // which is only populated when mirror is active, so the meters
+    // sit at 0 until the user starts mirroring (which calls
+    // _refreshMonitor to populate _mon).
+    _startMeterLoop();
   })();
+
+  // ── Persistent monitor graph (always-on level metering) ─────────
+  // Separate from _buildMixerStream's per-recording graph. This one is
+  // live whenever a source is toggled ON or the mirror has window audio,
+  // so the level meters animate at all times (not just during REC).
+  // Cheap: just an AnalyserNode per source; no MediaRecorder, no dest.
+  // Source streams:
+  //   • system: WASAPI loopback PCM (we subscribe to the same audify
+  //             worker the recording uses, scheduled into BufferSource
+  //             nodes that feed the analyser).
+  //   • mic:    a dedicated getUserMedia stream (separate from the
+  //             one _buildMixerStream opens at REC start).
+  //   • window: a MediaStreamSource off whatever audio tracks the
+  //             active mirror exposes.
+  const _mon = { ctx: null, system: null, mic: null, window: null };
+  async function _monCtx() {
+    if (_mon.ctx) return _mon.ctx;
+    try { _mon.ctx = new (window.AudioContext || window.webkitAudioContext)(); return _mon.ctx; }
+    catch (err) { console.warn('[mon] AudioContext failed:', err?.message || err); return null; }
+  }
+  function _makeMonAnalyser(ctx) {
+    const a = ctx.createAnalyser();
+    a.fftSize = 512;
+    a.smoothingTimeConstant = 0.35;
+    return a;
+  }
+  async function _monAttachSystem() {
+    if (_mon.system) return;
+    const ctx = await _monCtx(); if (!ctx) return;
+    const analyser = _makeMonAnalyser(ctx);
+    let nextStart = 0;
+    const handler = (data) => {
+      if (!data?.pcm) return;
+      const samples = data.pcm;
+      const ch = Math.max(1, data.channels | 0 || 2);
+      const sr = data.sampleRate | 0 || ctx.sampleRate;
+      const frames = (samples.length / ch) | 0;
+      if (frames < 1) return;
+      let buf;
+      try { buf = ctx.createBuffer(ch, frames, sr); } catch { return; }
+      for (let c = 0; c < ch; c++) {
+        const cd = buf.getChannelData(c);
+        for (let i = 0; i < frames; i++) cd[i] = samples[i * ch + c];
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(analyser);
+      const now = ctx.currentTime;
+      if (nextStart < now + 0.06) nextStart = now + 0.06;
+      try { src.start(nextStart); } catch {}
+      nextStart += buf.duration;
+    };
+    const unsub = window.dash?.onLoopbackPcm?.(handler) || (() => {});
+    try { await window.dash?.setLoopbackPcm?.(true); }
+    catch (err) { try { unsub(); } catch {}; console.warn('[mon] setLoopbackPcm failed:', err?.message || err); return; }
+    _mon.system = { analyser, unsub };
+    console.log('[mon] system attached');
+  }
+  function _monDetachSystem() {
+    if (!_mon.system) return;
+    try { _mon.system.unsub(); } catch {}
+    _mon.system = null;
+    // We do NOT call setLoopbackPcm(false) here — the recording path
+    // also turns it on/off via _buildLoopbackAudioTrack and we'd race.
+    // Leaving the worker forwarding PCM costs ~nothing if nobody's
+    // subscribed (it's a flag in main).
+    console.log('[mon] system detached');
+  }
+  async function _monAttachMic() {
+    if (_mon.mic) return;
+    const ctx = await _monCtx(); if (!ctx) return;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+      });
+    } catch (err) {
+      const msg = err?.message || err?.name || 'unknown';
+      console.warn('[mon] mic gUM failed:', msg, err);
+      if (visualizerNowEl) visualizerNowEl.textContent = `MIC FAILED · ${msg}`;
+      return;
+    }
+    const t0 = stream.getAudioTracks()[0];
+    console.log('[mon] mic attached:', { label: t0?.label || '(no label)', muted: t0?.muted, deviceId: t0?.getSettings?.()?.deviceId });
+    if (t0?.muted) {
+      if (visualizerNowEl) visualizerNowEl.textContent = `MIC MUTED AT OS · check Windows mic privacy`;
+    }
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = _makeMonAnalyser(ctx);
+    src.connect(analyser);
+    _mon.mic = { analyser, stream };
+  }
+  function _monDetachMic() {
+    if (!_mon.mic) return;
+    for (const t of _mon.mic.stream.getTracks()) { try { t.stop(); } catch {} }
+    _mon.mic = null;
+    console.log('[mon] mic detached');
+  }
+  async function _monAttachWindow() {
+    if (_mon.window) return;
+    const tracks = _mirrorStream?.getAudioTracks?.() || [];
+    if (!tracks.length) return;
+    const ctx = await _monCtx(); if (!ctx) return;
+    const stream = new MediaStream(tracks);
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = _makeMonAnalyser(ctx);
+    src.connect(analyser);
+    _mon.window = { analyser };
+    console.log('[mon] window attached:', tracks.length, 'track(s)');
+  }
+  function _monDetachWindow() {
+    if (!_mon.window) return;
+    _mon.window = null;
+    console.log('[mon] window detached');
+  }
+  // Called whenever a toggle flips, mirror changes, or recording
+  // starts/stops. Monitor is torn down when:
+  //   • mirror is OFF (no source to monitor)
+  //   • REC is active (the recording's _buildMixerStream opens its own
+  //     gUM / loopback subscription, and running both monitor + record
+  //     graphs in parallel was stalling MediaRecorder by contending for
+  //     the mic device / loopback PCM subscription on Windows).
+  // During REC the meter loop falls through to _screenrecState.mixerNodes
+  // analysers so meters keep animating from the recording's graph.
+  async function _refreshMonitor() {
+    const mirrorActive = !!_mirrorStream;
+    const recActive = !!_screenrecState;
+    if (!mirrorActive || recActive) {
+      _monDetachSystem(); _monDetachMic(); _monDetachWindow();
+      return;
+    }
+    if (_recCaptureAudio) await _monAttachSystem(); else _monDetachSystem();
+    if (_recCaptureMic)   await _monAttachMic();    else _monDetachMic();
+    const hasWin = (_mirrorStream?.getAudioTracks?.() || []).length > 0;
+    if (hasWin) await _monAttachWindow(); else _monDetachWindow();
+  }
+  // Special-case: when the mirror source changes, the WINDOW node still
+  // points at the old stream's tracks. Tear down + rebuild so the
+  // analyser tracks the new mirror.
+  function _monRebuildWindow() {
+    _monDetachWindow();
+    const hasWin = (_mirrorStream?.getAudioTracks?.() || []).length > 0;
+    if (hasWin) _monAttachWindow();
+  }
+
+  // Meter loop — always running. Per row, peak-detects from the active
+  // monitor analyser (or zeros the meter if that source isn't attached).
+  // The meter element is a CSS-driven fill bar; the only per-frame work
+  // is the analyser fill + a peak scan over 512 samples.
+  let _meterRaf = 0;
+  const _meterBuf = new Uint8Array(512);
+  function _startMeterLoop() {
+    if (_meterRaf) return;
+    const tick = () => {
+      if (!_mixerRowsEl) { _meterRaf = 0; return; }
+      for (const kind of ['system', 'mic', 'window']) {
+        const row = _mixerRowsEl.querySelector(`[data-kind="${kind}"]`);
+        if (!row) continue;
+        // Prefer the recording graph's analyser when REC is active —
+        // the monitor is torn down during REC to avoid hardware
+        // contention, so this is where meters come from mid-recording.
+        const analyser = _screenrecState?.mixerNodes?.[kind]?.analyser
+                       || _mon[kind]?.analyser;
+        if (!analyser) { row.style.setProperty('--level', '0'); continue; }
+        try { analyser.getByteTimeDomainData(_meterBuf); } catch { continue; }
+        // Peak deviation from 128 (silence) → 0..128 → map to dB then
+        // to 0..1 across a -60 dB → 0 dB range so quiet speech is
+        // still visible instead of crammed into the bottom 5%.
+        let peak = 0;
+        for (let i = 0; i < _meterBuf.length; i++) {
+          const v = Math.abs(_meterBuf[i] - 128);
+          if (v > peak) peak = v;
+        }
+        const amp = peak / 128;
+        const db  = amp > 0.0001 ? 20 * Math.log10(amp) : -80;
+        const lvl = Math.max(0, Math.min(1, (db + 60) / 60));
+        row.style.setProperty('--level', lvl.toFixed(3));
+      }
+      _meterRaf = requestAnimationFrame(tick);
+    };
+    _meterRaf = requestAnimationFrame(tick);
+  }
+  function _stopMeterLoop() {
+    if (_meterRaf) { cancelAnimationFrame(_meterRaf); _meterRaf = 0; }
+  }
 
 
   // ── MIRROR: route the active video into this pane ────────────────
@@ -2393,12 +2344,194 @@ export function init(deps) {
   // the surrounding chrome (play/pause, audio viz, etc.) keeps working.
   // Toggle off → tracks are stopped and srcObject cleared.
   const mirrorBtn = document.getElementById('visualizer-mirror-btn');
-  const sourceBtn = document.getElementById('visualizer-source-btn');
-  const sourcePickerEl = document.getElementById('visualizer-source-picker');
-  const sourceListEl   = document.getElementById('visualizer-source-list');
-  const sourceCloseBtn = document.getElementById('visualizer-source-close');
-  const screencapBtn   = document.getElementById('visualizer-screencap-btn');
+  // Inline source strip — replaces the old fullscreen picker. Holds one
+  // button per available screen/window; SCAN refreshes the list. Cameras
+  // live in their own strip next to the mixer (see camStripBodyEl).
+  const sourceStripEl = document.getElementById('visualizer-source-strip');
+  const sourceScanBtn = document.getElementById('visualizer-source-scan');
+  // Direct-URL playback — paste a .mp4 / .webm / .m3u8 / etc. and the
+  // mirror switches to URL mode (videoEl.src = url) instead of screen
+  // capture. captureStream() turns the playing element back into a
+  // MediaStream so the rec pipeline records it identically.
+  const sourceUrlEl   = document.getElementById('visualizer-source-url');
+  const sourceUrlGoBtn = document.getElementById('visualizer-source-url-go');
+  const camStripBodyEl = document.getElementById('visualizer-cam-strip-body');
+  const screencapBtn  = document.getElementById('visualizer-screencap-btn');
+  const stealthBtn    = document.getElementById('visualizer-stealth-btn');
   let _mirrorStream = null;
+  // Track which mirror MODE is currently active so teardown knows
+  // whether it also needs to clear videoEl.src (URL mode) on top of
+  // the always-required srcObject reset (stream mode).
+  let _urlMirrorActive = false;
+  // STEALTH: mute the preview speakers while leaving the recording
+  // audio fully intact. Chromium's captureStream() drops audio when
+  // the element's `muted` flag is set, so we route playback through a
+  // Web Audio graph:
+  //
+  //   MediaElementSource → stealthGain → AudioContext.destination  (speakers, gated)
+  //                      → MediaStreamDestination                   (recording, always full)
+  //
+  // The graph is lazy-created on the first URL mirror — once it
+  // exists, the element's default <audio> output is gone forever
+  // (Chromium routes everything through the graph), so the gain
+  // ALSO controls speaker output for screen / multi-cam mirror modes.
+  // _updateGainForCurrentMode picks the right gain target each time
+  // a mirror starts / stops or stealth toggles.
+  let _stealthOn = false;
+  let _audioCtx = null;
+  let _mediaSrc = null;
+  let _stealthGain = null;
+  let _recAudioDest = null;
+  function _ensureAudioGraph() {
+    if (_mediaSrc || !visualizerVideoEl) return !!_mediaSrc;
+    try {
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      _mediaSrc = _audioCtx.createMediaElementSource(visualizerVideoEl);
+      _stealthGain = _audioCtx.createGain();
+      _stealthGain.gain.value = 1;
+      _mediaSrc.connect(_stealthGain).connect(_audioCtx.destination);
+      _recAudioDest = _audioCtx.createMediaStreamDestination();
+      _mediaSrc.connect(_recAudioDest);
+      return true;
+    } catch (err) {
+      console.warn('[stealth] audio graph init failed:', err?.message || err);
+      _audioCtx = null; _mediaSrc = null; _stealthGain = null; _recAudioDest = null;
+      return false;
+    }
+  }
+  // Resolve the target gain based on what's currently driving the
+  // <video> element. Cam mirror + screen mirror always 0 (their audio
+  // reaches the recorder through other paths and we don't want the
+  // page speakers doubling it); URL mirror obeys stealth; file
+  // playback / no source uses 1 so the gallery still has sound.
+  function _updateGainForCurrentMode() {
+    if (!_stealthGain) return;
+    let g = 1;
+    if (_urlMirrorActive) g = _stealthOn ? 0 : 1;
+    else if (_multiCamState) g = 0;
+    else if (_mirrorStream)  g = 0;
+    _stealthGain.gain.value = g;
+  }
+  // Kept for the existing call sites that ask "apply current preview-
+  // mute state" — now just re-evaluates the gain.
+  function _applyPreviewMute() {
+    _updateGainForCurrentMode();
+  }
+  function _setStealth(on) {
+    _stealthOn = !!on;
+    stealthBtn?.classList.toggle('is-active', _stealthOn);
+    // Blackout overlay only applies when stealth is on AND a URL
+    // mirror is the live source (the only mode where stealth means
+    // anything to the user). Without the second guard, the overlay
+    // would also cover gallery file playback.
+    _refreshStealthOverlay();
+    _updateGainForCurrentMode();
+    // User-gesture moment — kick the AudioContext awake if Chromium
+    // has suspended it since URL mirror startup (idle timer, device
+    // change, etc.). A suspended _audioCtx makes _recAudioDest emit
+    // no samples; a record fired immediately after a stealth toggle
+    // would otherwise produce a silent clip even though stealth was
+    // meant to preserve the recording branch. .resume() is a no-op
+    // when the context is already running, so this is safe to call
+    // unconditionally on every toggle.
+    if (_audioCtx && _audioCtx.state === 'suspended') {
+      _audioCtx.resume().catch((err) => {
+        console.warn('[stealth] audio ctx resume failed:', err?.message || err);
+      });
+    }
+    try { window.dash?.setConfig?.({ recRoomStealth: _stealthOn }); } catch {}
+  }
+  function _refreshStealthOverlay() {
+    if (!visualizerWrapEl) return;
+    visualizerWrapEl.classList.toggle('is-stealth', _stealthOn && _urlMirrorActive);
+  }
+  stealthBtn?.addEventListener('click', () => {
+    _setStealth(!_stealthOn);
+    playSfx?.('click');
+  });
+  (async () => {
+    try {
+      const cfg = await window.dash?.getConfig?.();
+      if (cfg?.recRoomStealth) _setStealth(true);
+    } catch {}
+  })();
+
+  // ── Player-wrap overlay STEALTH + REC buttons ──────────────────
+  // Forward clicks to the source topbar buttons so there's one
+  // logic owner (_setStealth / _startScreenrec / _stopScreenrec).
+  // MutationObserver mirrors .is-active from the source buttons so
+  // the overlay visual state stays in sync without us touching every
+  // toggle site. Cheap — only fires on actual class changes.
+  const stealthBtnOverlay   = document.getElementById('visualizer-stealth-btn-overlay');
+  const screenrecBtnOverlay = document.getElementById('visualizer-screenrec-btn-overlay');
+  stealthBtnOverlay?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    stealthBtn?.click();
+  });
+  screenrecBtnOverlay?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('visualizer-screenrec-btn')?.click();
+  });
+  const _mirrorBtnActive = (src, dst) => {
+    if (!src || !dst) return;
+    const sync = () => dst.classList.toggle('is-active', src.classList.contains('is-active'));
+    new MutationObserver(sync).observe(src, { attributes: true, attributeFilter: ['class'] });
+    sync();
+  };
+  _mirrorBtnActive(stealthBtn, stealthBtnOverlay);
+  _mirrorBtnActive(document.getElementById('visualizer-screenrec-btn'), screenrecBtnOverlay);
+  // Manual orientation toggle. Auto-detect by source dims was tried first
+  // but failed to fire reliably (loadedmetadata races, captureStream-only
+  // sources with no early dims, etc.), so the user chose to drive this
+  // by hand. The button label always shows the OTHER orientation —
+  // clicking does what the label says.
+  const orientBtn = document.getElementById('visualizer-orient-btn');
+  let _portraitLayout = false;
+  function _setPortraitLayout(on) {
+    _portraitLayout = !!on;
+    visualizerPane?.classList.toggle('is-portrait-source', _portraitLayout);
+    if (orientBtn) {
+      orientBtn.classList.toggle('is-active', _portraitLayout);
+      orientBtn.setAttribute('aria-pressed', _portraitLayout ? 'true' : 'false');
+      const label = orientBtn.querySelector('.visualizer-orient-label');
+      if (label) label.textContent = _portraitLayout ? '16:9' : '9:16';
+      orientBtn.title = _portraitLayout
+        ? 'Switch player layout back to horizontal (16:9)'
+        : 'Switch player layout to vertical (9:16) — controls move to a column on the right';
+    }
+    try { window.dash?.setConfig?.({ recRoomPortrait: _portraitLayout }); } catch {}
+  }
+  orientBtn?.addEventListener('click', () => {
+    _setPortraitLayout(!_portraitLayout);
+    playSfx?.('click');
+  });
+  (async () => {
+    try {
+      const cfg = await window.dash?.getConfig?.();
+      if (cfg?.recRoomPortrait) _setPortraitLayout(true);
+    } catch {}
+  })();
+  // Multi-cam composite state. Populated by _startMultiCamMirror; torn
+  // down by _stopVisualizerMirror. Holds the per-cam streams, hidden
+  // <video> elements, the compositing canvas + raf, and the Web Audio
+  // graph so stop can release everything cleanly.
+  let _multiCamState = null;
+  // Cached videoinput/audioinput devices, refreshed on each picker open.
+  // groupId is used to pair a cam with its built-in mic.
+  let _camDevices = [];
+  let _micDevices = [];
+  // Set of deviceIds currently ticked in the WEBCAMS list.
+  let _camPicked = new Set();
+  // Resolution presets for the multi-cam composite. Drives both the
+  // getUserMedia constraint and the canvas size, so the recording lands
+  // at exactly the chosen resolution.
+  const _CAM_RES_PRESETS = {
+    '480p':  { w:  854, h:  480 },
+    '720p':  { w: 1280, h:  720 },
+    '1080p': { w: 1920, h: 1080 },
+    '4k':    { w: 3840, h: 2160 },
+  };
+  let _camResolution = '720p';
   // When set (via picker), startMirror uses this source instead of
   // calling the auto-pick IPC. Cleared on stop so the next plain MIRROR
   // click falls back to auto-pick.
@@ -2409,24 +2542,380 @@ export function init(deps) {
     if (typeof _stopScreenrec === 'function' && _screenrecState) {
       try { _stopScreenrec(); } catch {}
     }
+    // Multi-cam composite: stop the per-cam streams, detach the hidden
+    // video elements, cancel the draw loop, and close the audio mix
+    // graph. Done BEFORE we stop _mirrorStream's tracks so the canvas
+    // captureStream gets a clean shutdown.
+    if (_multiCamState) {
+      try { _multiCamState.cancel?.(); } catch {}
+      // Order matters for OS device release on Chromium: detach the
+      // video element FIRST (so Chromium drops its internal pin on
+      // the stream), THEN remove each track from its stream AND
+      // call stop(). Skipping removeTrack often leaves the OS-level
+      // capture alive (cam LED stays on) even though stop() returned.
+      for (const v of _multiCamState.videos || []) {
+        try { v.pause(); } catch {}
+        v.srcObject = null;
+        try { v.parentNode?.removeChild(v); } catch {}
+      }
+      let _stopCount = 0;
+      for (const c of _multiCamState.cams || []) {
+        const tracks = c.stream?.getTracks?.() || [];
+        for (const tr of tracks) {
+          try { c.stream.removeTrack?.(tr); } catch {}
+          try { tr.stop(); _stopCount++; }
+          catch (err) { console.warn('[multi-cam] track.stop() threw:', err?.message || err); }
+        }
+        // Drop our reference so GC can release the stream object.
+        c.stream = null;
+        console.log('[multi-cam] stopped tracks for', c.label || c.camId, '→', tracks.length, 'tracks');
+      }
+      console.log('[multi-cam] teardown: stopped', _stopCount, 'tracks total across', _multiCamState.cams?.length || 0, 'cams');
+      // Composite canvas was parented to the cam-video host; detach so
+      // it doesn't linger after stop.
+      try { _multiCamState.canvas?.parentNode?.removeChild(_multiCamState.canvas); } catch {}
+      for (const n of _multiCamState.audioNodes || []) { try { n.disconnect(); } catch {} }
+      try { _multiCamState.mixDest?.disconnect?.(); } catch {}
+      try { _multiCamState.audioCtx?.close?.(); } catch {}
+      _multiCamState = null;
+    }
     if (_mirrorStream) {
-      for (const tr of _mirrorStream.getTracks()) { try { tr.stop(); } catch {} }
+      // Audio tracks from our persistent Web Audio dest belong to the
+      // graph — stopping them would kill the dest for future URL
+      // mirrors. Filter them out and stop everything else.
+      const graphAudioTracks = _recAudioDest?.stream?.getAudioTracks?.() || [];
+      for (const tr of _mirrorStream.getTracks()) {
+        if (graphAudioTracks.includes(tr)) continue;
+        try { tr.stop(); } catch {}
+      }
       _mirrorStream = null;
     }
     if (visualizerVideoEl) {
+      // Clear BOTH attachment modes — screen mirror uses srcObject,
+      // URL mirror uses src. Setting both to empty guarantees the
+      // element releases its resources regardless of which path was
+      // active.
       visualizerVideoEl.srcObject = null;
+      if (_urlMirrorActive) {
+        try { visualizerVideoEl.pause(); } catch {}
+        visualizerVideoEl.removeAttribute('src');
+        try { visualizerVideoEl.load(); } catch {}
+      }
+      // .muted has been a no-op since the Web Audio graph was created
+      // (Chromium routes through the graph from then on), but reset
+      // it to false anyway so gallery file playback before any URL
+      // mirror still has audio.
+      visualizerVideoEl.muted = false;
     }
+    _urlMirrorActive = false;
+    _updateGainForCurrentMode(); // file playback / no source → gain=1
+    _refreshStealthOverlay();    // no URL mirror → overlay off even if stealth still flagged
     mirrorBtn?.classList.remove('is-active');
     if (mirrorBtn) mirrorBtn.textContent = 'MIRROR';
-    visualizerWrapEl?.classList.remove('is-mirroring');
+    visualizerWrapEl?.classList.remove('is-mirroring', 'is-url-mirror');
     _mirrorSourceOverride = null;
+    // Mirror is gone — the WINDOW source row in the MIXER also goes
+    // away. Refresh the panel so the user sees the change without
+    // having to toggle SOUND/MIC.
+    try { _renderMixer?.(); } catch {}
     // Drop the dynamic source-aspect; the wrap goes back to default
     // full-pane-width sizing until the next mirror or playback.
     if (typeof _setSourceDims === 'function') _setSourceDims(0, 0);
-    // Restore the user's saved mute preference now that the mirror's
-    // force-mute is no longer needed.
-    if (typeof _applyMute === 'function') _applyMute(!!_recRoomMutedPref);
   }
+  // Multi-cam composite: open N webcams in parallel, paint each into a
+  // tile of one canvas, mix all their mics into one audio track via Web
+  // Audio, then expose the canvas-captureStream + mixed audio as the
+  // mirror stream so REC / KEYS / OSD / mute all keep working unchanged.
+  //
+  // Grid: 1=full, 2=side-by-side, 3-4=2x2, 5-9=3x3. Each tile is
+  // letterboxed to preserve aspect.
+  function _camGridLayout(n) {
+    if (n <= 1) return { cols: 1, rows: 1 };
+    if (n <= 2) return { cols: 2, rows: 1 };
+    if (n <= 4) return { cols: 2, rows: 2 };
+    return { cols: 3, rows: 3 };
+  }
+  async function _startMultiCamMirror(deviceIds) {
+    if (!visualizerVideoEl || !deviceIds?.length) return;
+    // Cap at the 9-tile grid limit so we don't try to open 12 cams.
+    if (deviceIds.length > 9) deviceIds = deviceIds.slice(0, 9);
+    // Any prior mirror (single source OR a previous multi-cam) must be
+    // fully torn down before we acquire new tracks. _stopVisualizerMirror
+    // already cascades into any running screen record.
+    if (_mirrorStream || _multiCamState) {
+      try { _stopVisualizerMirror(); } catch {}
+    }
+    // Pair each cam with its same-groupId mic (built-in array). If none
+    // exists, the cam goes video-only and the rest still get audio.
+    // Resolution comes from the active CAM RES preset — drives both the
+    // getUserMedia request and the composite canvas size below.
+    const preset = _CAM_RES_PRESETS[_camResolution] || _CAM_RES_PRESETS['720p'];
+    const open = await Promise.all(deviceIds.map(async (camId) => {
+      const cam = _camDevices.find((d) => d.deviceId === camId);
+      const pairedMic = cam && _micDevices.find((m) => m.groupId && m.groupId === cam.groupId);
+      const constraints = {
+        video: {
+          deviceId: { exact: camId },
+          width:  { ideal: preset.w },
+          height: { ideal: preset.h },
+          frameRate: { ideal: 30 },
+        },
+        audio: pairedMic ? { deviceId: { exact: pairedMic.deviceId } } : false,
+      };
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        return { camId, label: cam?.label || 'Camera', stream, hadAudio: !!pairedMic };
+      } catch (err1) {
+        // Retry video-only — common when the paired mic is busy or denied.
+        if (constraints.audio) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video, audio: false });
+            console.warn('[multi-cam] mic dropped for', cam?.label || camId, '—', err1?.message || err1);
+            return { camId, label: cam?.label || 'Camera', stream, hadAudio: false };
+          } catch (err2) {
+            console.warn('[multi-cam] cam failed:', cam?.label || camId, err2?.message || err2);
+            return null;
+          }
+        }
+        console.warn('[multi-cam] cam failed:', cam?.label || camId, err1?.message || err1);
+        return null;
+      }
+    }));
+    const cams = open.filter(Boolean);
+    if (!cams.length) {
+      playSfx?.('error');
+      return;
+    }
+    // Hidden <video> per cam — drawImage needs a video element, not a
+    // raw MediaStream. Chromium can SUSPEND rendering for video
+    // elements that are off-DOM OR far offscreen (the compositor
+    // skips them, so drawImage reads back black). Workaround: park
+    // them inside the visualizer wrap (which is always on-screen
+    // while REC ROOM is open) at 1×1 with opacity 0. The element is
+    // technically rendering — invisibly — so its frame data is
+    // actually available to the canvas.
+    let _camVideoHost = document.getElementById('visualizer-cam-video-host');
+    if (!_camVideoHost) {
+      _camVideoHost = document.createElement('div');
+      _camVideoHost.id = 'visualizer-cam-video-host';
+      _camVideoHost.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden;z-index:0;';
+      // Park inside the visualizer player wrap so the host moves with
+      // the panel and stays "on-screen" as far as the compositor cares.
+      // Fall back to document.body if the wrap isn't in the DOM yet.
+      const host = visualizerWrapEl || document.body;
+      host.appendChild(_camVideoHost);
+    }
+    const videos = cams.map((c) => {
+      const v = document.createElement('video');
+      v.autoplay = true;
+      v.muted = true;        // we capture mics via Web Audio; the <video> must not play them
+      v.playsInline = true;
+      v.style.cssText = 'width:1px;height:1px;display:block;';
+      v.srcObject = c.stream;
+      _camVideoHost.appendChild(v);
+      v.play().catch((err) => console.warn('[multi-cam] hidden video play() rejected:', err?.message || err));
+      // Diagnostic — fires once the cam pumps its first frame into the
+      // hidden video. If this never logs, the canvas will stay black
+      // regardless of filters because drawImage has nothing to read.
+      v.addEventListener('loadedmetadata', () => {
+        console.log('[multi-cam] cam frame source live:', c.label || c.camId, `${v.videoWidth}x${v.videoHeight}`);
+      }, { once: true });
+      return v;
+    });
+    // Composite canvas sized by the active CAM RES preset — same number
+    // of pixels as the user asked the cam to deliver, so we don't
+    // upscale or downscale on the recording pass.
+    const COMPOSITE_W = preset.w, COMPOSITE_H = preset.h, FPS = 30;
+    const canvas = document.createElement('canvas');
+    canvas.width = COMPOSITE_W;
+    canvas.height = COMPOSITE_H;
+    // Park the composite canvas inside the cam-video host (same opacity-0
+    // 1×1 trick we use for the hidden cam <video>s). When the canvas is
+    // fully detached from the DOM, Chromium's ctx.filter pipeline drops
+    // CSS filter functions (brightness/contrast/saturate/hue) silently
+    // — only SVG-filter url() references make it through, and even those
+    // fail above 720p. Re-parenting forces the canvas into the renderer
+    // tree so every filter applies regardless of res.
+    try {
+      canvas.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+      _camVideoHost.appendChild(canvas);
+    } catch {}
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const { cols, rows } = _camGridLayout(cams.length);
+    const tw = COMPOSITE_W / cols;
+    const th = COMPOSITE_H / rows;
+    let canceled = false;
+    let intervalId = 0;
+    const draw = () => {
+      if (canceled) return;
+      // Two passes: filtered drawImage for the cam tiles, then a
+      // clean (unfiltered) pass for the letterbox bg + tile borders
+      // so the user's B&W / gamma / hue chain only colors actual
+      // camera pixels, not the chrome around them.
+      ctx.filter = 'none';
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, COMPOSITE_W, COMPOSITE_H);
+      // Pass 1 — apply the live cam-filter chain, drawImage each cam.
+      let filterStr = 'none';
+      try { filterStr = _camFilterMod.getFilterString(); } catch {}
+      ctx.filter = filterStr;
+      for (let i = 0; i < videos.length; i++) {
+        const v = videos[i];
+        const vw = v.videoWidth | 0;
+        const vh = v.videoHeight | 0;
+        if (!vw || !vh) continue;
+        const r = Math.floor(i / cols), c = i % cols;
+        const tx = c * tw, ty = r * th;
+        const sr = vw / vh, dr = tw / th;
+        let dw, dh;
+        if (sr > dr) { dw = tw; dh = tw / sr; }
+        else { dh = th; dw = th * sr; }
+        const dx = tx + (tw - dw) / 2;
+        const dy = ty + (th - dh) / 2;
+        try { ctx.drawImage(v, dx, dy, dw, dh); }
+        catch (err) { console.warn('[multi-cam] drawImage threw cam', i, ':', err?.message || err); }
+      }
+      // Pass 1.5 — LUT grade. Routes the just-drawn composite through
+      // a WebGL2 sampler3D, then paints the graded result back onto
+      // the same canvas with drawImage. We do this BEFORE borders so
+      // the white tile outlines stay pure (LUT can dramatically warp
+      // pure whites otherwise).
+      try {
+        if (_lutApplier) {
+          const sel = _camFilterMod.getLut?.() || null;
+          // Kick a load when the picker changes — loadFromPath is
+          // idempotent against the current key, so re-calling each
+          // frame is cheap. The await happens in the background; the
+          // next frame after it settles will see hasLut() === true.
+          if (sel?.path) {
+            if (_lutApplier.getKey() !== sel.path) {
+              _lutApplier.loadFromPath(sel.path);
+            }
+          } else if (_lutApplier.getKey()) {
+            _lutApplier.loadFromPath(null);
+          }
+          if (_lutApplier.hasLut() && sel?.path) {
+            const amt = Math.max(0, Math.min(1, (_camFilterMod.getLutAmount?.() ?? 100) / 100));
+            if (_lutApplier.applyTo(canvas, amt)) {
+              ctx.filter = 'none';
+              ctx.drawImage(_lutApplier.getCanvas(), 0, 0, COMPOSITE_W, COMPOSITE_H);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[multi-cam] LUT apply threw:', err?.message || err);
+      }
+      // Pass 2 — borders unfiltered so the white tile outlines don't
+      // pick up the user's B&W / hue settings.
+      ctx.filter = 'none';
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < videos.length; i++) {
+        const r = Math.floor(i / cols), c = i % cols;
+        const tx = c * tw, ty = r * th;
+        ctx.strokeRect(tx + 1, ty + 1, tw - 2, th - 2);
+      }
+    };
+    // setInterval, NOT requestAnimationFrame. The composite canvas is
+    // detached from the DOM (we only feed its captureStream into the
+    // visible <video>), and Chromium can pause rAF for detached pages
+    // — that bug stranded the loop at frame 1 ("draw tick 1 dims=0x0")
+    // before the cam's metadata arrived, so the player only ever saw
+    // a single black frame. setInterval fires regardless of compositor
+    // state, matching what the screen recorder already does for the
+    // same reason.
+    draw(); // sync first frame so captureStream has data on attach
+    intervalId = setInterval(draw, Math.floor(1000 / FPS));
+    // Web Audio mix of every cam's mic into one track. Cams that came
+    // back without audio simply contribute nothing here.
+    let audioCtx = null;
+    let mixDest = null;
+    const audioNodes = [];
+    const audioCams = cams.filter((c) => c.stream.getAudioTracks().length > 0);
+    if (audioCams.length) {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        mixDest = audioCtx.createMediaStreamDestination();
+        for (const c of audioCams) {
+          const src = audioCtx.createMediaStreamSource(c.stream);
+          // Equal-weight mix — if everyone yells at once it can clip,
+          // but matches the user's mental model of "every mic is on".
+          src.connect(mixDest);
+          audioNodes.push(src);
+        }
+      } catch (err) {
+        console.warn('[multi-cam] audio mix failed:', err?.message || err);
+        try { await audioCtx?.close?.(); } catch {}
+        audioCtx = null;
+        mixDest = null;
+      }
+    }
+    // Assemble the final mirror stream: composite video + mixed audio.
+    const composite = canvas.captureStream(FPS);
+    const tracks = [composite.getVideoTracks()[0]];
+    if (mixDest) {
+      const mixTrack = mixDest.stream.getAudioTracks()[0];
+      if (mixTrack) tracks.push(mixTrack);
+    }
+    const finalStream = new MediaStream(tracks.filter(Boolean));
+    _mirrorStream = finalStream;
+    _multiCamState = {
+      cams,
+      videos,
+      canvas,
+      cancel: () => { canceled = true; if (intervalId) { clearInterval(intervalId); intervalId = 0; } },
+      audioCtx,
+      mixDest,
+      audioNodes,
+    };
+    visualizerVideoEl.srcObject = finalStream;
+    visualizerVideoEl.muted = true; // no-op once the Web Audio graph exists
+    _updateGainForCurrentMode();     // gain=0 for multi-cam (cam mics route via mixDest)
+    if (typeof _setSourceDims === 'function') _setSourceDims(COMPOSITE_W, COMPOSITE_H);
+    const _playProm = visualizerVideoEl.play();
+    if (_playProm && typeof _playProm.then === 'function') {
+      _playProm.then(() => {
+        console.log('[multi-cam] visualizerVideoEl playing:',
+          visualizerVideoEl.videoWidth + 'x' + visualizerVideoEl.videoHeight,
+          'readyState=' + visualizerVideoEl.readyState,
+          'paused=' + visualizerVideoEl.paused);
+      }).catch((err) => {
+        console.warn('[multi-cam] visualizerVideoEl.play() rejected:', err?.message || err);
+      });
+    }
+    // Log captureStream track info — if no video track or settings are
+    // 0×0, the canvas isn't being captured properly.
+    try {
+      const vt = finalStream.getVideoTracks()[0];
+      const settings = vt?.getSettings?.() || {};
+      console.log('[multi-cam] captureStream:',
+        'tracks=' + finalStream.getTracks().length,
+        'video=' + finalStream.getVideoTracks().length,
+        'audio=' + finalStream.getAudioTracks().length,
+        'settings=' + JSON.stringify({ w: settings.width, h: settings.height, fps: settings.frameRate }));
+    } catch {}
+    visualizerWrapEl?.classList.add('is-mirroring');
+    mirrorBtn?.classList.add('is-active');
+    if (mirrorBtn) mirrorBtn.textContent = 'MIRROR ON';
+    if (visualizerNowEl) {
+      const names = cams.map((c) => c.label.split(' ').slice(0, 2).join(' ')).join(' + ');
+      visualizerNowEl.textContent = `MIRROR · ${cams.length} CAM${cams.length === 1 ? '' : 'S'} · ${names}`.toUpperCase();
+    }
+    // New mirror up — pull any WINDOW audio it brings into the mixer.
+    try { _renderMixer?.(); } catch {}
+    console.log('[multi-cam] started:', {
+      cams: cams.length,
+      audioTracks: finalStream.getAudioTracks().length,
+      videoTracks: finalStream.getVideoTracks().length,
+      grid: `${cols}x${rows}`,
+    });
+    // If the composite track ends (shouldn't normally — it's our canvas)
+    // disengage the mirror so the UI doesn't lie.
+    const vt = finalStream.getVideoTracks()[0];
+    if (vt) vt.addEventListener('ended', _stopVisualizerMirror, { once: true });
+    playSfx?.('confirm');
+  }
+
   async function _startVisualizerMirror() {
     if (!visualizerVideoEl) return;
     let src = _mirrorSourceOverride;
@@ -2484,25 +2973,13 @@ export function init(deps) {
         return;
       }
     }
-    // Diagnostic — confirm what tracks Chromium actually handed us.
-    // Window sources on Win32 always yield 0 audio tracks; screen
-    // sources usually yield 1. The REC button surfaces this to the
-    // user; the console log is the deep diagnostic.
-    console.log('[mirror] started:', {
-      sourceId: src.id,
-      kind: src.id?.startsWith('window:') ? 'window' : src.id?.startsWith('screen:') ? 'screen' : 'unknown',
-      audioTracks: _mirrorStream.getAudioTracks().length,
-      videoTracks: _mirrorStream.getVideoTracks().length,
-    });
     visualizerVideoEl.srcObject = _mirrorStream;
     // Force-mute the playback element while mirroring — the source
     // audio already plays through the OS speakers, so unmuting here
     // would double it. The MediaStream still carries the audio tracks
-    // so MediaRecorder picks them up. We don't write through to
-    // _recRoomMutedPref, so the user's saved preference is restored
-    // when the mirror stops.
-    visualizerVideoEl.muted = true;
-    _paintMuteBtn(true);
+    // so MediaRecorder picks them up.
+    visualizerVideoEl.muted = true; // no-op once the Web Audio graph exists
+    _updateGainForCurrentMode();     // gain=0 for screen mirror (OS plays loopback)
     // Read source dimensions off the track settings ASAP so the wrap
     // can size itself before the first frame paints. loadedmetadata
     // below also fires once the stream produces its first frame, which
@@ -2517,7 +2994,32 @@ export function init(deps) {
     visualizerWrapEl?.classList.add('is-mirroring');
     mirrorBtn?.classList.add('is-active');
     if (mirrorBtn) mirrorBtn.textContent = 'MIRROR ON';
-    if (visualizerNowEl) visualizerNowEl.textContent = `MIRROR · ${src.name || 'source'}`.toUpperCase();
+    // Compute a reduced aspect-ratio label (e.g. 1920×1080 → 16:9,
+    // 2560×1080 → 64:27 ~ 21:9). Snap to common monitor ratios so the
+    // label reads cleanly even when capture rounds dims by a pixel.
+    const _dimsLabel = () => {
+      const s = _mirrorStream?.getVideoTracks()[0]?.getSettings?.() || {};
+      const w = s.width | 0, h = s.height | 0;
+      if (!w || !h) return '';
+      return ` · ${w}×${h} (${_aspectLabel(w, h)})`;
+    };
+    if (visualizerNowEl) {
+      visualizerNowEl.textContent = `MIRROR · ${src.name || 'source'}${_dimsLabel()}`.toUpperCase();
+      // Settings may be empty until loadedmetadata; re-paint the line
+      // once the dims actually arrive so the user sees a real ratio.
+      const _refreshNow = () => {
+        if (!visualizerNowEl) return;
+        visualizerNowEl.textContent = `MIRROR · ${src.name || 'source'}${_dimsLabel()}`.toUpperCase();
+      };
+      visualizerVideoEl.addEventListener('loadedmetadata', _refreshNow, { once: true });
+    }
+    // Pin the active source so the strip button lights up — covers the
+    // auto-pick case (MIRROR clicked with no explicit selection), where
+    // _mirrorSourceOverride was null before this call.
+    _mirrorSourceOverride = { id: src.id, name: src.name };
+    try { _renderSourceStrip?.(); } catch {}
+    // New source up — pull any WINDOW audio it brings into the mixer.
+    try { _renderMixer?.(); } catch {}
     // If the captured stream ends (window closed, user revoked share),
     // auto-disengage so the UI doesn't lie about being live.
     const track = _mirrorStream.getVideoTracks()[0];
@@ -2533,1132 +3035,396 @@ export function init(deps) {
     }
   });
 
-  // ── Source picker ────────────────────────────────────────────────
-  // SOURCE button opens an inline list of every window + screen with
-  // thumbnails. Clicking one tears down the current mirror (if any)
-  // and restarts capture against the chosen source.
-  function _hideSourcePicker() {
-    if (!sourcePickerEl) return;
-    sourcePickerEl.hidden = true;
-    sourceBtn?.classList.remove('is-active');
-  }
-  async function _showSourcePicker() {
-    if (!sourcePickerEl || !sourceListEl || !window.dash?.visualizerListSources) return;
-    sourceListEl.innerHTML = '<li class="explore-empty">LOADING SOURCES…</li>';
-    sourcePickerEl.hidden = false;
-    sourceBtn?.classList.add('is-active');
-    let sources;
-    try { sources = await window.dash.visualizerListSources(); } catch { sources = null; }
-    if (!Array.isArray(sources) || !sources.length) {
-      sourceListEl.innerHTML = '<li class="explore-empty">NO SOURCES AVAILABLE</li>';
-      return;
+  // ── URL playback mirror ──────────────────────────────────────────
+  // Sets videoEl.src directly (no desktopCapturer) and uses
+  // captureStream() to surface the playing video as a MediaStream so
+  // the rec pipeline records the exact pixels and audio the user sees.
+  // Native HTML5 controls (play/pause/scrub/volume) work for free.
+  // Aspect is driven off the loaded video's intrinsic dimensions, so
+  // portrait sources render tall + narrow automatically.
+  async function _startUrlMirror(rawUrl) {
+    if (!visualizerVideoEl) return;
+    const url = String(rawUrl || '').trim();
+    if (!url) { playSfx?.('error'); return; }
+    // Tear down anything else holding the video element first — a
+    // prior screen mirror, multi-cam composite, or a previous URL
+    // session — so srcObject and src don't fight.
+    if (_mirrorStream || _multiCamState) {
+      try { _stopVisualizerMirror(); } catch {}
     }
-    // Layout: screens first, then windows grouped by owning application
-    // so picking "the Discord window" is one read down the list rather
-    // than a search through every visible window title. Within each
-    // app group the windows are sorted by title.
-    const screens = sources.filter((s) => s.kind === 'screen');
-    const windows = sources.filter((s) => s.kind !== 'screen');
-    screens.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    const appGroups = new Map();
-    for (const w of windows) {
-      const key = w.appName || 'Other';
-      if (!appGroups.has(key)) appGroups.set(key, []);
-      appGroups.get(key).push(w);
-    }
-    // Sort groups alphabetically; sort windows within a group by title.
-    const sortedGroups = [...appGroups.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]));
-    for (const [, list] of sortedGroups) {
-      list.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    }
-
-    sourceListEl.innerHTML = '';
-    const renderRow = (s) => {
-      const row = document.createElement('li');
-      row.className = 'visualizer-source-row';
-      row.dataset.id = s.id;
-      row.dataset.name = s.name;
-      const safeName = String(s.name || '').replace(/</g, '&lt;');
-      const thumb = s.thumbnail
-        ? `<img class="visualizer-source-thumb" src="${s.thumbnail}" alt="">`
-        : `<div class="visualizer-source-thumb is-empty"></div>`;
-      row.innerHTML =
-        thumb +
-        `<span class="visualizer-source-name">${safeName}</span>` +
-        `<span class="visualizer-source-kind">${s.kind === 'screen' ? 'SCREEN' : 'WIN'}</span>`;
-      sourceListEl.appendChild(row);
-    };
-    // Screens section header + rows (only when at least one screen is
-    // reported — skip the empty header otherwise).
-    if (screens.length) {
-      const head = document.createElement('li');
-      head.className = 'visualizer-source-group';
-      head.textContent = 'SCREENS';
-      sourceListEl.appendChild(head);
-      for (const s of screens) renderRow(s);
-    }
-    // One group header per application — gives the user a quick scan
-    // by app instead of a flat list of every window title.
-    for (const [appName, list] of sortedGroups) {
-      const head = document.createElement('li');
-      head.className = 'visualizer-source-group';
-      head.textContent = String(appName).toUpperCase() + ` · ${list.length}`;
-      sourceListEl.appendChild(head);
-      for (const s of list) renderRow(s);
-    }
-  }
-  sourceBtn?.addEventListener('click', () => {
-    if (sourcePickerEl?.hidden) { _showSourcePicker(); playSfx?.('click'); }
-    else { _hideSourcePicker(); playSfx?.('click'); }
-  });
-  sourceCloseBtn?.addEventListener('click', () => { _hideSourcePicker(); playSfx?.('click'); });
-  sourceListEl?.addEventListener('click', async (e) => {
-    const row = e.target.closest('.visualizer-source-row');
-    if (!row) return;
-    _mirrorSourceOverride = { id: row.dataset.id, name: row.dataset.name };
-    // Restart the mirror with the new source. Stop first so the
-    // override doesn't get cleared by _stopVisualizerMirror.
-    if (_mirrorStream) {
-      for (const tr of _mirrorStream.getTracks()) { try { tr.stop(); } catch {} }
-      _mirrorStream = null;
-      visualizerVideoEl.srcObject = null;
-    }
-    _hideSourcePicker();
-    await _startVisualizerMirror();
-    playSfx?.('confirm');
-  });
-
-  // ── Screencap: input-driven JPEG capture ─────────────────────────
-  // Renderer owns frame encoding; main owns the powerMonitor poll and
-  // the file write. We only fire if the mirror stream is live (no
-  // point taking blank frames) and throttle to >= 1s between saves so
-  // continuous typing doesn't flood the gallery folder.
-  let _screencapOn = false;
-  let _screencapLastAt = 0;
-  let _screencapTriggerUnsub = null;
-  const _screencapCanvas = document.createElement('canvas');
-  function _screencapEncode() {
-    if (!visualizerVideoEl) return null;
-    const w = visualizerVideoEl.videoWidth  | 0;
-    const h = visualizerVideoEl.videoHeight | 0;
-    if (!w || !h) return null;
-    _screencapCanvas.width  = w;
-    _screencapCanvas.height = h;
-    const ctx = _screencapCanvas.getContext('2d', { alpha: false });
-    if (!ctx) return null;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    try { ctx.drawImage(visualizerVideoEl, 0, 0, w, h); }
-    catch { return null; }
-    try { return _screencapCanvas.toDataURL('image/jpeg', 0.92); }
-    catch { return null; }
-  }
-  async function _screencapMaybeCapture() {
-    if (!_screencapOn) return;
-    // Need *something* to capture from — either an active live mirror
-    // or a video file currently loaded in the rec-room player. Without
-    // either, the canvas draw produces a black frame.
-    const hasVideoContent = (visualizerVideoEl && visualizerVideoEl.videoWidth > 0 && visualizerVideoEl.videoHeight > 0);
-    if (!_mirrorStream && !hasVideoContent) return;
-    const now = Date.now();
-    if (now - _screencapLastAt < 1000) return; // throttle 1/sec
-    const dataUrl = _screencapEncode();
-    if (!dataUrl) return;
-    _screencapLastAt = now;
-    try { await window.dash?.screencapSave?.(dataUrl); } catch {}
-    // Flash the button briefly so the user sees activity.
-    if (screencapBtn) {
-      screencapBtn.classList.add('is-flashing');
-      setTimeout(() => screencapBtn.classList.remove('is-flashing'), 220);
-    }
-  }
-  async function _startScreencap() {
-    if (_screencapOn) return;
-    _screencapOn = true;
-    _screencapLastAt = 0;
-    screencapBtn?.classList.add('is-active');
-    if (screencapBtn) screencapBtn.textContent = 'REC ON';
-    _screencapTriggerUnsub = window.dash?.onScreencapTrigger?.(_screencapMaybeCapture) || null;
-    try { await window.dash?.screencapWatchStart?.(); } catch {}
-  }
-  async function _stopScreencap() {
-    if (!_screencapOn) return;
-    _screencapOn = false;
-    screencapBtn?.classList.remove('is-active');
-    if (screencapBtn) screencapBtn.textContent = 'RECORD';
-    if (_screencapTriggerUnsub) { try { _screencapTriggerUnsub(); } catch {} _screencapTriggerUnsub = null; }
-    try { await window.dash?.screencapWatchStop?.(); } catch {}
-  }
-  screencapBtn?.addEventListener('click', () => {
-    if (_screencapOn) { _stopScreencap(); playSfx?.('click'); }
-    else              { _startScreencap(); playSfx?.('confirm'); }
-  });
-
-  // ── PROCESS: stitch selected snaps into a video ──────────────────
-  // Pipeline: decode each selected JPEG → drawImage to a fixed-size
-  // canvas (letterboxed) → canvas.captureStream into MediaRecorder →
-  // collect blob → send to main for write into gallery/recordings/.
-  // Time crunch is percentage-based: 100% = 1 s per snap (base hold);
-  // 200% = 0.5 s; 3000% = ~33 ms. Bitrate is a 3-way preset matrix
-  // indexed by [resolution][quality].
-  const processBtn        = document.getElementById('visualizer-process-btn');
-  const processPickerEl   = document.getElementById('visualizer-process-picker');
-  const processCloseBtn   = document.getElementById('visualizer-process-close');
-  const processCountEl    = document.getElementById('visualizer-process-count');
-  const processSpeedEl    = document.getElementById('visualizer-process-speed');
-  const processSpeedVal   = document.getElementById('visualizer-process-speed-val');
-  const processGoBtn      = document.getElementById('visualizer-process-go');
-  const processStatusEl   = document.getElementById('visualizer-process-status');
-  const _processOpts = { format: 'mp4', res: 'source', quality: 'std' };
-  // Cached ffmpeg probe — populated once at startup. When .available is
-  // true we route PROCESS through the GPU-accelerated ffmpeg pipeline
-  // (real-time savings vs MediaRecorder are 10-50x for snap stitching).
-  let _ffmpegInfo = null;
-  (async () => { try { _ffmpegInfo = await window.dash?.ffmpegInfo?.() || null; } catch {} })();
-
-  // Compression presets — chosen by eye for screen content where text
-  // legibility matters more than action smoothness. LITE = comfortable
-  // for embedding, STD = good general default, CRISP = near-archival.
-  const PROCESS_BITRATES = {
-    '720':    { lite: 1_500_000, std:  2_500_000, crisp:  5_000_000 },
-    '1080':   { lite: 3_000_000, std:  5_000_000, crisp:  8_000_000 },
-    '2160':   { lite: 8_000_000, std: 15_000_000, crisp: 25_000_000 },
-    'source': { lite: 5_000_000, std: 10_000_000, crisp: 20_000_000 },
-  };
-
-  function _setProcessStatus(msg, isErr) {
-    if (!processStatusEl) return;
-    processStatusEl.textContent = msg || '';
-    processStatusEl.classList.toggle('is-error', !!isErr);
-  }
-  function _formatSpeed(percent) {
-    const holdSec = 100 / percent;        // seconds per snap at this %
-    // Prefer the resolved image count (folder-expanded) when the picker
-    // has finished resolving; fall back to raw selection size otherwise.
-    const count = _processResolvedCount || _visualizerSelected.size;
-    const totalSec = holdSec * count;
-    return `${percent}% · ${holdSec.toFixed(2)}s/snap · ~${totalSec < 60 ? totalSec.toFixed(1) + 's' : (totalSec / 60).toFixed(1) + 'm'} total`;
-  }
-  function _paintProcessRadios() {
-    processPickerEl?.querySelectorAll('.visualizer-process-radios').forEach((grp) => {
-      const group = grp.dataset.group;
-      const val = _processOpts[group];
-      for (const btn of grp.querySelectorAll('button')) {
-        btn.classList.toggle('is-active', btn.dataset.val === val);
-      }
+    visualizerVideoEl.srcObject = null;
+    // URL audio plays through the page (not OS loopback). _applyPreviewMute
+    // below resolves to !stealth — if STEALTH is on, no speaker output;
+    // captureStream still emits the audio tracks for the recording.
+    _urlMirrorActive = true; // flag set early so _applyPreviewMute uses URL rules
+    // URL captures default to STEALTH ON per user spec: the user
+    // already knows what the video is (they pasted the URL), so the
+    // assumption is "obscure the preview by default, toggle to view".
+    // Idempotent — _setStealth(true) on a wrap that's already in
+    // stealth is a no-op visually and just rewrites config.
+    if (!_stealthOn) _setStealth(true);
+    _applyPreviewMute();
+    // Do NOT set crossOrigin='anonymous' — that forces a CORS request,
+    // and on servers without CORS headers (common for random hosted
+    // video files) the load fails entirely. Without the attribute,
+    // playback works opaque; only canvas drawImage of the frames would
+    // be blocked, which we don't do here.
+    visualizerVideoEl.removeAttribute('crossorigin');
+    visualizerVideoEl.src = url;
+    // Resolve once the video either produces a frame or errors out.
+    const ready = new Promise((resolve, reject) => {
+      const onMeta = () => { cleanup(); resolve(); };
+      const onErr  = () => {
+        cleanup();
+        const err = visualizerVideoEl.error;
+        reject(new Error(err ? `code ${err.code}: ${err.message || 'media error'}` : 'load failed'));
+      };
+      const cleanup = () => {
+        visualizerVideoEl.removeEventListener('loadedmetadata', onMeta);
+        visualizerVideoEl.removeEventListener('error', onErr);
+      };
+      visualizerVideoEl.addEventListener('loadedmetadata', onMeta, { once: true });
+      visualizerVideoEl.addEventListener('error', onErr, { once: true });
     });
-  }
-  // Wire radio button groups to update _processOpts.
-  processPickerEl?.querySelectorAll('.visualizer-process-radios').forEach((grp) => {
-    grp.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-val]');
-      if (!btn) return;
-      _processOpts[grp.dataset.group] = btn.dataset.val;
-      _paintProcessRadios();
-      playSfx?.('click');
-    });
-  });
-  processSpeedEl?.addEventListener('input', () => {
-    if (processSpeedVal) processSpeedVal.textContent = _formatSpeed(Number(processSpeedEl.value) || 100);
-    // Live preview reads holdMs on every tick, so the new pace takes
-    // effect on the next frame — no need to restart the loop.
-  });
-
-  // ── Live time-crunch preview ────────────────────────────────────────
-  // Cycles the in-picker <img id="visualizer-process-preview-img">
-  // through the selected snaps at the current speed-slider pace. The
-  // preview lives INSIDE the picker (in its own slot) because the
-  // picker covers the player wrap; routing the preview through the
-  // wrap meant it was always hidden behind the controls.
-  // Each tick reads holdMs fresh from the slider, so moving the slider
-  // updates the pace without restarting.
-  const processPreviewImgEl  = document.getElementById('visualizer-process-preview-img');
-  const processPreviewSlotEl = document.querySelector('.visualizer-process-preview-slot');
-  let _processPreviewSnaps  = [];
-  let _processPreviewIdx    = 0;
-  let _processPreviewActive = false;
-  let _processPreviewTimer  = null;
-  function _previewHoldMs() {
-    const percent = Math.max(100, Number(processSpeedEl?.value) || 100);
-    return Math.max(16, (100 / percent) * 1000);
-  }
-  function _processPreviewTick() {
-    if (!_processPreviewActive || !_processPreviewSnaps.length) return;
-    const entry = _processPreviewSnaps[_processPreviewIdx % _processPreviewSnaps.length];
-    if (processPreviewImgEl && entry) {
-      processPreviewImgEl.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-    }
-    _processPreviewIdx++;
-    _processPreviewTimer = setTimeout(_processPreviewTick, _previewHoldMs());
-  }
-  function _startProcessPreview(snaps) {
-    _stopProcessPreview();
-    if (!Array.isArray(snaps) || snaps.length < 2) return;
-    _processPreviewSnaps = snaps.slice(0);
-    _processPreviewIdx = 0;
-    _processPreviewActive = true;
-    processPreviewSlotEl?.classList.add('is-running');
-    _processPreviewTick();
-  }
-  function _stopProcessPreview() {
-    _processPreviewActive = false;
-    if (_processPreviewTimer) { clearTimeout(_processPreviewTimer); _processPreviewTimer = null; }
-    _processPreviewSnaps = [];
-    _processPreviewIdx = 0;
-    processPreviewSlotEl?.classList.remove('is-running');
-    if (processPreviewImgEl) processPreviewImgEl.src = '';
-  }
-
-  // Cached resolved image count when the picker is open with a folder
-  // selection — so the speed-slider preview shows a real total duration
-  // instead of "1 item × N seconds".
-  let _processResolvedCount = 0;
-  function _openProcessPicker() {
-    if (!processPickerEl) return;
-    // Close any other picker.
-    sourcePickerEl   && (sourcePickerEl.hidden   = true);
-    sourceBtn        ?.classList.remove('is-active');
-    qualityPickerEl  && (qualityPickerEl.hidden  = true);
-    qualityBtn       ?.classList.remove('is-active');
-    osdPickerEl      && (osdPickerEl.hidden      = true);
-    processPickerEl.hidden = false;
-    processBtn?.classList.add('is-active');
-    if (processCountEl) processCountEl.textContent = String(_visualizerSelected.size);
-    _paintProcessRadios();
-    if (processSpeedVal) processSpeedVal.textContent = _formatSpeed(Number(processSpeedEl.value) || 100);
-    _setProcessStatus('Resolving images…');
-    // Async-resolve actual image count (folder expansion). Updates the
-    // count badge and re-renders the speed-time estimate when ready.
-    _processResolvedCount = 0;
-    _collectSelectedSnapsExpanded().then((list) => {
-      if (processPickerEl.hidden) return; // closed before resolve
-      _processResolvedCount = list.length;
-      if (processCountEl) processCountEl.textContent = String(list.length);
-      if (processSpeedVal) processSpeedVal.textContent = _formatSpeed(Number(processSpeedEl.value) || 100);
-      _setProcessStatus(list.length >= 2 ? '' : 'Selection has fewer than 2 images.', list.length < 2);
-      // Kick off the live preview once we know what we're working with.
-      if (list.length >= 2) _startProcessPreview(list);
-    }).catch(() => {});
-  }
-  function _closeProcessPicker() {
-    if (!processPickerEl) return;
-    processPickerEl.hidden = true;
-    processBtn?.classList.remove('is-active');
-    _processResolvedCount = 0;
-    _stopProcessPreview();
-  }
-  processBtn?.addEventListener('click', () => {
-    if (processBtn.disabled) return;
-    if (processPickerEl?.hidden) _openProcessPicker();
-    else _closeProcessPicker();
-    playSfx?.('click');
-  });
-  processCloseBtn?.addEventListener('click', () => { _closeProcessPicker(); playSfx?.('click'); });
-
-  // PREVIEW button — restart / toggle the live time-crunch preview.
-  // Auto-preview kicks off when the picker opens; this button lets the
-  // user restart it from frame 0 after fiddling with the slider, or
-  // pause it entirely. Click while active → stop; click while inactive
-  // → restart from frame 0.
-  const processPreviewBtn = document.getElementById('visualizer-process-preview');
-  function _paintProcessPreviewBtn() {
-    processPreviewBtn?.classList.toggle('is-active', _processPreviewActive);
-  }
-  processPreviewBtn?.addEventListener('click', async () => {
-    if (_processPreviewActive) {
-      _stopProcessPreview();
-      _paintProcessPreviewBtn();
-      playSfx?.('click');
-      return;
-    }
-    // Restart from frame 0 with whatever the current selection resolves
-    // to (folder selections expand to image children).
-    _setProcessStatus('Resolving images…');
-    const list = await _collectSelectedSnapsExpanded();
-    if (list.length < 2) {
-      _setProcessStatus('Need at least 2 images to preview.', true);
+    try {
+      await ready;
+    } catch (err) {
+      console.warn('[url-mirror] failed:', err?.message || err);
+      _urlMirrorActive = false;
+      visualizerVideoEl.removeAttribute('src');
+      try { visualizerVideoEl.load(); } catch {}
+      if (visualizerNowEl) visualizerNowEl.textContent = `URL ERROR · ${err?.message || 'load failed'}`.toUpperCase();
       playSfx?.('error');
       return;
     }
-    _setProcessStatus('');
-    _startProcessPreview(list);
-    _paintProcessPreviewBtn();
-    playSfx?.('confirm');
-  });
-  // Poll the preview state every ~250ms while the picker is open so the
-  // button reflects auto-start/auto-stop too (preview can also stop on
-  // close / GO press). Cheap; runs only when picker is visible.
-  setInterval(() => {
-    if (!processPickerEl || processPickerEl.hidden) return;
-    _paintProcessPreviewBtn();
-  }, 250);
-
-  // Collect the selected snap entries IN ORIGINAL DISPLAY ORDER from
-  // the current _visualizerEntries list (so the video plays back in
-  // the order they appear in the captures view, not in click order).
-  function _collectSelectedSnaps() {
-    return _visualizerEntries.filter((e) => _visualizerSelected.has(e.path)
-      && !e.isDir && _IMG_KNOWN_RE.test(e.name));
-  }
-  // Expanding variant: any selected FOLDER gets recursively flattened
-  // (one level deep — the rec-room only stores one-level-deep snap
-  // session folders) into its image children. Returns an array of
-  // image entries with absolute paths, in render order: selected
-  // images first, then folder contents sorted by filename within
-  // each folder (snaps are timestamp-prefixed so name order ==
-  // capture order).
-  async function _collectSelectedSnapsExpanded() {
-    const out = [];
-    const seen = new Set();
-    const push = (entry) => {
-      if (!entry || seen.has(entry.path)) return;
-      seen.add(entry.path);
-      out.push(entry);
-    };
-    // Walk in render order so picks stay grouped sensibly.
-    for (const ent of _visualizerEntries) {
-      if (!_visualizerSelected.has(ent.path)) continue;
-      if (ent.isDir) {
-        try {
-          const result = await window.dash?.galleryList?.(ent.rel || '');
-          const kids = (result?.entries || [])
-            .filter((k) => !k.isDir && _IMG_KNOWN_RE.test(k.name))
-            .sort((a, b) => a.name.localeCompare(b.name));
-          for (const k of kids) push(k);
-        } catch {}
-      } else if (_IMG_KNOWN_RE.test(ent.name)) {
-        push(ent);
-      }
+    // Lazy-init the Web Audio graph. Once running, the videoEl audio
+    // is fully managed by us — that's what lets STEALTH gate the
+    // speakers without affecting the recording dest.
+    const graphReady = _ensureAudioGraph();
+    if (_audioCtx?.state === 'suspended') {
+      try { await _audioCtx.resume(); } catch {}
     }
-    return out;
-  }
-  // Decode one image. Resolves with null on failure so a stray corrupt
-  // snap doesn't take down the whole batch.
-  function _decodeImage(entry) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload  = () => resolve(img);
-      img.onerror = () => resolve(null);
-      img.src = `dash3d-file://gallery/${encodeURI(entry.rel)}`;
-    });
-  }
-  // Pick the first supported MediaRecorder MIME for the chosen format.
-  // For MP4 in older Chromium that lacks the muxer we fall back to
-  // WebM and rename the output accordingly so the file extension never
-  // lies about its bytes.
-  function _pickProcessMime(format) {
-    const mp4Candidates = [
-      'video/mp4;codecs=avc1.640033,mp4a.40.2',
-      'video/mp4;codecs=avc1.4d002a,mp4a.40.2',
-      'video/mp4;codecs=avc1',
-      'video/mp4',
-    ];
-    const webmCandidates = [
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8',
-      'video/webm',
-    ];
-    const probe = (list) => list.find((m) => window.MediaRecorder?.isTypeSupported?.(m));
-    if (format === 'mp4') {
-      const m = probe(mp4Candidates);
-      if (m) return { mime: m, ext: '.mp4' };
-      // No MP4 support → fall back to WebM (and use .webm so the file
-      // isn't mislabelled).
-      const fall = probe(webmCandidates);
-      return fall ? { mime: fall, ext: '.webm', fellBack: true } : null;
-    }
-    const m = probe(webmCandidates);
-    return m ? { mime: m, ext: '.mkv' } : null;
-  }
-
-  async function _processSnapsRun() {
-    processGoBtn.disabled = true;
-    // Halt the live preview so it stops fighting the encoder for image
-    // decodes (and so the player wrap can hand off to the saved video
-    // when ffmpeg returns).
-    _stopProcessPreview();
-    _setProcessStatus('Resolving selection…');
-    const snaps = await _collectSelectedSnapsExpanded();
-    if (snaps.length < 2) {
-      _setProcessStatus(snaps.length === 0
-        ? 'Selection has no images — pick a folder of snaps or 2+ images.'
-        : 'Need at least 2 images to stitch.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    const percent = Math.max(100, Number(processSpeedEl?.value) || 100);
-    const holdMs = (100 / percent) * 1000;
-    const resKey = _processOpts.res;
-    const bitsPerSec = PROCESS_BITRATES[resKey]?.[_processOpts.quality]
-      ?? PROCESS_BITRATES.source.std;
-
-    // Make sure the ffmpeg probe has completed before we decide which
-    // path to use. The module-load probe is async and could race a
-    // very fast PROCESS click. Re-fetch synchronously if null/false so
-    // we don't accidentally fall through to MediaRecorder (which would
-    // produce a .webm output since Chromium typically lacks an MP4
-    // muxer in MediaRecorder).
-    let ffmpegIpcError = null;
-    if (!_ffmpegInfo?.available) {
-      try { _ffmpegInfo = await window.dash?.ffmpegInfo?.() || _ffmpegInfo; }
-      catch (err) { ffmpegIpcError = err?.message || String(err); }
-    }
-    console.log('[process] ffmpeg info:', _ffmpegInfo, 'format:', _processOpts.format, 'ipcErr:', ffmpegIpcError);
-    // If ffmpeg isn't usable, surface WHY in the status bar so the user
-    // can see what's going wrong without opening DevTools. Then continue
-    // (we still try MediaRecorder as a last resort — but the user now
-    // knows the file will be webm).
-    if (!_ffmpegInfo?.available) {
-      const why = ffmpegIpcError
-        ? `IPC error: ${ffmpegIpcError}`
-        : (!_ffmpegInfo ? 'ffmpegInfo() returned null'
-          : `path=${_ffmpegInfo.path || '(none)'} available=${_ffmpegInfo.available}`);
-      _setProcessStatus(`FFmpeg unavailable (${why}) — falling back to MediaRecorder (WebM only)`, true);
-    }
-
-    // Fast path: bundled ffmpeg. NVENC when present, libx264/x265
-    // otherwise — both run as fast as the encoder can chew through
-    // the frames (not real-time), so this is the path we want by
-    // default. MediaRecorder fallback only runs if ffmpeg failed to
-    // load (older builds, missing binary, etc).
-    if (_ffmpegInfo?.available) {
-      const outH = resKey === 'source' ? 0 : Number(resKey) || 0;
-      const isHevc = _processOpts.format === 'hevc';
-      const useGpu = !!_ffmpegInfo.hasNvenc && (!isHevc || !!_ffmpegInfo.hasHevcNvenc);
-      const encLabel = useGpu
-        ? (isHevc ? 'GPU · hevc_nvenc' : 'GPU · h264_nvenc')
-        : (isHevc ? 'CPU · libx265' : 'CPU · libx264');
-      _setProcessStatus(`Encoding ${snaps.length} snaps · ${encLabel}…`);
-      const t0 = performance.now();
-      const unsub = window.dash?.onProcessSnapsProgress?.((d) => {
-        _setProcessStatus(`Encoding ${d.frame}/${d.total || snaps.length} · ${d.encoder || encLabel}`);
-      });
-      const result = await window.dash?.processSnapsFfmpeg?.({
-        paths: snaps.map((e) => e.path),
-        format: _processOpts.format === 'mkv' ? 'mkv' : 'mp4',
-        outH,
-        bitsPerSec,
-        holdMs,
-        useGpu,
-        codec: isHevc ? 'hevc' : 'h264',
-        // Optional color/blur/denoise pass shared with the EDIT panel.
-        // _procFilterState is hung on window by the editor block so
-        // we don't have to thread it through every helper here.
-        filters: window._procFilterState || undefined,
-      });
-      try { unsub?.(); } catch {}
-      const dt = ((performance.now() - t0) / 1000).toFixed(1);
-      if (result?.ok) {
-        _setProcessStatus(`Saved ${result.name} (${(result.size/1024/1024).toFixed(1)} MB) · ${result.encoder || encLabel} · ${dt}s`);
-        _visualizerSubdir = 'videos';
-        refreshVisualizer();
-      } else {
-        _setProcessStatus('ffmpeg failed: ' + (result?.error || 'unknown') + ' — falling back to MediaRecorder', true);
-        // fall through to legacy path below
-      }
-      if (result?.ok) { processGoBtn.disabled = false; return; }
-    }
-
-    // Legacy fallback: canvas + MediaRecorder (real-time, CPU).
-    _setProcessStatus(`Decoding ${snaps.length} snaps…`);
-    const images = [];
-    for (let i = 0; i < snaps.length; i++) {
-      const img = await _decodeImage(snaps[i]);
-      if (img) images.push(img);
-      _setProcessStatus(`Decoding ${i+1}/${snaps.length}…`);
-    }
-    const first = images.find((im) => im.naturalWidth) || images[0];
-    if (!first?.naturalWidth) {
-      _setProcessStatus('No snaps could be decoded.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    let outH = first.naturalHeight;
-    if (resKey !== 'source') {
-      const targetH = Number(resKey);
-      if (targetH && targetH < outH) outH = targetH;
-    }
-    const outW = Math.max(2, Math.round(first.naturalWidth * (outH / first.naturalHeight)));
-    const canvas = document.createElement('canvas');
-    canvas.width  = outW;
-    canvas.height = outH;
-    const ctx = canvas.getContext('2d');
-
-    if (_processOpts.format === 'hevc') {
-      _setProcessStatus('HEVC requires ffmpeg — MediaRecorder cannot encode H.265.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    const picked = _pickProcessMime(_processOpts.format);
-    if (!picked) {
-      _setProcessStatus('No supported MediaRecorder codec.', true);
-      processGoBtn.disabled = false;
-      return;
-    }
-    const stream = canvas.captureStream(30);
-    let recorder;
+    _updateGainForCurrentMode();
+    // Build the recording stream: VIDEO from captureStream (the
+    // element's frame source), AUDIO from the Web Audio dest (which
+    // sees the raw decoded samples before they hit the gain). With
+    // this split, stealth can zero the speaker gain without the
+    // recording ever going silent.
+    let videoCapture = null;
     try {
-      recorder = new MediaRecorder(stream, { mimeType: picked.mime, videoBitsPerSecond: bitsPerSec });
+      videoCapture = visualizerVideoEl.captureStream
+        ? visualizerVideoEl.captureStream()
+        : visualizerVideoEl.mozCaptureStream?.();
     } catch (err) {
-      _setProcessStatus('Recorder init failed: ' + err.message, true);
-      processGoBtn.disabled = false;
+      console.warn('[url-mirror] captureStream threw:', err?.message || err);
+    }
+    const videoTracks = videoCapture?.getVideoTracks?.() || [];
+    const audioTracks = graphReady
+      ? (_recAudioDest?.stream?.getAudioTracks?.() || [])
+      : (videoCapture?.getAudioTracks?.() || []); // fallback if Web Audio refused
+    console.log('[url-mirror] assembled stream:',
+      'video=' + videoTracks.length,
+      'audio=' + audioTracks.length,
+      'graph=' + graphReady,
+      'ctx=' + _audioCtx?.state);
+    if (videoTracks.length || audioTracks.length) {
+      _mirrorStream = new MediaStream([...videoTracks, ...audioTracks]);
+    } else {
+      _mirrorStream = null;
+    }
+    visualizerVideoEl.play().catch((err) => {
+      console.warn('[url-mirror] play() rejected:', err?.message || err);
+    });
+    // Source dims drive the wrap aspect — _refreshWrapShape reads
+    // _lastSourceW/H. We also have a global loadedmetadata listener
+    // that does this, but call it explicitly here so the player
+    // resizes before the first painted frame.
+    if (visualizerVideoEl.videoWidth && visualizerVideoEl.videoHeight) {
+      if (typeof _setSourceDims === 'function') {
+        _setSourceDims(visualizerVideoEl.videoWidth, visualizerVideoEl.videoHeight);
+      }
+    }
+    visualizerWrapEl?.classList.add('is-mirroring', 'is-url-mirror');
+    _refreshStealthOverlay(); // URL mirror is now live → overlay if stealth is on
+    mirrorBtn?.classList.add('is-active');
+    if (mirrorBtn) mirrorBtn.textContent = 'MIRROR ON';
+    if (visualizerNowEl) {
+      const short = url.length > 56 ? `…${url.slice(-55)}` : url;
+      const w = visualizerVideoEl.videoWidth | 0;
+      const h = visualizerVideoEl.videoHeight | 0;
+      const dims = (w && h) ? ` · ${w}×${h} (${_aspectLabel(w, h)})` : '';
+      visualizerNowEl.textContent = `URL · ${short}${dims}`.toUpperCase();
+    }
+    // DO NOT auto-stop on captureStream track 'ended' — that event
+    // fires spuriously on buffer-stalls and CORS-tainted streams, and
+    // would yank the mirror out from under the user mid-watch. The
+    // user has explicit STOP via the MIRROR button; a real natural
+    // end-of-video is signaled by the video element's own 'ended'
+    // event, which file-playback code handles separately.
+    try { _renderMixer?.(); } catch {}
+    playSfx?.('confirm');
+  }
+  sourceUrlGoBtn?.addEventListener('click', () => {
+    _startUrlMirror(sourceUrlEl?.value || '');
+  });
+  sourceUrlEl?.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      _startUrlMirror(sourceUrlEl.value || '');
+    }
+  });
+
+  // ── Inline source strip ──────────────────────────────────────────
+  // Replaces the old fullscreen picker. Each available SCREEN / WINDOW
+  // / CAM gets its own button in the toolbar. Screens + windows are
+  // single-select (clicking starts mirror with that source); cams are
+  // multi-select toggles (each click adds/removes from the composite
+  // and auto-applies). The currently-active source(s) get .is-active.
+  let _availableSources = [];
+
+  // Enumerate cams (and pair each with its same-groupId mic) so the
+  // strip can show one button per cam. Labels are empty until any
+  // getUserMedia grant lands, so we probe once if needed.
+  async function _refreshCamList() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    let devices = [];
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch {}
+    let cams = devices.filter((d) => d.kind === 'videoinput');
+    if (cams.length && cams.every((c) => !c.label)) {
+      try {
+        const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        for (const t of probe.getTracks()) { try { t.stop(); } catch {} }
+        devices = await navigator.mediaDevices.enumerateDevices();
+        cams = devices.filter((d) => d.kind === 'videoinput');
+      } catch (err) {
+        console.warn('[rec-room] cam label probe failed:', err?.message || err);
+      }
+    }
+    _camDevices = cams;
+    _micDevices = devices.filter((d) => d.kind === 'audioinput');
+    const camIds = new Set(cams.map((c) => c.deviceId));
+    for (const id of [..._camPicked]) if (!camIds.has(id)) _camPicked.delete(id);
+  }
+  function _renderSourceStrip() {
+    if (!sourceStripEl) return;
+    // Remove any previously-rendered source buttons; keep the SCAN pill
+    // at the front so the user always has a "rescan" affordance.
+    for (const el of sourceStripEl.querySelectorAll('.vis-source-btn')) el.remove();
+    const activeId = _mirrorSourceOverride?.id || null;
+    const screens = _availableSources.filter((s) => s.kind === 'screen');
+    const windows = _availableSources.filter((s) => s.kind !== 'screen');
+    screens.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    windows.sort((a, b) => {
+      const ak = (a.appName || '') + ' ' + (a.name || '');
+      const bk = (b.appName || '') + ' ' + (b.name || '');
+      return ak.localeCompare(bk);
+    });
+    const makeBtn = (label, title, dataset) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'explore-action vis-source-btn';
+      btn.textContent = label;
+      btn.title = title;
+      for (const [k, v] of Object.entries(dataset)) btn.dataset[k] = v;
+      return btn;
+    };
+    for (const s of screens) {
+      const safe = String(s.name || 'Screen');
+      const btn = makeBtn(
+        `SCR · ${safe.length > 18 ? safe.slice(0, 17) + '…' : safe}`,
+        `Mirror screen: ${safe}`,
+        { kind: 'desktop', id: s.id, name: s.name },
+      );
+      if (s.id === activeId) btn.classList.add('is-active');
+      sourceStripEl.appendChild(btn);
+    }
+    for (const w of windows) {
+      const safe = String(w.name || 'Window');
+      const tag  = (w.appName || 'WIN').toUpperCase().slice(0, 8);
+      const btn  = makeBtn(
+        `${tag} · ${safe.length > 18 ? safe.slice(0, 17) + '…' : safe}`,
+        `Mirror window: ${safe}`,
+        { kind: 'desktop', id: w.id, name: w.name },
+      );
+      if (w.id === activeId) btn.classList.add('is-active');
+      sourceStripEl.appendChild(btn);
+    }
+  }
+  function _renderCamStrip() {
+    if (!camStripBodyEl) return;
+    camStripBodyEl.innerHTML = '';
+    if (!_camDevices.length) {
+      const empty = document.createElement('div');
+      empty.className = 'visualizer-cam-strip-empty';
+      empty.textContent = 'NO CAMERAS DETECTED · CLICK SCAN';
+      camStripBodyEl.appendChild(empty);
       return;
     }
-    const chunks = [];
-    recorder.ondataavailable = (ev) => { if (ev.data?.size) chunks.push(ev.data); };
-    const stopped = new Promise((res) => { recorder.onstop = res; });
-    recorder.start(500);
-
-    const fellBackNote = picked.fellBack ? ' (MP4 unsupported · saved as WebM)' : '';
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, outW, outH);
-      if (img?.naturalWidth) {
-        const ratio = Math.min(outW / img.naturalWidth, outH / img.naturalHeight);
-        const w = img.naturalWidth * ratio;
-        const h = img.naturalHeight * ratio;
-        ctx.drawImage(img, (outW - w) / 2, (outH - h) / 2, w, h);
-      }
-      _setProcessStatus(`Encoding ${i+1}/${images.length} · ${percent}%${fellBackNote}`);
-      await new Promise((res) => setTimeout(res, holdMs));
-    }
-    // Hold the final frame for a beat so MediaRecorder picks up the
-    // last drawn frame before stop.
-    await new Promise((res) => setTimeout(res, 300));
-    recorder.stop();
-    await stopped;
-    const blob = new Blob(chunks, { type: picked.mime });
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    _setProcessStatus('Saving…');
-    const result = await window.dash?.processSnapsSave?.(bytes, picked.ext);
-    if (result?.ok) {
-      _setProcessStatus(`Saved ${result.name} (${(result.size/1024/1024).toFixed(1)} MB)${fellBackNote}`);
-      // Pop the user into videos/ so the new file is visible.
-      _visualizerSubdir = 'videos';
-      refreshVisualizer();
-    } else {
-      _setProcessStatus('Save failed: ' + (result?.error || 'unknown'), true);
-    }
-    processGoBtn.disabled = false;
-  }
-  processGoBtn?.addEventListener('click', () => {
-    _processSnapsRun().catch((err) => {
-      console.warn('[process] failed', err);
-      _setProcessStatus('Failed: ' + err.message, true);
-      processGoBtn.disabled = false;
+    _camDevices.forEach((d, i) => {
+      const safe = String(d.label || `Cam ${i + 1}`);
+      const pairedMic = _micDevices.find((m) => m.groupId && m.groupId === d.groupId);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'explore-action vis-source-btn vis-source-cam';
+      if (_camPicked.has(d.deviceId)) btn.classList.add('is-active');
+      btn.dataset.kind = 'cam';
+      btn.dataset.id   = d.deviceId;
+      btn.textContent  = safe.length > 22 ? safe.slice(0, 21) + '…' : safe;
+      btn.title = `Toggle camera: ${safe}` + (pairedMic ? ` · mic: ${pairedMic.label || 'paired'}` : ' · no paired mic');
+      camStripBodyEl.appendChild(btn);
     });
+  }
+  async function _refreshSourceStrip() {
+    // Desktop sources + cams are independent — fetch in parallel.
+    const [sources] = await Promise.all([
+      window.dash?.visualizerListSources?.().catch(() => []) ?? Promise.resolve([]),
+      _refreshCamList().catch(() => {}),
+    ]);
+    _availableSources = Array.isArray(sources) ? sources : [];
+    _renderSourceStrip();
+    _renderCamStrip();
+  }
+
+  sourceScanBtn?.addEventListener('click', () => {
+    _refreshSourceStrip();
+    playSfx?.('click');
+  });
+  sourceStripEl?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.vis-source-btn');
+    if (!btn) return;
+    // Single-select: pick this screen/window as the new mirror source.
+    // Clear any cam picks so we don't have stale composite state.
+    _mirrorSourceOverride = { id: btn.dataset.id, name: btn.dataset.name };
+    _camPicked.clear();
+    if (_mirrorStream) {
+      for (const tr of _mirrorStream.getTracks()) { try { tr.stop(); } catch {} }
+      _mirrorStream = null;
+      if (visualizerVideoEl) visualizerVideoEl.srcObject = null;
+    }
+    _renderSourceStrip();
+    _renderCamStrip();
+    await _startVisualizerMirror();
     playSfx?.('confirm');
   });
+  camStripBodyEl?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.vis-source-btn');
+    if (!btn) return;
+    // Multi-select toggle: add/remove this cam from the composite and
+    // re-apply on every change. Switching to cam mode clears any
+    // screen/window override so they're not double-active.
+    const id = btn.dataset.id;
+    if (_camPicked.has(id)) _camPicked.delete(id);
+    else _camPicked.add(id);
+    _mirrorSourceOverride = null;
+    if (_camPicked.size === 0) {
+      _stopVisualizerMirror();
+    } else {
+      await _startMultiCamMirror([..._camPicked]);
+    }
+    _renderSourceStrip();
+    _renderCamStrip();
+    playSfx?.('click');
+  });
+  // Initial fill — runs once the visualizer module wires up. Errors are
+  // swallowed so a missing IPC handler (older main) doesn't break init.
+  _refreshSourceStrip().catch(() => {});
+
+  // ── Camera resolution presets ─────────────────────────────────────
+  // Buttons in the cam strip select a CAM RES preset. Picking one
+  // while cams are running re-acquires them at the new resolution.
+  const camResEl = document.getElementById('visualizer-cam-res');
+  function _paintCamResButtons() {
+    if (!camResEl) return;
+    for (const b of camResEl.querySelectorAll('[data-camres]')) {
+      b.classList.toggle('is-active', b.dataset.camres === _camResolution);
+    }
+  }
+  async function _applyCamResolution(key, opts = {}) {
+    if (!_CAM_RES_PRESETS[key]) return;
+    if (key === _camResolution && !opts.force) return;
+    _camResolution = key;
+    _paintCamResButtons();
+    try { window.dash?.setConfig?.({ recRoomCamResolution: key }); } catch {}
+    // Re-acquire ONLY if a cam mirror is currently live. Using
+    // _camPicked here was wrong — it's the user's persistent selection
+    // memory, so clicking a resolution would start the cam even when
+    // the user had toggled it off (just because their selection
+    // history still listed the id). Source the device list from the
+    // active _multiCamState so resolution is purely a stream-swap and
+    // never a start/stop.
+    if (_multiCamState && _multiCamState.cams?.length) {
+      const liveIds = _multiCamState.cams.map((c) => c.camId).filter(Boolean);
+      if (liveIds.length) {
+        try { await _startMultiCamMirror(liveIds); }
+        catch (err) { console.warn('[cam-res] re-acquire failed:', err?.message || err); }
+      }
+    }
+  }
+  camResEl?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-camres]');
+    if (!b) return;
+    _applyCamResolution(b.dataset.camres);
+    playSfx?.('confirm');
+  });
+  (async () => {
+    const cfg = await window.dash?.getConfig?.() || {};
+    const saved = typeof cfg.recRoomCamResolution === 'string' ? cfg.recRoomCamResolution : null;
+    if (saved && _CAM_RES_PRESETS[saved]) _camResolution = saved;
+    _paintCamResButtons();
+  })();
+
+  // ── CAM filters ───────────────────────────────────────────────────
+  // Lives in ./rec/cam-filters.js. Owns the CSS filter sliders + SVG
+  // gamma curve for the multi-cam composite canvas. getFilterString()
+  // returns the string the composite draw loop assigns to ctx.filter.
+  const _camFilterMod = setupCamFilters({ playSfx });
+  // WebGL2 3D-LUT applier — re-grades the composite each frame when
+  // the user has a .cube selected. Null if WebGL2 is unavailable.
+  // Lazy-loads the LUT texture when the picker selection changes.
+  const _lutApplier = setupLutApplier();
+
+  // ── Screencap: input-driven JPEG capture ─────────────────────────
+  // Lives in ./rec/screencap.js. getMirror() lets the module read the
+  // current mirror state without pulling state directly across files.
+  setupScreencap({
+    playSfx,
+    visualizerVideoEl,
+    screencapBtn,
+    getMirror: () => ({ stream: _mirrorStream, override: _mirrorSourceOverride }),
+  });
+
 
   // ── Recording quality profiles ───────────────────────────────────
-  // Profile shape: { key, label, resolution: 'source'|number, bitsPerSec }
-  // Resolution is the target *height* in pixels — 'source' keeps the
-  // native size and skips the canvas downscale step entirely.
-  const REC_PROFILES = {
-    lite:  { key: 'lite',  label: 'LITE',  resolution: 720,      bitsPerSec:  1_500_000, fps: 30, hint: '720p · 1.5 Mbps · 30 fps' },
-    med:   { key: 'med',   label: 'MED',   resolution: 'source', bitsPerSec:  5_000_000, fps: 30, hint: 'Source · 5 Mbps · 30 fps' },
-    large: { key: 'large', label: 'LARGE', resolution: 'source', bitsPerSec: 12_000_000, fps: 60, hint: 'Source · 12 Mbps · 60 fps' },
-    max:   { key: 'max',   label: 'MAX',   resolution: 'source', bitsPerSec: 40_000_000, fps: 60, hint: 'Source · 40 Mbps · 60 fps' },
-  };
-  let _recProfile = { ...REC_PROFILES.med };
-  const qualityBtn        = document.getElementById('visualizer-quality-btn');
-  const qualityPickerEl   = document.getElementById('visualizer-quality-picker');
-  const qualityListEl     = document.getElementById('visualizer-quality-list');
-  const qualityCloseBtn   = document.getElementById('visualizer-quality-close');
-  const qualityResSel     = document.getElementById('visualizer-quality-res');
-  const qualityBitrateEl  = document.getElementById('visualizer-quality-bitrate');
-  const qualityBitrateVal = document.getElementById('visualizer-quality-bitrate-val');
-  const qualityFpsSel     = document.getElementById('visualizer-quality-fps');
-  const qualityApplyBtn   = document.getElementById('visualizer-quality-apply');
-  function _formatProfileButton() {
-    if (!qualityBtn) return;
-    const k = _recProfile.key || 'custom';
-    qualityBtn.textContent = `Q:${k.toUpperCase()}`;
-    qualityBtn.title = `Recording quality — ${_recProfile.hint || `${_recProfile.resolution} · ${(_recProfile.bitsPerSec/1_000_000).toFixed(1)} Mbps`}`;
-  }
-  function _paintQualityList() {
-    if (!qualityListEl) return;
-    for (const row of qualityListEl.querySelectorAll('.visualizer-quality-row')) {
-      row.classList.toggle('is-active', row.dataset.profile === _recProfile.key);
-    }
-  }
-  function _applyProfile(key) {
-    const p = REC_PROFILES[key];
-    if (!p) return;
-    _recProfile = { ...p };
-    _formatProfileButton();
-    _paintQualityList();
-    try { window.dash?.setConfig?.({ recQuality: { key, resolution: p.resolution, bitsPerSec: p.bitsPerSec, fps: p.fps } }); } catch {}
-  }
-  function _applyCustom() {
-    const res = qualityResSel?.value || 'source';
-    const kbps = Number(qualityBitrateEl?.value) || 5000;
-    const fps  = Math.max(15, Math.min(240, Number(qualityFpsSel?.value) || 30));
-    const resolution = res === 'source' ? 'source' : Number(res);
-    const bitsPerSec = Math.max(500_000, Math.min(50_000_000, kbps * 1000));
-    _recProfile = {
-      key: 'custom',
-      label: 'CUSTOM',
-      resolution,
-      bitsPerSec,
-      fps,
-      hint: `${res === 'source' ? 'Source' : res + 'p'} · ${(bitsPerSec/1_000_000).toFixed(1)} Mbps · ${fps} fps`,
-    };
-    _formatProfileButton();
-    _paintQualityList();
-    try { window.dash?.setConfig?.({ recQuality: { key: 'custom', resolution, bitsPerSec, fps } }); } catch {}
-  }
-  qualityBtn?.addEventListener('click', () => {
-    if (!qualityPickerEl) return;
-    if (qualityPickerEl.hidden) {
-      // Hide the source picker if it happens to be open so they don't stack.
-      sourcePickerEl && (sourcePickerEl.hidden = true);
-      sourceBtn?.classList.remove('is-active');
-      qualityPickerEl.hidden = false;
-      qualityBtn.classList.add('is-active');
-      _paintQualityList();
-    } else {
-      qualityPickerEl.hidden = true;
-      qualityBtn.classList.remove('is-active');
-    }
-    playSfx?.('click');
-  });
-  qualityCloseBtn?.addEventListener('click', () => {
-    qualityPickerEl.hidden = true;
-    qualityBtn?.classList.remove('is-active');
-    playSfx?.('click');
-  });
-  qualityListEl?.addEventListener('click', (e) => {
-    const row = e.target.closest('.visualizer-quality-row');
-    if (!row) return;
-    _applyProfile(row.dataset.profile);
-    playSfx?.('confirm');
-  });
-  qualityBitrateEl?.addEventListener('input', () => {
-    if (qualityBitrateVal) qualityBitrateVal.textContent = `${(Number(qualityBitrateEl.value)/1000).toFixed(1)} Mbps`;
-  });
-  qualityApplyBtn?.addEventListener('click', () => {
-    _applyCustom();
-    playSfx?.('confirm');
-  });
-  // Restore previous selection on load.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    const saved = cfg.recQuality;
-    if (saved?.key && REC_PROFILES[saved.key]) {
-      _applyProfile(saved.key);
-    } else if (saved?.key === 'custom' && typeof saved.bitsPerSec === 'number') {
-      const fps = Number(saved.fps) || 30;
-      _recProfile = {
-        key: 'custom', label: 'CUSTOM',
-        resolution: saved.resolution || 'source',
-        bitsPerSec: saved.bitsPerSec,
-        fps,
-        hint: `${saved.resolution === 'source' ? 'Source' : saved.resolution + 'p'} · ${(saved.bitsPerSec/1_000_000).toFixed(1)} Mbps · ${fps} fps`,
-      };
-      if (qualityResSel) qualityResSel.value = String(saved.resolution || 'source');
-      if (qualityBitrateEl) qualityBitrateEl.value = String(Math.round(saved.bitsPerSec / 1000));
-      if (qualityBitrateVal) qualityBitrateVal.textContent = `${(saved.bitsPerSec/1_000_000).toFixed(1)} Mbps`;
-      if (qualityFpsSel) qualityFpsSel.value = String(fps);
-      _formatProfileButton();
-      _paintQualityList();
-    } else {
-      _formatProfileButton();
-      _paintQualityList();
-    }
-  })();
+  // Lives in ./rec/profiles.js. Returns getters the screen recorder
+  // calls when it spawns ffmpeg.
+  const _profiles = setupProfiles({ playSfx });
 
   // ── Free-capture crop region ─────────────────────────────────────
-  // Draggable + resizable rectangle inside the player wrap; when
-  // active, _buildRecorderStream below crops the recording to its
-  // bounds. Rect is stored in 0..1 fractions of the wrap so it stays
-  // valid across resize, and persisted under config.cropRect.
-  const cropBtn      = document.getElementById('visualizer-crop-btn');
-  const cropOverlay  = document.getElementById('visualizer-crop');
-  const cropRectEl   = document.getElementById('visualizer-crop-rect');
-  let _cropActive = false;
-  let _cropRect = { x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
-  const MIN_CROP_FRAC = 0.05;
-  function _paintCropRect() {
-    if (!cropRectEl) return;
-    cropRectEl.style.left   = `${_cropRect.x * 100}%`;
-    cropRectEl.style.top    = `${_cropRect.y * 100}%`;
-    cropRectEl.style.width  = `${_cropRect.w * 100}%`;
-    cropRectEl.style.height = `${_cropRect.h * 100}%`;
-  }
-  function _clampCropRect(r) {
-    let { x, y, w, h } = r;
-    w = Math.max(MIN_CROP_FRAC, Math.min(1, w));
-    h = Math.max(MIN_CROP_FRAC, Math.min(1, h));
-    x = Math.max(0, Math.min(1 - w, x));
-    y = Math.max(0, Math.min(1 - h, y));
-    return { x, y, w, h };
-  }
-  function _persistCropRect() {
-    try { window.dash?.setConfig?.({ cropRect: { ..._cropRect } }); } catch {}
-  }
-  cropRectEl?.addEventListener('mousedown', (ev) => {
-    if (ev.button !== 0) return;
-    ev.preventDefault();
-    const handle = ev.target?.dataset?.handle || 'move';
-    const wrapRect = visualizerWrapEl.getBoundingClientRect();
-    if (!wrapRect.width || !wrapRect.height) return;
-    const startX = ev.clientX;
-    const startY = ev.clientY;
-    const start = { ..._cropRect };
-    cropRectEl.classList.add('is-dragging');
-    function onMove(e) {
-      const dx = (e.clientX - startX) / wrapRect.width;
-      const dy = (e.clientY - startY) / wrapRect.height;
-      let { x, y, w, h } = start;
-      if (handle === 'move') { x += dx; y += dy; }
-      else {
-        if (handle.includes('w')) { x += dx; w -= dx; }
-        if (handle.includes('e')) {           w += dx; }
-        if (handle.includes('n')) { y += dy; h -= dy; }
-        if (handle.includes('s')) {           h += dy; }
-      }
-      _cropRect = _clampCropRect({ x, y, w, h });
-      _paintCropRect();
-      // If FIT-crop is active, the wrap's aspect tracks the crop's
-      // pixel aspect — keep them in sync as the rect resizes so the
-      // preview canvas reshapes live with the drag.
-      if (_cropFitActive) _refreshWrapShape();
-    }
-    function onUp() {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      cropRectEl.classList.remove('is-dragging');
-      _persistCropRect();
-    }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  });
-  cropBtn?.addEventListener('click', () => {
-    _cropActive = !_cropActive;
-    cropBtn.classList.toggle('is-active', _cropActive);
-    cropBtn.textContent = _cropActive ? 'CROP ●' : 'CROP';
-    if (_cropActive) _paintCropRect();
-    _refreshCropFitView();
-    playSfx?.(_cropActive ? 'confirm' : 'click');
+  // Lives in ./rec/crop.js. The screen recorder reads getActive() +
+  // getRect() in its frame loop; the playback handler calls
+  // deactivate() to drop the crop when starting a recorded file.
+  const _crop = setupCrop({
+    playSfx,
+    visualizerWrapEl,
+    refreshWrapShape: _refreshWrapShape,
   });
 
-  // ── FIT: when CROP is on, show the cropped region filling the wrap
-  // (a live canvas preview of just sx,sy,sw,sh of the video element).
-  // Wrap aspect also reshapes to the crop region's pixel aspect so
-  // the cropped fill fills with no letterboxing.
-  const fitBtn = document.getElementById('visualizer-fit-btn');
-  const cropPreviewEl = document.getElementById('visualizer-crop-preview');
-  let _cropPreviewRaf = 0;
-  function _startCropPreviewLoop() {
-    if (_cropPreviewRaf || !cropPreviewEl) return;
-    const ctx = cropPreviewEl.getContext('2d');
-    cropPreviewEl.hidden = false;
-    const tick = () => {
-      if (!_cropFitActive || !_cropActive) {
-        cropPreviewEl.hidden = true;
-        _cropPreviewRaf = 0;
-        return;
-      }
-      const vw = visualizerVideoEl?.videoWidth || _lastSourceW;
-      const vh = visualizerVideoEl?.videoHeight || _lastSourceH;
-      if (vw && vh && visualizerVideoEl?.readyState >= 2) {
-        const sx = Math.max(0, _cropRect.x * vw);
-        const sy = Math.max(0, _cropRect.y * vh);
-        const sw = Math.max(1, _cropRect.w * vw);
-        const sh = Math.max(1, _cropRect.h * vh);
-        // Match canvas resolution to the wrap's CSS box at device pixels
-        // so the preview stays sharp on hidpi displays without ballooning
-        // CPU on plain 1× monitors.
-        const rect = visualizerWrapEl.getBoundingClientRect();
-        const dpr = Math.min(2, window.devicePixelRatio || 1);
-        const cw = Math.max(2, Math.round(rect.width  * dpr));
-        const ch = Math.max(2, Math.round(rect.height * dpr));
-        if (cropPreviewEl.width  !== cw) cropPreviewEl.width  = cw;
-        if (cropPreviewEl.height !== ch) cropPreviewEl.height = ch;
-        try { ctx.drawImage(visualizerVideoEl, sx, sy, sw, sh, 0, 0, cw, ch); } catch {}
-      }
-      _cropPreviewRaf = requestAnimationFrame(tick);
-    };
-    _cropPreviewRaf = requestAnimationFrame(tick);
-  }
-  function _stopCropPreviewLoop() {
-    if (_cropPreviewRaf) {
-      cancelAnimationFrame(_cropPreviewRaf);
-      _cropPreviewRaf = 0;
-    }
-    if (cropPreviewEl) cropPreviewEl.hidden = true;
-  }
-  function _refreshCropFitView() {
-    const fitOn = _cropFitActive && _cropActive;
-    // Hide the rect editor overlay while in fit mode — the wrap IS the
-    // crop now, so the rect overlay is redundant. To re-edit the rect
-    // the user clicks FIT again (toggles fit off) which restores the
-    // overlay + full-source view.
-    if (cropOverlay) cropOverlay.hidden = !_cropActive || fitOn;
-    if (visualizerWrapEl) visualizerWrapEl.classList.toggle('is-crop-fit', fitOn);
-    if (fitOn) _startCropPreviewLoop();
-    else _stopCropPreviewLoop();
-    _refreshWrapShape();
-  }
-  fitBtn?.addEventListener('click', async () => {
-    _cropFitActive = !_cropFitActive;
-    fitBtn.classList.toggle('is-active', _cropFitActive);
-    fitBtn.textContent = _cropFitActive ? 'FIT ●' : 'FIT';
-    _refreshCropFitView();
-    try { await window.dash?.setConfig?.({ recRoomCropFit: _cropFitActive }); } catch {}
-    playSfx?.(_cropFitActive ? 'confirm' : 'click');
-  });
-  // Restore preference on load.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    _cropFitActive = !!cfg.recRoomCropFit;
-    fitBtn?.classList.toggle('is-active', _cropFitActive);
-    if (fitBtn) fitBtn.textContent = _cropFitActive ? 'FIT ●' : 'FIT';
-    _refreshCropFitView();
-  })();
-  // Restore crop rect on load. The overlay stays hidden until CROP is
-  // toggled — we just preload the rect so the previous shape returns.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    if (cfg.cropRect && typeof cfg.cropRect.w === 'number' && typeof cfg.cropRect.h === 'number') {
-      _cropRect = _clampCropRect(cfg.cropRect);
-    }
-    _paintCropRect();
-  })();
-
-  // ── Auto key capture: render pressed keys onto the recording canvas
-  // (recording-only; never drawn on this screen). Main spawns a global
-  // GetAsyncKeyState poller in PowerShell and pushes each fresh key-
-  // down edge. We keep a rolling FIFO of the last ~12 events with 3-
-  // second fade — the overlay drawer below reads from this and paints
-  // each frame inside _buildRecorderStream's canvas loop.
-  const keysBtn = document.getElementById('visualizer-keys-btn');
-  let _keysOverlayOn = false;
-  let _keyEvents = []; // { key, ts (perf.now ms) }
-  let _keyUnsub = null;
-  const KEY_OVERLAY_FADE_MS = 3000;
-  const KEY_OVERLAY_MAX = 12;
-  function _onKeyEvent(ev) {
-    if (!ev || !ev.name) return;
-    _keyEvents.push({ key: ev.name, ts: performance.now() });
-    if (_keyEvents.length > KEY_OVERLAY_MAX * 2) {
-      _keyEvents = _keyEvents.slice(-KEY_OVERLAY_MAX * 2);
-    }
-  }
-  // Cached parsed accent color, refreshed on theme changes. Reading
-  // getComputedStyle every frame works but is wasteful — cache and let
-  // the theme observer invalidate.
-  let _accentRGB = null;
-  function _readAccentRGB() {
-    try {
-      const raw = getComputedStyle(document.body).getPropertyValue('--accent').trim();
-      let r = 92, g = 207, b = 255; // sensible fallback
-      if (raw.startsWith('#')) {
-        const hex = raw.length === 4
-          ? raw.slice(1).split('').map(c => c + c).join('')
-          : raw.slice(1);
-        r = parseInt(hex.slice(0, 2), 16);
-        g = parseInt(hex.slice(2, 4), 16);
-        b = parseInt(hex.slice(4, 6), 16);
-      } else {
-        const m = raw.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-        if (m) { r = +m[1]; g = +m[2]; b = +m[3]; }
-      }
-      _accentRGB = `${r}, ${g}, ${b}`;
-    } catch {
-      _accentRGB = '92, 207, 255';
-    }
-    return _accentRGB;
-  }
-  function _accentRgbCached() { return _accentRGB || _readAccentRGB(); }
-  // Cheap theme change invalidator — listen to the broad attribute
-  // changes on <html> (theme is usually toggled there). If theme isn't
-  // on <html> the cache just stays valid — fallback colour still works.
-  new MutationObserver(() => { _accentRGB = null; }).observe(document.documentElement, { attributes: true });
-
-  // Paint the keys overlay onto the recording canvas. Right-aligned
-  // column near the bottom-right, newest on top, fading by age.
-  function _drawKeysOverlay(ctx, w, h) {
-    const now = performance.now();
-    const cutoff = now - KEY_OVERLAY_FADE_MS;
-    while (_keyEvents.length && _keyEvents[0].ts < cutoff) _keyEvents.shift();
-    const recent = _keyEvents.slice(-KEY_OVERLAY_MAX);
-    if (!recent.length) return;
-    const fontSize = Math.max(16, Math.round(h * 0.032));
-    const padX = Math.round(w * 0.018);
-    const padY = Math.round(h * 0.018);
-    const cellPadX = Math.round(fontSize * 0.6);
-    const cellPadY = Math.round(fontSize * 0.35);
-    const gap = Math.round(fontSize * 0.35);
-    const accent = _accentRgbCached();
-    ctx.save();
-    ctx.font = `bold ${fontSize}px 'JetBrains Mono', 'Consolas', monospace`;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    let y = h - padY - fontSize / 2 - cellPadY;
-    for (let i = recent.length - 1; i >= 0; i--) {
-      const ev = recent[i];
-      const age = (now - ev.ts) / KEY_OVERLAY_FADE_MS;
-      const alpha = Math.max(0, Math.min(1, 1 - age));
-      if (alpha <= 0) continue;
-      const text = ev.key;
-      const tw = ctx.measureText(text).width;
-      const cellW = tw + cellPadX * 2;
-      const cellH = fontSize + cellPadY * 2;
-      const x = w - padX - cellW;
-      ctx.fillStyle = `rgba(0, 0, 0, ${0.6 * alpha})`;
-      ctx.fillRect(x, y - cellH / 2, cellW, cellH);
-      ctx.lineWidth = Math.max(1, fontSize * 0.08);
-      ctx.strokeStyle = `rgba(${accent}, ${alpha})`;
-      ctx.strokeRect(x + 0.5, y - cellH / 2 + 0.5, cellW - 1, cellH - 1);
-      ctx.shadowColor = `rgba(${accent}, ${alpha * 0.9})`;
-      ctx.shadowBlur = fontSize * 0.45;
-      ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
-      ctx.fillText(text, w - padX - cellPadX, y);
-      ctx.shadowBlur = 0;
-      y -= cellH + gap;
-      if (y - cellH / 2 < padY) break;
-    }
-    ctx.restore();
-  }
-
-  // ── On-screen display overlays (TIME / DATE / FPS) ───────────────
-  // Recording-only, drawn on the recording canvas — same approach as
-  // the keys overlay. Each toggle persists in config.osd.
-  const osdBtn         = document.getElementById('visualizer-osd-btn');
-  const osdPickerEl    = document.getElementById('visualizer-osd-picker');
-  const osdCloseBtn    = document.getElementById('visualizer-osd-close');
-  let _osdState = { time: false, date: false, fps: false };
-  function _osdAnyOn() { return _osdState.time || _osdState.date || _osdState.fps; }
-  function _paintOsdRows() {
-    osdPickerEl?.querySelectorAll('.visualizer-osd-row').forEach((row) => {
-      row.classList.toggle('is-active', !!_osdState[row.dataset.osd]);
-    });
-  }
-  function _updateOsdBtn() {
-    const on = _osdAnyOn();
-    osdBtn?.classList.toggle('is-active', on);
-    if (osdBtn) osdBtn.textContent = on ? 'OSD ●' : 'OSD';
-  }
-  // Rolling FPS tracker — pushes a perf.now() on each canvas draw and
-  // computes frames-per-second over the most recent ~1 s window. Reset
-  // when overlay is hidden so stale numbers don't linger.
-  const _fpsTimes = [];
-  let _fpsValue = 0;
-  function _trackFps() {
-    const now = performance.now();
-    _fpsTimes.push(now);
-    while (_fpsTimes.length && now - _fpsTimes[0] > 1000) _fpsTimes.shift();
-    _fpsValue = _fpsTimes.length;
-  }
-  // Paint TIME/DATE/FPS chips at top-left of the recording canvas.
-  function _drawOsdOverlay(ctx, w, h) {
-    if (!_osdAnyOn()) return;
-    const fontSize = Math.max(14, Math.round(h * 0.024));
-    const lineH = Math.round(fontSize * 1.35);
-    const padX = Math.round(w * 0.018);
-    const padY = Math.round(h * 0.018);
-    const cellPadX = Math.round(fontSize * 0.55);
-    const cellPadY = Math.round(fontSize * 0.3);
-    const accent = _accentRgbCached();
-    const lines = [];
-    const now = new Date();
-    if (_osdState.date) lines.push(`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`);
-    if (_osdState.time) lines.push(`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`);
-    if (_osdState.fps)  lines.push(`${_fpsValue} FPS`);
-    if (!lines.length) return;
-    ctx.save();
-    ctx.font = `bold ${fontSize}px 'JetBrains Mono', 'Consolas', monospace`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    let maxW = 0;
-    for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
-    const cellW = maxW + cellPadX * 2;
-    const cellH = lineH + cellPadY * 0.5;
-    let y = padY;
-    for (const line of lines) {
-      ctx.fillStyle = `rgba(0, 0, 0, 0.6)`;
-      ctx.fillRect(padX, y, cellW, cellH);
-      ctx.lineWidth = Math.max(1, fontSize * 0.08);
-      ctx.strokeStyle = `rgba(${accent}, 0.85)`;
-      ctx.strokeRect(padX + 0.5, y + 0.5, cellW - 1, cellH - 1);
-      ctx.shadowColor = `rgba(${accent}, 0.85)`;
-      ctx.shadowBlur = fontSize * 0.4;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
-      ctx.fillText(line, padX + cellPadX, y + cellH / 2);
-      ctx.shadowBlur = 0;
-      y += cellH + 3;
-    }
-    ctx.restore();
-  }
-  osdBtn?.addEventListener('click', () => {
-    if (!osdPickerEl) return;
-    if (osdPickerEl.hidden) {
-      // Close any other picker so they don't stack.
-      sourcePickerEl && (sourcePickerEl.hidden = true);
-      sourceBtn?.classList.remove('is-active');
-      qualityPickerEl && (qualityPickerEl.hidden = true);
-      qualityBtn?.classList.remove('is-active');
-      osdPickerEl.hidden = false;
-      _paintOsdRows();
-    } else {
-      osdPickerEl.hidden = true;
-    }
-    playSfx?.('click');
-  });
-  osdCloseBtn?.addEventListener('click', () => {
-    osdPickerEl.hidden = true;
-    playSfx?.('click');
-  });
-  osdPickerEl?.addEventListener('click', (ev) => {
-    const row = ev.target.closest('.visualizer-osd-row');
-    if (!row) return;
-    const k = row.dataset.osd;
-    _osdState[k] = !_osdState[k];
-    _paintOsdRows();
-    _updateOsdBtn();
-    try { window.dash?.setConfig?.({ osd: { ..._osdState } }); } catch {}
-    playSfx?.(_osdState[k] ? 'confirm' : 'click');
-  });
-  // Restore from config.
-  (async () => {
-    const cfg = await window.dash?.getConfig?.() || {};
-    const saved = cfg.osd;
-    if (saved && typeof saved === 'object') {
-      _osdState.time = !!saved.time;
-      _osdState.date = !!saved.date;
-      _osdState.fps  = !!saved.fps;
-      _paintOsdRows();
-      _updateOsdBtn();
-    }
-  })();
-
-  keysBtn?.addEventListener('click', async () => {
-    _keysOverlayOn = !_keysOverlayOn;
-    keysBtn.classList.toggle('is-active', _keysOverlayOn);
-    keysBtn.textContent = _keysOverlayOn ? 'KEYS ●' : 'KEYS';
-    if (_keysOverlayOn) {
-      _keyUnsub = window.dash?.onKeycapture?.(_onKeyEvent) || null;
-      try { await window.dash?.keycaptureStart?.(); } catch {}
-    } else {
-      try { await window.dash?.keycaptureStop?.(); } catch {}
-      if (_keyUnsub) { try { _keyUnsub(); } catch {} _keyUnsub = null; }
-      _keyEvents = [];
-    }
-    playSfx?.(_keysOverlayOn ? 'confirm' : 'click');
-  });
+  // ── KEYS + OSD overlays ───────────────────────────────────────────
+  // Lives in ./rec/overlays.js. Recording-only paints; the screen
+  // recorder calls drawKeys/drawOsd in its frame loop and uses the
+  // is*On() getters to decide on the no-canvas fast path.
+  const _overlays = setupOverlays({ playSfx });
 
   // ── Screen record: continuous video capture to gallery/recordings/ ─
-  // Uses MediaRecorder on the active mirror stream. Each 1-second
-  // chunk is streamed straight to main and appended to the .mkv file
-  // so we don't hold the whole recording in renderer memory. Stops
-  // automatically if the mirror is torn down.
+  // Live OBS-style pipe — renderer pumps raw I420 video frames + raw
+  // f32le PCM straight to a long-running ffmpeg child (NVENC-encoded,
+  // +faststart MP4). See feedback_screenrec_pipeline.md memory for
+  // the full architecture notes. Stops automatically if the mirror is
+  // torn down.
   const screenrecBtn = document.getElementById('visualizer-screenrec-btn');
-  let _screenrecState = null; // { id, recorder, pending: Promise[], cleanup }
+  const pcmBtn       = document.getElementById('visualizer-pcm-btn');
+  let _screenrecState = null; // { id, mixerNodes, cancelPumps, getPendingWrites, getStats, finalTeardown }
+  let _pcmRec = null;         // audio-only record: { id, audio, pending: [] }
   // Build a recording-target MediaStream from the live mirror, applying
   // (a) the free-capture crop region if active and (b) the active
   // quality profile's resolution. With no crop and no downscale we
@@ -3671,90 +3437,184 @@ export function init(deps) {
     const settings = vTrack?.getSettings?.() || {};
     const srcW = settings.width  || visualizerVideoEl?.videoWidth  || 1920;
     const srcH = settings.height || visualizerVideoEl?.videoHeight || 1080;
-    const cropOn = _cropActive && _cropRect.w > 0 && _cropRect.h > 0;
-    const sx = cropOn ? Math.round(_cropRect.x * srcW) : 0;
-    const sy = cropOn ? Math.round(_cropRect.y * srcH) : 0;
-    const sw = cropOn ? Math.round(_cropRect.w * srcW) : srcW;
-    const sh = cropOn ? Math.round(_cropRect.h * srcH) : srcH;
-    const target = _recProfile.resolution;
+    const _cr = _crop.getRect();
+    const cropOn = _crop.getActive() && _cr.w > 0 && _cr.h > 0;
+    let sx = cropOn ? Math.round(_cr.x * srcW) : 0;
+    let sy = cropOn ? Math.round(_cr.y * srcH) : 0;
+    let sw = cropOn ? Math.round(_cr.w * srcW) : srcW;
+    let sh = cropOn ? Math.round(_cr.h * srcH) : srcH;
+    // I420 (Chromium's desktopCapturer output format) has chroma
+    // planes at half resolution, so `new VideoFrame(src, {visibleRect})`
+    // requires sx, sy, sw, sh to all be EVEN — otherwise the U/V
+    // sample grid can't align. An odd sx throws TypeError per frame
+    // ("x is not sample-aligned in plane 1") and recording stalls.
+    sx = sx & ~1;
+    sy = sy & ~1;
+    sw = Math.max(2, sw & ~1);
+    sh = Math.max(2, sh & ~1);
+    // After rounding inward, clamp to the source bounds so we never
+    // ask for a visibleRect that extends past the frame.
+    if (sx + sw > srcW) sw = Math.max(2, (srcW - sx) & ~1);
+    if (sy + sh > srcH) sh = Math.max(2, (srcH - sy) & ~1);
+    const target = _profiles.getProfile().resolution;
     let outH = sh;
     if (target !== 'source' && typeof target === 'number' && target < sh) outH = target;
-    const outW = Math.max(2, Math.round(sw * (outH / sh)));
+    let outW = Math.max(2, Math.round(sw * (outH / sh)));
+    // YUV 4:2:0 (the I420 layout we copyTo and ffmpeg ingests) can't
+    // represent a fractional final chroma row/column, so the encoder
+    // pipeline requires EVEN width + height. Easy to hit when CROP is
+    // active: the crop rect's w/h floats round to odd pixel counts. Force
+    // both down to even before handing to the track processor.
+    outH = Math.max(2, outH - (outH % 2));
+    outW = Math.max(2, outW - (outW % 2));
     // Fast path: no crop, no downscale, no overlays → hand original
     // through. Any overlay (keys / OSD) needs the canvas so the overlay
     // is drawn into the recording without appearing in the preview.
-    const osdOn = _osdAnyOn();
-    if (!cropOn && outH === srcH && !_keysOverlayOn && !osdOn) {
+    const keysOn = _overlays.isKeysOn();
+    const osdOn  = _overlays.isOsdAnyOn();
+    if (!cropOn && outH === srcH && !keysOn && !osdOn) {
       return { stream: _mirrorStream, cleanup: () => {} };
+    }
+    // Transform fast path: crop AND/OR downscale (no overlays) handled
+    // via MediaStreamTrackProcessor + new VideoFrame(src, {visibleRect,
+    // displayWidth, displayHeight}). One zero-canvas pass — no canvas,
+    // no setInterval, no drawImage. Critical because:
+    //   • Dashboard3D goes occluded the moment the user switches focus
+    //     to the source app (the whole point of screen recording).
+    //   • The downstream live-pipe pump then calls frame.copyTo({format:
+    //     'I420'}) on this track's frames. That conversion is reliable
+    //     for desktopCapturer-origin frames but NOT for canvas-origin
+    //     frames (RGBA→I420 silently fails on canvas-derived VideoFrames
+    //     in Chromium), so we MUST keep canvas out of the path for
+    //     anything we can do via VideoFrame metadata alone.
+    const needsTransform = cropOn || outH !== srcH || outW !== srcW;
+    const canUseTrackProcessor = typeof MediaStreamTrackProcessor !== 'undefined'
+      && typeof MediaStreamTrackGenerator !== 'undefined'
+      && typeof VideoFrame !== 'undefined';
+    if (needsTransform && !keysOn && !osdOn && canUseTrackProcessor) {
+      const sourceTrack = _mirrorStream.getVideoTracks()[0];
+      if (sourceTrack) {
+        try {
+          const _logXform = (line, extra) => {
+            try { window.dash?.screenrecLogDiag?.(extra ? `${line} ${JSON.stringify(extra)}` : line); } catch {}
+          };
+          _logXform('XFORM_OPEN', { sx, sy, sw, sh, outW, outH, srcW, srcH, cropOn });
+          const processor = new MediaStreamTrackProcessor({ track: sourceTrack });
+          const generator = new MediaStreamTrackGenerator({ kind: 'video' });
+          const reader = processor.readable.getReader();
+          const writer = generator.writable.getWriter();
+          let canceled = false;
+          let _drawCount = 0;
+          let _xformFirstFrameLogged = false;
+          let _xformFirstWriteLogged = false;
+          let _xformFailLogged = 0;
+          (async () => {
+            while (!canceled) {
+              let frame;
+              try {
+                const r = await reader.read();
+                if (r.done) { _logXform('XFORM_SOURCE_DONE', { drawCount: _drawCount }); break; }
+                frame = r.value;
+              } catch (err) {
+                _logXform('XFORM_SOURCE_THROW', { error: err?.message || String(err), drawCount: _drawCount });
+                break;
+              }
+              if (!_xformFirstFrameLogged) {
+                _xformFirstFrameLogged = true;
+                _logXform('XFORM_SOURCE_FIRST_FRAME', {
+                  codedWidth: frame.codedWidth, codedHeight: frame.codedHeight,
+                  visibleRect: frame.visibleRect && { x: frame.visibleRect.x, y: frame.visibleRect.y, width: frame.visibleRect.width, height: frame.visibleRect.height },
+                  format: frame.format,
+                });
+              }
+              try {
+                // visibleRect = crop region (full source when CROP is
+                // off). displayWidth/Height = output size (downscale
+                // when the profile caps below source, otherwise same
+                // as visibleRect dims). Both crop and LITE downscale
+                // ride this single path.
+                const cropped = new VideoFrame(frame, {
+                  visibleRect: { x: sx, y: sy, width: sw, height: sh },
+                  displayWidth:  outW,
+                  displayHeight: outH,
+                });
+                frame.close();
+                await writer.write(cropped);
+                _drawCount++;
+                if (!_xformFirstWriteLogged) {
+                  _xformFirstWriteLogged = true;
+                  _logXform('XFORM_FIRST_WRITE', { outW, outH });
+                }
+              } catch (err) {
+                try { frame.close(); } catch {}
+                if (_xformFailLogged < 3) {
+                  _xformFailLogged++;
+                  _logXform('XFORM_FRAME_FAIL', { error: err?.message || String(err), name: err?.name });
+                }
+              }
+            }
+          })();
+          return {
+            stream: new MediaStream([generator]),
+            cleanup: () => {
+              canceled = true;
+              try { reader.cancel(); } catch {}
+              try { writer.close(); } catch {}
+              try { generator.stop(); } catch {}
+            },
+            getDrawCount: () => _drawCount,
+          };
+        } catch (err) {
+          console.warn('[screenrec] track processor unavailable, falling back to canvas', err?.message || err);
+          // fall through to canvas path
+        }
+      }
     }
     const canvas = document.createElement('canvas');
     canvas.width = outW; canvas.height = outH;
     const ctx = canvas.getContext('2d');
     let canceled = false;
-    let rafId = 0;
-    // Throttle the draw to the profile's fps. rAF runs at the display
-    // refresh (60/144/240 Hz), so without throttling the OSD counts
-    // monitor refresh — not what's being encoded. We sample one frame
-    // per `frameInterval` ms; the 0.5 ms fudge keeps frame intervals
-    // from drifting to the next rAF tick. Caps at display refresh: if
-    // you pick 120 fps on a 60 Hz monitor, the actual rate is 60.
-    const recFps = Math.max(1, Number(_recProfile.fps) || 30);
+    // Driver = setInterval (NOT requestAnimationFrame). For screen
+    // recording the user MUST switch focus away from Dashboard3D to
+    // record another app, which puts Dashboard3D fully behind/occluded;
+    // Chromium then pauses rAF for that renderer (even with the main
+    // BrowserWindow's `backgroundThrottling: false`, occlusion-based
+    // pauses still kick in on some setups). setInterval keeps firing
+    // on a wall-clock timer regardless of compositor state, so the
+    // canvas keeps getting drawn and captureStream keeps producing
+    // frames. The A/V sync work we did (SCHED_AHEAD=0 in the loopback
+    // + `-af asetpts=PTS-0.4/TB` in the ffmpeg transcode) compensates
+    // for setInterval's small timing irregularity vs source frames.
+    const recFps = Math.max(1, Number(_profiles.getFps()) || 30);
     const frameInterval = 1000 / recFps;
-    let lastFrameTime = -Infinity;
-    const draw = (timestamp) => {
+    let _drawCount = 0;
+    const draw = () => {
       if (canceled) return;
-      const t = (typeof timestamp === 'number') ? timestamp : performance.now();
-      if (t - lastFrameTime >= frameInterval - 0.5) {
-        if (visualizerVideoEl && visualizerVideoEl.readyState >= 2) {
-          try { ctx.drawImage(visualizerVideoEl, sx, sy, sw, sh, 0, 0, outW, outH); } catch {}
-        }
-        if (_keysOverlayOn) _drawKeysOverlay(ctx, outW, outH);
-        if (_osdAnyOn()) _drawOsdOverlay(ctx, outW, outH);
-        _trackFps();
-        lastFrameTime = t;
+      if (visualizerVideoEl && visualizerVideoEl.readyState >= 2) {
+        try {
+          ctx.drawImage(visualizerVideoEl, sx, sy, sw, sh, 0, 0, outW, outH);
+          _drawCount++;
+        } catch {}
       }
-      rafId = requestAnimationFrame(draw);
+      if (_overlays.isKeysOn())   _overlays.drawKeys(ctx, outW, outH);
+      if (_overlays.isOsdAnyOn()) _overlays.drawOsd(ctx, outW, outH);
+      _overlays.trackFps();
     };
-    draw();
+    draw(); // synchronous initial frame so captureStream has data on attach
+    const intervalId = setInterval(draw, frameInterval);
     const out = canvas.captureStream(recFps);
-    for (const t of _mirrorStream.getAudioTracks()) {
-      try { out.addTrack(t); } catch {}
-    }
+    // Intentionally NO mirror audio attach here. Audio is the mixer
+    // bus's exclusive job — adding mirror audio tracks on top of the
+    // mixer was one of the paths that gave us the double-audio echo.
     return {
       stream: out,
       cleanup: () => {
         canceled = true;
-        if (rafId) cancelAnimationFrame(rafId);
+        clearInterval(intervalId);
       },
+      getDrawCount: () => _drawCount,
     };
   }
-  function _pickRecorderMime() {
-    // Prefer H.264 in MP4 — Chromium hardware-encodes that path on
-    // most systems (NVENC / QuickSync / AMF), which cuts the
-    // recording CPU cost roughly in half compared to VP9 software
-    // encode. Fall back to VP8 (cheaper than VP9) before VP9 since
-    // VP9 software encode is the heaviest combo on the renderer.
-    const candidates = [
-      'video/mp4;codecs=avc1.42E01F,mp4a.40.2', // H.264 Baseline + AAC
-      'video/mp4;codecs=avc1.4D401F,mp4a.40.2', // H.264 Main + AAC
-      'video/mp4;codecs=avc1.64001F,mp4a.40.2', // H.264 High + AAC
-      'video/mp4;codecs=avc1',
-      'video/mp4',
-      'video/webm;codecs=vp8,opus',  // VP8 next — lighter than VP9
-      'video/webm;codecs=vp8',
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp9',
-      'video/webm',
-    ];
-    for (const m of candidates) {
-      if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
-    }
-    return '';
-  }
-  // Reports whether the picked MediaRecorder mime is hardware-friendly
-  // (H.264 family). Used to skip the screenrec-stop transcode when the
-  // recorder already emits MP4 directly.
-  function _mimeIsMp4(mime) { return /^video\/mp4/.test(String(mime || '')); }
   // Build a MediaStream audio track from the WASAPI loopback worker.
   // The audify worker (already running for the audio visualizer) is
   // pushed into PCM-forwarding mode for the duration of recording; each
@@ -3770,11 +3630,26 @@ export function init(deps) {
       console.warn('[screenrec] AudioContext failed:', err?.message || err);
       return null;
     }
+    // Same autoplay-policy hedge as _buildMixerPcmTap — the loopback's
+    // BufferSource scheduling depends on this context running.
+    try { await ctx.resume(); }
+    catch (err) { console.warn('[screenrec] loopback ctx.resume() failed:', err?.message || err); }
     const dest = ctx.createMediaStreamDestination();
-    // Scheduling-ahead margin so the first few chunks don't underrun
-    // before the AudioContext clock catches up. 60 ms is plenty for the
-    // ~43 ms batched chunks the worker emits.
-    const SCHED_AHEAD = 0.06;
+    // Scheduling-ahead margin. 60 ms → user reported audio lagging
+    // video. 15 ms → still slightly out. 0 → each PCM chunk plays at
+    // `ctx.currentTime` (or later if its scheduled slot already passed).
+    // This eliminates the constant audio-vs-video offset in the
+    // recording. Risk: if a PCM event arrives late (>43 ms after the
+    // previous chunk's slot ended), there's a brief audible gap — but
+    // that's acceptable for recordings, and the audify worker batches
+    // tightly enough that this should be rare.
+    // Scheduling-ahead margin = constant audio-behind-video offset in
+    // the recording. 60 ms → "slightly out". 30 → "still behind".
+    // 10 → "very close, but still off". 0 → audio plays the moment the
+    // PCM event arrives. Tiny risk of audible underrun on the very
+    // first chunk if AudioContext's clock hasn't caught up yet, but
+    // that's an acceptable trade for genuine lipsync.
+    const SCHED_AHEAD = 0;
     let nextStart = 0;
     let chunkCount = 0;
     const handler = (data) => {
@@ -3828,155 +3703,886 @@ export function init(deps) {
     };
   }
 
+  // Build the live PCM tap that feeds the recorder's audio pipe.
+  // Spins up a single AudioContext, attaches each enabled source
+  // (system loopback / mic / window-audio) through its own GainNode +
+  // AnalyserNode, sums them through a master gain, and routes the sum
+  // into an inline AudioWorklet whose only job is to post each block
+  // of mixed Float32 interleaved PCM out the worklet port. Gain nodes
+  // are returned in `nodes` so the mixer sliders can hot-apply volume
+  // changes mid-recording (see _renderMixer reading
+  // _screenrecState.mixerNodes[kind].gain.gain.value) and the meter
+  // UI keeps reading from nodes[kind].analyser unchanged.
+  async function _buildMixerPcmTap(tapOpts = {}) {
+    let ctx;
+    try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (err) { console.warn('[mixer] AudioContext failed:', err?.message || err); return null; }
+    // Force the context out of 'suspended' state. The new pipeline
+    // routes the worklet through ctx.destination (silenced via a gain=0
+    // node) so Chromium considers the graph alive — but if autoplay
+    // policy parked the context after the long async chain inside
+    // _startScreenrec, the worklet's process() never fires and ffmpeg
+    // gets EOF on the audio pipe at stop (= zero-audio MP4).
+    try { await ctx.resume(); }
+    catch (err) { console.warn('[mixer] ctx.resume() failed:', err?.message || err); }
+
+    // Inline AudioWorklet via Blob URL — taps the post-mix bus and
+    // posts batched Float32 interleaved PCM to the main thread. Batch
+    // size ~1024 frames (~21 ms at 48 kHz) so we send ~50 messages/sec
+    // instead of one-per-128-frame quantum (~375/s).
+    const workletCode = `
+class PcmTap extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._batch = null;
+    this._offset = 0;
+    this._target = 1024;
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || !input.length || !input[0] || input[0].length === 0) return true;
+    const ch = input.length;
+    const frames = input[0].length;
+    if (!this._batch) {
+      this._batch = new Float32Array(this._target * ch);
+      this._offset = 0;
+    }
+    const need = this._batch.length / ch;
+    for (let f = 0; f < frames; f++) {
+      const o = (this._offset + f) * ch;
+      for (let c = 0; c < ch; c++) this._batch[o + c] = input[c][f];
+    }
+    this._offset += frames;
+    if (this._offset >= need) {
+      this.port.postMessage(this._batch, [this._batch.buffer]);
+      this._batch = null;
+      this._offset = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-tap', PcmTap);
+`;
+    let workletUrl;
+    try {
+      const blob = new Blob([workletCode], { type: 'application/javascript' });
+      workletUrl = URL.createObjectURL(blob);
+      await ctx.audioWorklet.addModule(workletUrl);
+    } catch (err) {
+      console.warn('[mixer] worklet addModule failed:', err?.message || err);
+      try { if (workletUrl) URL.revokeObjectURL(workletUrl); } catch {}
+      try { await ctx.close(); } catch {}
+      return null;
+    }
+    const CHANNELS = 2;
+    const tap = new AudioWorkletNode(ctx, 'pcm-tap', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1, // 1 silent output keeps the graph "active"
+      channelCount: CHANNELS,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+    });
+    let onPcm = null;
+    tap.port.onmessage = (e) => { if (onPcm) onPcm(e.data); };
+
+    // Master mix bus + silent fan-out so Chromium considers the
+    // graph reachable (some Chromium versions skip processing for
+    // worklets whose only "output" is the port).
+    const master = ctx.createGain();
+    master.connect(tap);
+    const silentSink = ctx.createGain();
+    silentSink.gain.value = 0;
+    tap.connect(silentSink).connect(ctx.destination);
+
+    const nodes = {};
+    const teardowns = [];
+    const _makeAnalyser = () => {
+      const a = ctx.createAnalyser();
+      a.fftSize = 512;
+      a.smoothingTimeConstant = 0.35;
+      return a;
+    };
+
+    // forceSystem (PCM audio-only record) captures system loopback even
+    // when the SOUND toggle is off, so the "record the audio" button
+    // works without the user first arming SOUND.
+    if (_recCaptureAudio || tapOpts.forceSystem) {
+      const lp = await _buildLoopbackAudioTrack();
+      if (lp?.track) {
+        const ms = new MediaStream([lp.track]);
+        const src = ctx.createMediaStreamSource(ms);
+        const gain = ctx.createGain();
+        const analyser = _makeAnalyser();
+        gain.gain.value = _mixer.system.muted ? 0 : _mixer.system.vol / 100;
+        src.connect(gain).connect(master);
+        gain.connect(analyser);
+        nodes.system = { src, gain, analyser };
+        teardowns.push(async () => { try { await lp.teardown?.(); } catch {} });
+      }
+    }
+
+    if (_recCaptureMic) {
+      try {
+        // Mic constraints: keep echoCancellation OFF so the EC algorithm
+        // doesn't subtract system-loopback content from the mic (we're
+        // recording both simultaneously; cancelling overlap would gut the
+        // mic). noiseSuppression OFF so the user's recording stays raw.
+        // autoGainControl IS ON — without it, a quietly-configured
+        // Windows mic produces near-silent recordings even at slider 100.
+        const ms = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+        });
+        const tracks = ms.getAudioTracks();
+        if (!tracks.length) {
+          console.warn('[mixer] mic getUserMedia returned a stream with no audio tracks');
+        } else {
+          const t0 = tracks[0];
+          const settings = t0.getSettings?.() || {};
+          console.log('[mixer] mic attached:', { label: t0.label || '(no label)', deviceId: settings.deviceId, sampleRate: settings.sampleRate, channelCount: settings.channelCount, readyState: t0.readyState, muted: t0.muted });
+          if (t0.muted) {
+            if (visualizerNowEl) visualizerNowEl.textContent = `MIC MUTED AT OS · check Windows mic privacy`;
+            console.warn('[mixer] mic track is OS-muted — Windows mic privacy or device-level mute is blocking capture');
+          }
+        }
+        const src = ctx.createMediaStreamSource(ms);
+        const gain = ctx.createGain();
+        const analyser = _makeAnalyser();
+        gain.gain.value = _mixer.mic.muted ? 0 : _mixer.mic.vol / 100;
+        src.connect(gain).connect(master);
+        gain.connect(analyser);
+        nodes.mic = { src, gain, analyser };
+        teardowns.push(() => { for (const t of ms.getTracks()) { try { t.stop(); } catch {} } });
+      } catch (err) {
+        const msg = err?.message || err?.name || 'unknown';
+        console.warn('[mixer] mic getUserMedia failed:', msg, err);
+        if (visualizerNowEl) visualizerNowEl.textContent = `MIC FAILED · ${msg}`;
+      }
+    }
+
+    // Window audio: only if the chosen mirror source emits an audio
+    // track AND system loopback isn't already capturing it.
+    //
+    // CRITICAL — the double-audio trap (regressed three times):
+    //   When you mirror a window/screen that plays sound, the OS is
+    //   playing that sound through the speakers. WASAPI loopback grabs
+    //   *everything* coming out of the speakers, INCLUDING the source
+    //   window's audio. getDisplayMedia({audio:true}) ALSO exposes that
+    //   window's audio as a separate MediaStream track. Mixing both in
+    //   gives you the same audio twice, ~tens-of-ms apart → audible echo
+    //   on every recording.
+    //
+    // Policy: system loopback wins. If the loopback attached, drop the
+    // window-audio track entirely (system already covers it). Window
+    // audio only attaches on the loopback-disabled path (recCaptureAudio
+    // off, or loopback build failed — e.g., Linux build).
+    const winTracks = _mirrorStream?.getAudioTracks?.() || [];
+    // Normally we drop window-audio when system loopback attached
+    // (loopback is hearing the same speakers anyway → echo). EXCEPTION:
+    // URL mirror under STEALTH — the gain in the Web Audio graph is at
+    // 0 there, so the speakers are silent and system loopback is NOT
+    // capturing the URL audio. The window track from our Web Audio
+    // dest IS the URL audio, and it must attach or the recording goes
+    // silent. The two sources won't conflict because they're carrying
+    // different content (system = OS sounds; window = URL grade).
+    const isStealthUrl = _urlMirrorActive && _stealthOn;
+    const attachWindow = winTracks.length && (!nodes.system || isStealthUrl);
+    if (attachWindow) {
+      try {
+        const ms = new MediaStream(winTracks);
+        const src = ctx.createMediaStreamSource(ms);
+        const gain = ctx.createGain();
+        const analyser = _makeAnalyser();
+        gain.gain.value = _mixer.window.muted ? 0 : _mixer.window.vol / 100;
+        src.connect(gain).connect(master);
+        gain.connect(analyser);
+        nodes.window = { src, gain, analyser };
+        console.log('[mixer] window-audio attached:', winTracks.length, 'tracks · stealthUrl=' + isStealthUrl);
+      } catch (err) {
+        console.warn('[mixer] window-audio attach failed:', err?.message || err);
+      }
+    } else if (winTracks.length && nodes.system) {
+      console.log('[mixer] skipping window-audio (' + winTracks.length + ' track) — already covered by system loopback');
+    } else if (!winTracks.length) {
+      console.log('[mixer] no window-audio tracks in _mirrorStream');
+    }
+
+    if (!Object.keys(nodes).length) {
+      // No sources actually produced audio.
+      try { tap.port.onmessage = null; } catch {}
+      try { silentSink.disconnect(); } catch {}
+      try { tap.disconnect(); } catch {}
+      try { master.disconnect(); } catch {}
+      try { URL.revokeObjectURL(workletUrl); } catch {}
+      try { await ctx.close(); } catch {}
+      return null;
+    }
+    return {
+      ctx,
+      nodes,
+      sampleRate: ctx.sampleRate,
+      channels: CHANNELS,
+      attachOnPcm: (cb) => { onPcm = cb; },
+      teardown: async () => {
+        onPcm = null;
+        try { tap.port.onmessage = null; } catch {}
+        try { silentSink.disconnect(); } catch {}
+        try { tap.disconnect(); } catch {}
+        try { master.disconnect(); } catch {}
+        for (const td of teardowns) { try { await td(); } catch {} }
+        try { URL.revokeObjectURL(workletUrl); } catch {}
+        try { await ctx.close(); } catch {}
+      },
+    };
+  }
+
   async function _startScreenrec() {
     if (_screenrecState) return;
     if (!_mirrorStream) {
-      // Auto-start the mirror so REC works in one click. If that fails,
-      // bail.
+      // Auto-start the mirror so REC works in one click. If that fails, bail.
       await _startVisualizerMirror();
       if (!_mirrorStream) { playSfx?.('error'); return; }
     }
+    // Belt-and-suspenders ctx resume — if the URL mirror's audio graph
+    // exists but got suspended at any point after startup (Chromium
+    // can suspend on long idle, device swap, etc.), _recAudioDest
+    // emits no samples and the recording starts silent. The REC
+    // button click IS a fresh user gesture, so resume() will succeed.
+    // Logged so a recurring "no audio in clip" is traceable.
+    if (_audioCtx && _audioCtx.state === 'suspended') {
+      console.log('[screenrec] resuming suspended audio ctx before record');
+      try { await _audioCtx.resume(); } catch (err) {
+        console.warn('[screenrec] audio ctx resume failed:', err?.message || err);
+      }
+    }
     const built = _buildRecorderStream();
     if (!built?.stream) { playSfx?.('error'); return; }
-    // Always pull audio from the WASAPI loopback worker — it captures
-    // whatever is currently going to the OS default render endpoint,
-    // which means the user hears the source through their speakers as
-    // usual and the recording gets a copy. We replace any mirror-derived
-    // audio (some screen sources hand us an audio track that's already
-    // a duplicate of the loopback, so dropping it avoids double audio).
-    const loopback = await _buildLoopbackAudioTrack();
-    let recStream = built.stream;
-    if (loopback?.track) {
-      recStream = new MediaStream([
-        ...built.stream.getVideoTracks(),
-        loopback.track,
-      ]);
+    const vTrack = built.stream.getVideoTracks()[0];
+    if (!vTrack || typeof MediaStreamTrackProcessor === 'undefined' || typeof VideoFrame === 'undefined') {
+      console.warn('[screenrec] WebCodecs MediaStreamTrackProcessor unavailable — cannot record');
+      try { built.cleanup?.(); } catch {}
+      playSfx?.('error');
+      if (visualizerNowEl) visualizerNowEl.textContent = 'REC unavailable · WebCodecs missing';
+      return;
     }
-    const audioCount = recStream.getAudioTracks().length;
-    const videoCount = recStream.getVideoTracks().length;
+    // Diagnostic log helper — persists to <gallery>/rec-diagnostic.log
+    // so the user has a record on disk even when DevTools is closed.
+    const _logDiag = (line, extra) => {
+      const msg = extra ? `${line} ${JSON.stringify(extra)}` : line;
+      try { window.dash?.screenrecLogDiag?.(msg); } catch {}
+    };
+    // Audio comes from the MIXER bus — system loopback + mic + any
+    // captured-window audio, each through its own GainNode/AnalyserNode
+    // (so the sliders/meters keep working), summed into an AudioWorklet
+    // PCM tap. Returns null if no source produced audio.
+    const audio = await _buildMixerPcmTap();
+    const mixerNodeKinds = Object.keys(audio?.nodes || {}).join('+') || 'none';
     const srcKind = _mirrorSourceOverride?.id?.startsWith?.('window:') ? 'window'
                   : _mirrorSourceOverride?.id?.startsWith?.('screen:') ? 'screen'
                   : 'unknown';
-    console.log('[screenrec] recorder stream:', { audio: audioCount, video: videoCount, kind: srcKind, loopback: !!loopback?.track });
-    // Pick the mime FIRST so we can tell main whether to expect MP4
-    // bytes (hardware-encoded H.264 — skip the post-stop transcode)
-    // or WebM (software VP8/VP9 — re-encode to .mp4 on stop).
-    const mime = _pickRecorderMime();
-    let started;
-    try { started = await window.dash?.screenrecStart?.({ mime }); } catch { started = null; }
-    if (!started?.ok || !started.id) {
-      built.cleanup?.();
-      try { await loopback?.teardown?.(); } catch {}
-      playSfx?.('error');
-      return;
-    }
-    const opts = { videoBitsPerSecond: _recProfile.bitsPerSec || 5_000_000 };
-    if (mime) opts.mimeType = mime;
-    let recorder;
+    // Open the video processor and read the first frame BEFORE telling
+    // main to spawn ffmpeg — that way we can pass real codedWidth/Height
+    // (rather than guessing from settings, which may not yet be filled
+    // on a freshly-started desktopCapturer track).
+    const processor = new MediaStreamTrackProcessor({ track: vTrack });
+    const reader = processor.readable.getReader();
+    let first;
     try {
-      recorder = new MediaRecorder(recStream, opts);
+      first = await Promise.race([
+        reader.read(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('first frame timeout 3s')), 3000)),
+      ]);
     } catch (err) {
-      console.warn('[screenrec] MediaRecorder failed:', err?.message || err);
-      built.cleanup?.();
-      try { await loopback?.teardown?.(); } catch {}
-      try { await window.dash?.screenrecStop?.(started.id); } catch {}
+      _logDiag('STALL_3S', { reason: 'no first frame', error: err?.message || String(err) });
+      try { reader.cancel(); } catch {}
+      try { built.cleanup?.(); } catch {}
+      try { await audio?.teardown?.(); } catch {}
       playSfx?.('error');
+      if (visualizerNowEl) visualizerNowEl.textContent = 'REC FAILED · no frames from source';
+      if (screenrecBtn) { screenrecBtn.textContent = 'REC ⚠ STALL'; screenrecBtn.title = 'No frames in 3s — source not producing'; }
       return;
     }
-    console.log('[screenrec] recording started:', { mime: recorder.mimeType, bps: opts.videoBitsPerSecond });
-    // Surface the chosen encoder path in the toolbar tooltip so the
-    // user can see at a glance whether they got the GPU path
-    // (H.264/MP4) or the software fallback (VP8/VP9/WebM).
-    if (screenrecBtn) {
-      const isGpu = _mimeIsMp4(recorder.mimeType);
-      screenrecBtn.title = isGpu
-        ? `REC · hardware H.264 (low CPU) · ${(opts.videoBitsPerSecond/1_000_000).toFixed(1)} Mbps`
-        : `REC · software VP8/VP9 (CPU-bound) · ${(opts.videoBitsPerSecond/1_000_000).toFixed(1)} Mbps`;
+    if (first.done || !first.value) {
+      try { reader.cancel(); } catch {}
+      try { built.cleanup?.(); } catch {}
+      try { await audio?.teardown?.(); } catch {}
+      playSfx?.('error');
+      if (visualizerNowEl) visualizerNowEl.textContent = 'REC FAILED · video track ended immediately';
+      return;
     }
-    const pending = [];
-    recorder.ondataavailable = async (ev) => {
-      if (!ev.data || !ev.data.size) return;
+    const f0 = first.value;
+    // YUV 4:2:0 requires even dimensions. Modern captures always satisfy
+    // this, but defensive even-rounding here keeps copyTo from throwing.
+    //
+    // Use displayWidth/displayHeight (the intended output size) rather
+    // than codedWidth/codedHeight (the underlying buffer size). When a
+    // cropped VideoFrame is created with a non-origin visibleRect,
+    // Chromium keeps codedWidth/Height equal to the SOURCE's full coded
+    // dimensions and only encodes the cropped size into displayWidth/
+    // displayHeight. Reading codedWidth/Height here told ffmpeg the
+    // source's full size while the canvas raster path produced the
+    // smaller cropped content → wrong aspect on every CROP recording.
+    const W = ((f0.displayWidth  || f0.codedWidth)  | 0) & ~1;
+    const H = ((f0.displayHeight || f0.codedHeight) | 0) & ~1;
+    if (W < 2 || H < 2) {
+      try { f0.close(); } catch {}
+      try { reader.cancel(); } catch {}
+      try { built.cleanup?.(); } catch {}
+      try { await audio?.teardown?.(); } catch {}
+      _logDiag('STALL_3S', { reason: 'invalid first frame dims', w: f0.codedWidth, h: f0.codedHeight });
+      playSfx?.('error');
+      if (visualizerNowEl) visualizerNowEl.textContent = `REC FAILED · invalid frame dims ${f0.codedWidth}×${f0.codedHeight}`;
+      return;
+    }
+    const _p = _profiles.getProfile();
+    const recFps = Math.max(1, Number(_profiles.getFps()) || 30);
+    const targetBps = _p.bitsPerSec || 5_000_000;
+    // PHASE A — probe for a hardware WebCodecs encoder BEFORE spawning
+    // ffmpeg, because main needs to know whether to build the `-c:v copy`
+    // (encoded) pipeline or the raw-RGBA one. Null → keep the legacy path.
+    let _wcConfig = null;
+    if (_wcEncodeEnabled()) {
       try {
-        const buf = new Uint8Array(await ev.data.arrayBuffer());
-        // Track in flight so stop() can await them and we don't lose
-        // the trailing chunk.
-        const p = window.dash?.screenrecChunk?.(started.id, buf);
-        pending.push(p);
+        _wcConfig = await pickEncoderConfig({ width: W, height: H, fps: recFps, bitrate: targetBps });
+        _logDiag('WC_PROBE', { picked: _wcConfig ? _wcConfig.codec : null, w: W, h: H, fps: recFps });
       } catch (err) {
-        console.warn('[screenrec] chunk send failed:', err?.message || err);
+        _wcConfig = null;
+        _logDiag('WC_PROBE_THREW', { error: err?.message || String(err) });
+      }
+    }
+    // Tell main: spawn ffmpeg with the stream geometry we just measured.
+    let started;
+    try {
+      started = await window.dash?.screenrecStart?.({
+        width: W, height: H, fps: recFps,
+        sampleRate: audio?.sampleRate || 48000,
+        channels:   audio?.channels   || 2,
+        hasAudio:   !!audio,
+        sourceName: _mirrorSourceOverride?.name || '',
+        videoBitsPerSecond: targetBps,
+        profileKey: _p.key || 'custom',
+        encodedInput: !!_wcConfig,
+        chunked: _chunkedRecEnabled(),
+        chunkSeconds: _chunkSeconds(),
+      });
+    } catch (err) { started = { ok: false, error: err?.message || String(err) }; }
+    if (!started?.ok || !started.id) {
+      try { f0.close(); } catch {}
+      try { reader.cancel(); } catch {}
+      try { built.cleanup?.(); } catch {}
+      try { await audio?.teardown?.(); } catch {}
+      _logDiag('REC_START_FAILED', { error: started?.error || 'unknown' });
+      playSfx?.('error');
+      if (visualizerNowEl) visualizerNowEl.textContent = `REC FAILED · ${started?.error || 'spawn failed'}`;
+      return;
+    }
+    _logDiag('REC_START', {
+      width: W, height: H, fps: recFps,
+      audio: audio ? `${audio.channels}ch@${audio.sampleRate}Hz` : 'none',
+      mixerSources: mixerNodeKinds,
+      cropOn: _crop.getActive(), crop: _crop.getRect(),
+      kind: srcKind,
+      sourceName: _mirrorSourceOverride?.name || '',
+      encoder: started.encoder,
+      bps: targetBps,
+    });
+
+    // The dim-probe frame's content is stale — it was captured while
+    // we were still building the audio mixer + spawning ffmpeg, so
+    // using it as video PTS 0 puts the video several hundred ms
+    // behind the first audio block (which represents what's playing
+    // RIGHT NOW). Close it and start the pump fresh.
+    try { f0.close(); } catch {}
+
+    // Sync gate. Both pumps drop their output until BOTH sides have
+    // produced at least one packet — then the gate opens and the next
+    // packet from each side becomes ffmpeg's PTS 0. Since audio is
+    // batched every ~21 ms and video at the source frame rate, the
+    // residual A/V skew is at most one packet of each (~30 ms).
+    let gateOpen = false;
+    let haveAudioReady = !audio; // no audio source → audio side is trivially "ready"
+    let haveVideoReady = false;
+    const openGate = () => {
+      if (gateOpen) return;
+      if (haveAudioReady && haveVideoReady) {
+        gateOpen = true;
+        _logDiag('SYNC_GATE_OPEN', { wallClockMs: performance.now() });
       }
     };
-    recorder.onerror = (e) => console.warn('[screenrec] recorder error', e?.error || e);
-    recorder.start(1000); // 1-second chunks
+
+    // Wire format = tight RGBA via a 2D canvas. VideoFrame.copyTo's
+    // format-conversion is "implementation-defined" and Chromium's
+    // build here NO-OPS the request — asking for BGRA or I420 returns
+    // whatever native format the source actually has, with stride
+    // metadata that doesn't match the requested format. Routing each
+    // VideoFrame through canvas.drawImage + ctx.getImageData uses
+    // Chromium's known-good rasterization path and always yields tight
+    // RGBA bytes in CPU memory. Cost: one GPU→CPU readback per frame,
+    // amortized by willReadFrequently which pins the backing on CPU.
+    const rgbaSize = W * H * 4;
+    const _recCanvas = document.createElement('canvas');
+    _recCanvas.width  = W;
+    _recCanvas.height = H;
+    const _recCanvasCtx = _recCanvas.getContext('2d', { willReadFrequently: true, alpha: false });
+    let videoCanceled = false;
+    let audioCanceled = false;
+    let frameCount = 0;
+    let audioBlocks = 0;
+    let firstFrameLogged = false;
+    let firstAudioLogged = false;
+    let lastTsUs = -Infinity;
+    const intervalUs = 1_000_000 / recFps;
+    const pendingWrites = [];
+
+    // PHASE A — if main spawned the encoded (`-c:v copy`) pipeline AND we
+    // have a hardware config, build the WebCodecs encoder. Its output
+    // callback ships finished H.264 bytes over the SAME write IPC the raw
+    // path uses (fd 3 is just bytes either way) and tracks them in
+    // pendingWrites so stop() drains them before closing the pipe. On any
+    // construction failure we null it out — the emitter then falls back to
+    // sendFrame (raw RGBA), but note main is already expecting H.264 on
+    // fd 3 in that case, so we also flag the recording as degraded.
+    let _wcEncoder = null;
+    let _wcFatal = false;
+    if (_wcConfig && started.encoder === 'webcodecs-copy') {
+      try {
+        _wcEncoder = createEncoder({
+          config: _wcConfig,
+          fps: recFps,
+          onChunk: (bytes) => {
+            try {
+              const p = window.dash?.screenrecWriteVideo?.(started.id, bytes);
+              if (p) { pendingWrites.push(p); p.catch(() => {}); }
+              frameCount++;
+              if (!firstFrameLogged) {
+                firstFrameLogged = true;
+                _logDiag('FIRST_FRAME_SENT', { encoded: true, bytes: bytes.byteLength, wallClockMs: performance.now() });
+              }
+            } catch (err) {
+              if (frameCount < 3) console.warn('[screenrec] encoded write IPC failed:', err?.message || err);
+            }
+          },
+          onError: (err) => {
+            _wcFatal = true;
+            _logDiag('WC_ENCODER_ERROR', { error: err?.message || String(err) });
+            console.warn('[screenrec] WebCodecs encoder error — recording may be truncated:', err?.message || err);
+          },
+        });
+        _logDiag('WC_ENCODER_OPEN', { codec: _wcConfig.codec });
+      } catch (err) {
+        _wcEncoder = null;
+        _logDiag('WC_ENCODER_OPEN_FAILED', { error: err?.message || String(err) });
+      }
+    }
+
+    const sendFrame = (frame) => {
+      // Synchronous canvas raster — drawImage handles every input
+      // pixel format Chromium understands (NV12, I420, RGBA, etc.) and
+      // produces a tight 4-bytes-per-pixel RGBA buffer in CPU memory.
+      try {
+        _recCanvasCtx.drawImage(frame, 0, 0, W, H);
+      } catch (err) {
+        if (frameCount < 3) console.warn('[screenrec] canvas drawImage failed:', err?.message || err);
+        return;
+      }
+      let imageData;
+      try {
+        imageData = _recCanvasCtx.getImageData(0, 0, W, H);
+      } catch (err) {
+        if (frameCount < 3) console.warn('[screenrec] canvas getImageData failed:', err?.message || err);
+        return;
+      }
+      // imageData.data is a Uint8ClampedArray (RGBA, tight, W*H*4 bytes).
+      // Wrap in a Uint8Array view of the same memory so the IPC byte-
+      // view path in main hands ffmpeg the exact bytes.
+      const buf = new Uint8Array(imageData.data.buffer, imageData.data.byteOffset, imageData.data.byteLength);
+      try {
+        const p = window.dash?.screenrecWriteVideo?.(started.id, buf);
+        if (p) {
+          pendingWrites.push(p);
+          p.catch(() => {});
+        }
+        frameCount++;
+        if (!firstFrameLogged) {
+          firstFrameLogged = true;
+          _logDiag('FIRST_FRAME_SENT', {
+            width: W, height: H, bytes: buf.byteLength, expected: rgbaSize,
+            sourceTs: frame.timestamp, wallClockMs: performance.now(),
+          });
+        }
+      } catch (err) {
+        if (frameCount < 3) console.warn('[screenrec] video write IPC failed:', err?.message || err);
+      }
+    };
+
+    // Constant-rate video pipeline. ffmpeg's `-f rawvideo -framerate N`
+    // has no per-packet timestamps — it stamps frame[i].pts = i/N. So
+    // whatever rate we deliver at, ffmpeg labels it as N fps. If we
+    // delivered 28 fps to a 30 fps declaration, video plays back at
+    // 28/30 = 0.93× while audio plays back at 1× → audio lands ~2s
+    // behind a 30s recording.
+    //
+    // Solution: decouple the source rate from the delivery rate. The
+    // CAPTURE LOOP keeps a single `latestFrame` reference always up-to-
+    // date with whatever the source last produced. The EMITTER fires
+    // on a wall-clock cadence at exactly recFps and ships a copy of
+    // latestFrame each tick — duplicating on slow source rates,
+    // dropping on fast ones. Output frame count always matches what
+    // ffmpeg's -framerate expects, so the audio stream stays locked.
+    let latestFrame = null;
+    let emitTimerId = null;
+    let nextEmitMs = 0;
+
+    // Capture loop — drains the processor as fast as the source
+    // produces frames, parks the latest one in `latestFrame`.
+    (async () => {
+      while (!videoCanceled) {
+        let r;
+        try { r = await reader.read(); }
+        catch { break; }
+        if (r.done) break;
+        const frame = r.value;
+        if (!haveVideoReady) {
+          haveVideoReady = true;
+          _logDiag('VIDEO_READY', { sourceTs: frame.timestamp, wallClockMs: performance.now() });
+          openGate();
+        }
+        if (latestFrame) { try { latestFrame.close(); } catch {} }
+        latestFrame = frame;
+      }
+      // Loop exited — release the final frame so its GPU/CPU backing
+      // memory isn't held until GC.
+      if (latestFrame) { try { latestFrame.close(); } catch {} latestFrame = null; }
+    })();
+
+    // Emitter — self-rescheduling setTimeout aligned to absolute
+    // wall-clock targets so jitter doesn't accumulate over long
+    // recordings. Skips ticks while the gate is closed; once open,
+    // ships exactly recFps frames per second to ffmpeg.
+    const emitTick = () => {
+      if (videoCanceled) return;
+      if (gateOpen && latestFrame) {
+        let send;
+        try { send = latestFrame.clone(); }
+        catch (err) {
+          // VideoFrame.clone is supported in Chromium 94+; on the off
+          // chance it's missing, skip this tick rather than crash.
+          if (frameCount < 3) console.warn('[screenrec] VideoFrame.clone unavailable:', err?.message || err);
+        }
+        if (send) {
+          // PHASE A — encoded path hands the VideoFrame straight to the
+          // GPU encoder (no readback, no getImageData, no raw-RGBA IPC).
+          // onChunk ships the resulting H.264 bytes + bumps frameCount.
+          // Legacy path: sendFrame rasterizes to RGBA and ships that.
+          // Either way the clone is ours to close after the synchronous
+          // hand-off; the original latestFrame stays valid for next tick.
+          try {
+            if (_wcEncoder) _wcEncoder.encode(send);
+            else            sendFrame(send);
+          }
+          finally { try { send.close(); } catch {} }
+        }
+      }
+      if (nextEmitMs === 0) nextEmitMs = performance.now();
+      nextEmitMs += intervalMs;
+      const delayMs = Math.max(0, nextEmitMs - performance.now());
+      emitTimerId = setTimeout(emitTick, delayMs);
+    };
+    const intervalMs = 1000 / recFps;
+    nextEmitMs = performance.now();
+    emitTimerId = setTimeout(emitTick, intervalMs);
+
+    // Audio pump — AudioWorklet pushes ~1024-frame batches. Pre-gate
+    // blocks signal "audio ready" then are discarded.
+    if (audio) {
+      audio.attachOnPcm((pcm) => {
+        if (audioCanceled) return;
+        if (!haveAudioReady) {
+          haveAudioReady = true;
+          _logDiag('AUDIO_READY', { workletTime: audio.ctx?.currentTime, wallClockMs: performance.now() });
+          openGate();
+        }
+        if (!gateOpen) return;
+        try {
+          const p = window.dash?.screenrecWriteAudio?.(started.id, pcm);
+          if (p) {
+            pendingWrites.push(p);
+            p.catch(() => {});
+          }
+          audioBlocks++;
+          if (!firstAudioLogged) {
+            firstAudioLogged = true;
+            _logDiag('FIRST_AUDIO_SENT', { bytes: pcm.byteLength, wallClockMs: performance.now() });
+          }
+        } catch (err) {
+          if (audioBlocks < 3) console.warn('[screenrec] audio write IPC failed:', err?.message || err);
+        }
+      });
+    }
+
+    // Heartbeat — every 5 s log the actual frame + audio block counts
+    // along with what we EXPECT based on wall-clock elapsed. If actual
+    // < expected, the emitter is being throttled (= video file content
+    // is shorter than real time = audio appears behind video on
+    // playback). Stops on cancel.
+    const _recStartMs = performance.now();
+    let _lastHeartbeatFrames = 0;
+    let _lastHeartbeatAudio  = 0;
+    const _heartbeatTimer = setInterval(() => {
+      const elapsedSec = (performance.now() - _recStartMs) / 1000;
+      const dFrames = frameCount - _lastHeartbeatFrames;
+      const dAudio  = audioBlocks - _lastHeartbeatAudio;
+      _lastHeartbeatFrames = frameCount;
+      _lastHeartbeatAudio  = audioBlocks;
+      _logDiag('HEARTBEAT', {
+        elapsedSec: Number(elapsedSec.toFixed(2)),
+        frames: frameCount,
+        audioBlocks,
+        expectedFrames: Math.round(elapsedSec * recFps),
+        expectedAudioBlocks: Math.round(elapsedSec * 46.875),
+        lastIntervalFrames: dFrames,
+        lastIntervalAudio:  dAudio,
+        gateOpen,
+      });
+    }, 5000);
+    // Watchdog — same shape as the MediaRecorder version. Fires at 3 s.
+    const _watchdogTimer = setTimeout(() => {
+      if (frameCount === 0) {
+        const diag = {
+          videoTrackReadyState: vTrack?.readyState,
+          videoTrackMuted: vTrack?.muted,
+          videoTrackEnabled: vTrack?.enabled,
+          videoTrackSettings: vTrack?.getSettings?.(),
+          audioBlocks,
+          cropOn: _crop.getActive(),
+          mirrorAlive: !!_mirrorStream,
+          mirrorVideoReady: visualizerVideoEl?.readyState,
+          mirrorVideoDims: { w: visualizerVideoEl?.videoWidth, h: visualizerVideoEl?.videoHeight },
+        };
+        console.warn('[screenrec] STALL · 0 frames after 3s ·', diag);
+        _logDiag('STALL_3S', diag);
+        const why = vTrack?.muted ? 'video track muted'
+                  : vTrack?.readyState !== 'live' ? `video track ${vTrack?.readyState}`
+                  : 'unknown';
+        if (visualizerNowEl) visualizerNowEl.textContent = `REC STALL · ${why} · see rec-diagnostic.log`;
+        if (screenrecBtn) {
+          screenrecBtn.title = `REC STALL · ${why} · diagnostic written to <gallery>/rec-diagnostic.log`;
+          screenrecBtn.textContent = 'REC ⚠ STALL';
+        }
+      } else {
+        console.log('[screenrec] healthy · frames:', frameCount, 'audio:', audioBlocks);
+        _logDiag('HEALTHY_3S', { frames: frameCount, audioBlocks });
+        // Surface the audio-block count to the visible NOW text so the
+        // user can verify recording is capturing audio without opening
+        // DevTools. audio=0 after 3 s of recording means something in
+        // the mixer pipeline isn't delivering samples; non-zero means
+        // the recording WILL have audio in the saved file.
+        if (visualizerNowEl) {
+          const mode = _urlMirrorActive
+            ? (_stealthOn ? 'URL+STEALTH' : 'URL')
+            : (_multiCamState ? 'CAMS' : 'SCREEN');
+          visualizerNowEl.textContent = `REC · ${mode} · frames=${frameCount} audio=${audioBlocks}`;
+        }
+      }
+    }, 3000);
+
     _screenrecState = {
       id: started.id,
-      recorder,
-      pending,
-      cleanup: async () => {
+      // Mixer gain nodes so MIXER sliders can rebalance volumes mid-
+      // recording — _renderMixer reads _screenrecState.mixerNodes[kind].gain
+      // on every slider input, and meter UI reads .analyser.
+      mixerNodes: audio?.nodes || {},
+      cancelPumps: () => {
+        clearTimeout(_watchdogTimer);
+        try { clearInterval(_heartbeatTimer); } catch {}
+        try { clearTimeout(emitTimerId); } catch {}
+        videoCanceled = true;
+        audioCanceled = true;
+        try { reader.cancel(); } catch {}
+      },
+      getPendingWrites: () => pendingWrites,
+      getStats: () => ({ frames: frameCount, audioBlocks }),
+      // PHASE A — drain the encoder's queued frames (the last GOP hasn't
+      // been emitted yet when the emitter stops) and close it. No-op on
+      // the legacy raw path. Called by _stopScreenrec BEFORE it awaits
+      // pendingWrites, so flush()'s trailing onChunk writes get queued in
+      // time to be waited on before the fd 3 pipe is closed.
+      flushEncoder: async () => {
+        if (!_wcEncoder) return;
+        try { await _wcEncoder.flush(); } catch {}
+        try { _wcEncoder.close(); } catch {}
+      },
+      finalTeardown: async () => {
         try { built.cleanup?.(); } catch {}
-        try { await loopback?.teardown?.(); } catch {}
+        try { await audio?.teardown?.(); } catch {}
       },
     };
     screenrecBtn?.classList.add('is-active');
+    // is-recording on the player wrap drives the stealth-overlay pill
+    // swap (STEALTH chip → red flashing REC chip) — see the CSS rules
+    // for .visualizer-player-wrap.is-stealth.is-recording::before.
+    visualizerWrapEl?.classList.add('is-recording');
+    try { document.getElementById('topbar-rec-indicator')?.removeAttribute('hidden'); } catch {}
     if (screenrecBtn) {
-      screenrecBtn.textContent = 'REC ●';
-      screenrecBtn.title = audioCount > 0
-        ? 'Recording with loopback audio (system audio)'
-        : 'Recording WITHOUT audio (loopback unavailable)';
+      const wantedAudio = _shouldCaptureAudio();
+      if (audio) {
+        screenrecBtn.textContent = 'REC ●';
+        screenrecBtn.title = `Recording · live ${started.encoder} · ${(targetBps/1_000_000).toFixed(1)} Mbps`;
+      } else if (wantedAudio) {
+        screenrecBtn.textContent = 'REC ⚠';
+        screenrecBtn.title = 'Recording WITHOUT audio — mixer build returned no sources';
+        console.warn('[screenrec] audio requested but mixer unavailable — recording will be silent');
+      } else {
+        screenrecBtn.textContent = 'REC (silent) ●';
+        screenrecBtn.title = 'Recording without audio (SOUND is off)';
+      }
     }
   }
+
   async function _stopScreenrec() {
     const st = _screenrecState;
     if (!st) return;
     _screenrecState = null;
     screenrecBtn?.classList.remove('is-active');
+    visualizerWrapEl?.classList.remove('is-recording');
     if (screenrecBtn) screenrecBtn.textContent = 'REC';
+    try { document.getElementById('topbar-rec-indicator')?.setAttribute('hidden', ''); } catch {}
     try {
-      // Wait for the final ondataavailable to fire on stop, then for
-      // any in-flight chunks to land in main before closing the file.
-      await new Promise((resolve) => {
-        try { st.recorder.addEventListener('stop', () => resolve(), { once: true }); st.recorder.stop(); }
-        catch { resolve(); }
-      });
-      await Promise.allSettled(st.pending);
+      // Stop new writes from being scheduled, but keep the audio worklet
+      // running until cleanup so any block already in-flight finishes.
+      try { st.cancelPumps?.(); } catch {}
+      // PHASE A — flush the WebCodecs encoder before draining writes so
+      // its final queued frames become pendingWrites entries. No-op on
+      // the legacy raw path.
+      try { await st.flushEncoder?.(); } catch {}
+      // Wait for any IPC writes already in flight to land in main —
+      // otherwise we'd close the ffmpeg pipes with bytes still queued
+      // in the renderer and lose the trailing fragment.
+      try { await Promise.allSettled(st.getPendingWrites?.() || []); } catch {}
       const res = await window.dash?.screenrecStop?.(st.id);
       if (res?.ok) {
         console.log('[screenrec] saved:', res.path, '·', res.encoder, '·', res.size, 'bytes');
-        if (screenrecBtn) {
-          screenrecBtn.title = `Saved ${res.name} (${(res.size / 1024 / 1024).toFixed(1)} MB) · click to record again`;
-        }
-        if (visualizerNowEl) visualizerNowEl.textContent = `SAVED · ${res.name}`;
+        try { window.dash?.screenrecLogDiag?.(`REC_SAVED ${JSON.stringify({ name: res.name, size: res.size, encoder: res.encoder, profile: res.profile, targetBps: res.targetBps, chunks: res.chunks, joined: res.joined, warning: res.warning })}`); } catch {}
+        // Chunk suffix for the toast: "· 4 chunks joined" or, if the
+        // join failed, "· 4 chunks (join failed — parts kept)".
+        const chunkInfo = res.chunked
+          ? (res.joined ? ` · ${res.chunks} chunks joined` : ` · ${res.chunks} chunks (parts kept)`)
+          : '';
+        if (screenrecBtn) screenrecBtn.title = `Saved ${res.name} (${(res.size / 1024 / 1024).toFixed(1)} MB · ${res.encoder})${chunkInfo} · click to record again`;
+        if (visualizerNowEl) visualizerNowEl.textContent = `SAVED · ${res.name} · ${res.encoder}${chunkInfo}`;
       } else {
-        // Surface the failure so it's not silent — main returns a reason.
         const why = res?.error || 'no response from main process';
         console.error('[screenrec] SAVE FAILED:', why, res);
+        try { window.dash?.screenrecLogDiag?.(`REC_SAVE_FAILED ${JSON.stringify({ error: why })}`); } catch {}
         if (screenrecBtn) screenrecBtn.title = `SAVE FAILED — ${why}`;
         if (visualizerNowEl) visualizerNowEl.textContent = `REC SAVE FAILED · ${why}`;
       }
-      // Auto-navigate the gallery browser into recordings/ so the new
-      // file is immediately visible without the user having to dig.
       try { _visualizerSubdir = 'recordings'; refreshVisualizer(); } catch {}
     } catch (err) {
       console.warn('[screenrec] stop failed:', err?.message || err);
     } finally {
-      // cleanup is async (it awaits setLoopbackPcm(false) + ctx.close);
-      // fire-and-forget is fine — the audio worker only takes a few ms
-      // to flip flag, and we don't want to block the user from starting
-      // the next recording.
-      try { Promise.resolve(st.cleanup?.()).catch(() => {}); } catch {}
+      // Final teardown closes the AudioContext + tears down the
+      // loopback. Fire-and-forget so the next REC can spin up without
+      // waiting on setLoopbackPcm(false) to round-trip.
+      try { Promise.resolve(st.finalTeardown?.()).catch(() => {}); } catch {}
     }
   }
   screenrecBtn?.addEventListener('click', () => {
-    if (_screenrecState) { _stopScreenrec(); playSfx?.('click'); }
-    else                 { _startScreenrec(); playSfx?.('confirm'); }
+    // Toggle: was-on → turn off → 'close'; was-off → turn on → 'click'.
+    if (_screenrecState) { _stopScreenrec(); playSfx?.('close'); }
+    else                 { _startScreenrec(); playSfx?.('click'); }
   });
-  // Keep the play/pause icon in sync regardless of who initiated the
-  // state change (transport buttons, native video controls, ended-event
-  // auto-advance, etc.).
-  visualizerVideoEl?.addEventListener('play',     updatePlayPauseIcon);
-  visualizerVideoEl?.addEventListener('pause',    updatePlayPauseIcon);
-  visualizerVideoEl?.addEventListener('emptied',  updatePlayPauseIcon);
-  visualizerVideoEl?.addEventListener('loadeddata', updatePlayPauseIcon);
+
+  // ── PCM: audio-only record → high-quality MP3 to the music folder ──
+  // Independent of the video REC path. Captures the mixer audio (system
+  // loopback always, + mic when MIC is armed), streams f32le PCM to the
+  // same ffmpeg pump main spawns, and main encodes a 320k MP3. No video
+  // is captured or piped. Toggle: click to start, click again to stop.
+  async function _startPcmRec() {
+    if (_pcmRec) return;
+    if (_screenrecState) {
+      // Video REC already owns the audio mixer; don't double-capture.
+      if (visualizerNowEl) visualizerNowEl.textContent = 'PCM: stop the video REC first';
+      playSfx?.('error');
+      return;
+    }
+    // REC button press is a fresh user gesture — resume any parked ctx.
+    if (_audioCtx && _audioCtx.state === 'suspended') {
+      try { await _audioCtx.resume(); } catch {}
+    }
+    const audio = await _buildMixerPcmTap({ forceSystem: true });
+    if (!audio) {
+      if (visualizerNowEl) visualizerNowEl.textContent = 'PCM FAILED · no audio sources';
+      playSfx?.('error');
+      return;
+    }
+    let started;
+    try {
+      started = await window.dash?.screenrecStart?.({
+        audioOnly: true,
+        hasAudio: true,
+        sampleRate: audio.sampleRate || 48000,
+        channels:   audio.channels   || 2,
+        sourceName: _mirrorSourceOverride?.name || '',
+      });
+    } catch (err) { started = { ok: false, error: err?.message || String(err) }; }
+    if (!started?.ok || !started.id) {
+      try { await audio.teardown?.(); } catch {}
+      if (visualizerNowEl) visualizerNowEl.textContent = `PCM FAILED · ${started?.error || 'spawn failed'}`;
+      playSfx?.('error');
+      return;
+    }
+    const rec = { id: started.id, audio, pending: [] };
+    audio.attachOnPcm((pcm) => {
+      if (!_pcmRec) return;
+      try {
+        const p = window.dash?.screenrecWriteAudio?.(rec.id, pcm);
+        if (p) { rec.pending.push(p); p.catch(() => {}); }
+      } catch {}
+    });
+    _pcmRec = rec;
+    pcmBtn?.classList.add('is-active');
+    if (pcmBtn) pcmBtn.textContent = 'PCM ●';
+    if (visualizerNowEl) visualizerNowEl.textContent = 'PCM · recording audio…';
+  }
+  async function _stopPcmRec() {
+    const rec = _pcmRec;
+    if (!rec) return;
+    _pcmRec = null;
+    pcmBtn?.classList.remove('is-active');
+    if (pcmBtn) pcmBtn.textContent = 'PCM';
+    try {
+      // Detach the tap so no further blocks schedule, drain in-flight
+      // writes, then close the ffmpeg audio pipe so it finalizes the MP3.
+      try { rec.audio.attachOnPcm(null); } catch {}
+      try { await Promise.allSettled(rec.pending); } catch {}
+      const res = await window.dash?.screenrecStop?.(rec.id);
+      if (res?.ok) {
+        if (visualizerNowEl) visualizerNowEl.textContent = `SAVED · ${res.name} → music`;
+      } else {
+        if (visualizerNowEl) visualizerNowEl.textContent = `PCM SAVE FAILED · ${res?.error || 'unknown'}`;
+      }
+    } catch (err) {
+      console.warn('[pcm] stop failed:', err?.message || err);
+    } finally {
+      try { Promise.resolve(rec.audio.teardown?.()).catch(() => {}); } catch {}
+    }
+  }
+  pcmBtn?.addEventListener('click', () => {
+    if (_pcmRec) { _stopPcmRec(); playSfx?.('close'); }
+    else         { _startPcmRec(); playSfx?.('click'); }
+  });
+
+  // Global REC hotkeys (F9 = PCM, F10 = screen REC). Main grabs the keys
+  // system-wide and forwards the intent here so they fire even while the
+  // app being recorded is focused. Routed through the same button-click
+  // toggles so SFX + state stay consistent. Active once the REC ROOM has
+  // been opened this session (this module is lazy-loaded on first open).
+  try {
+    window.dash?.onRecHotkey?.(({ which }) => {
+      if (which === 'pcm') pcmBtn?.click();
+      else if (which === 'screenrec') screenrecBtn?.click();
+    });
+  } catch {}
   // Drive the wrap's aspect ratio off the actual video's intrinsic
   // dimensions as soon as they're known. Covers both file playback
   // (src URL) and the mirror case where getSettings() may not have
@@ -4000,14 +4606,47 @@ export function init(deps) {
     }
   });
   // Auto-advance: when a video ends, cue the next one in the list.
-  visualizerVideoEl?.addEventListener('ended', () => {
-    const playable = _playableEntries();
+  // URL mirror takes precedence — if the URL playback is what ended
+  // and a screen recording is in progress, stop the recording and
+  // tear down the mirror so the saved file's duration matches the
+  // source. Without this, the recorder would keep capturing a frozen
+  // last frame after the source video finished.
+  visualizerVideoEl?.addEventListener('ended', async () => {
+    if (_urlMirrorActive) {
+      try {
+        if (_screenrecState && typeof _stopScreenrec === 'function') {
+          await _stopScreenrec();
+        }
+      } catch (err) {
+        console.warn('[url-mirror] auto-stop record failed:', err?.message || err);
+      }
+      try { _stopVisualizerMirror(); } catch {}
+      return;
+    }
+    const playable = _visualizerEntries.filter((e) => !e.isDir && _VIDEO_KNOWN_RE.test(e.name));
     const idx = playable.findIndex((e) => e.path === _visualizerCurrent);
     const next = playable[idx + 1];
     if (next) playVisualizerEntry(next);
   });
 
   _activateImpl = () => { try { refreshVisualizer(); } catch {} };
+
+  // Cross-room sync: EXPLORE (or anywhere) renames / moves / deletes a
+  // gallery file → refresh our recordings list so the user doesn't see
+  // a ghost row. Coalesced to one rAF so a burst of mutations (paste
+  // of 20 files) only re-fetches once. detail.which lets us skip the
+  // refetch when an unrelated section changed.
+  let _filesChangedQueued = false;
+  window.addEventListener('dash:files-changed', (ev) => {
+    const which = ev?.detail?.which;
+    if (which && which !== 'gallery') return; // recordings live under gallery
+    if (_filesChangedQueued) return;
+    _filesChangedQueued = true;
+    requestAnimationFrame(() => {
+      _filesChangedQueued = false;
+      try { refreshVisualizer(); } catch {}
+    });
+  });
 }
 
 export function activate() { _activateImpl?.(); }

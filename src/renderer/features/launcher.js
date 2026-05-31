@@ -1,19 +1,17 @@
-// APP LAUNCHER + POWER MENU — appliance feature module.
+// APP LAUNCHER — appliance feature module.
 //
 // Topbar #launcher-btn opens a grid of pinned programs (click to launch,
 // ADD APP to pin one via a native file dialog). The pinned list persists
-// in config under cfg.launcherApps.
+// in config under cfg.launcherApps. Built for the appliance build where
+// the dashboard is the shell and there is no Start menu / taskbar.
 //
-// Topbar #power-btn opens the power menu — power off / restart go through
-// main's system-power handler; sleep reuses the existing system-sleep one.
-// Both are built for the appliance build where the dashboard is the shell
-// and there is no Start menu / taskbar to do this.
+// (Power menu — #power-btn + #power-overlay — was removed; users power
+// the box off via OS-native means.)
 //
 // initLauncher() is called once from app.js with the renderer helpers it
 // needs — keeps the module free of app.js globals.
 export function initLauncher({ playSfx } = {}) {
   initAppLauncher({ playSfx });
-  initPowerMenu({ playSfx });
 }
 
 function escapeHtml(s) {
@@ -145,61 +143,3 @@ function initAppLauncher({ playSfx }) {
   });
 }
 
-function initPowerMenu({ playSfx }) {
-  const overlay = document.querySelector('#power-overlay');
-  const openBtn = document.querySelector('#power-btn');
-  if (!overlay || !openBtn) return;
-  const statusEl  = overlay.querySelector('#power-status');
-  const closeBtn  = overlay.querySelector('#power-close-btn');
-  const offBtn    = overlay.querySelector('#power-off-btn');
-  const restartBtn= overlay.querySelector('#power-restart-btn');
-  const sleepBtn  = overlay.querySelector('#power-sleep-btn');
-
-  let busy = false;
-  function setStatus(msg, kind) {
-    statusEl.textContent = msg || '';
-    statusEl.dataset.kind = kind || '';
-  }
-
-  function open() {
-    overlay.hidden = false;
-    playSfx?.('click');
-    setStatus('');
-  }
-  function close() {
-    overlay.hidden = true;
-    playSfx?.('click');
-  }
-
-  // action: 'poweroff' | 'reboot' | 'sleep'. Main shows the native
-  // confirm dialog; here we only surface the outcome.
-  async function runPower(action) {
-    if (busy) return;
-    busy = true;
-    playSfx?.('click');
-    setStatus('Awaiting confirmation…');
-    try {
-      const r = action === 'sleep'
-        ? await window.dash.systemSleep()
-        : await window.dash.systemPower(action);
-      if (r?.cancelled) { setStatus('Cancelled.'); return; }
-      if (!r?.ok) { setStatus(r?.error || 'failed', 'err'); playSfx?.('error'); return; }
-      setStatus(action === 'sleep' ? 'Sleeping…' : 'Goodbye…', 'ok');
-    } catch (err) {
-      setStatus(err.message || 'error', 'err');
-      playSfx?.('error');
-    } finally {
-      busy = false;
-    }
-  }
-
-  openBtn.addEventListener('click', open);
-  closeBtn.addEventListener('click', close);
-  offBtn.addEventListener('click', () => runPower('poweroff'));
-  restartBtn.addEventListener('click', () => runPower('reboot'));
-  sleepBtn.addEventListener('click', () => runPower('sleep'));
-  overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !overlay.hidden) close();
-  });
-}

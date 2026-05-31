@@ -452,7 +452,12 @@ let _uiLocked = false;
 // AudioContexts otherwise) and reused across calls. `playSfx(kind)` dispatches
 // to a small bank of short envelopes keyed by interaction type.
 let _sfxCtx = null;
-let _sfxEnabled = true;
+// UI sounds enabled. The on/off toggle UI is gone but the underlying
+// flag stays so it's a one-line revert if needed. AudioContext is
+// still created lazily on the first user gesture (Chromium suspends
+// fresh contexts otherwise), so this flag costs nothing until SFX
+// actually fires.
+const _sfxEnabled = true;
 function _sfxGetCtx() {
   if (!_sfxCtx) {
     try { _sfxCtx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -461,28 +466,103 @@ function _sfxGetCtx() {
   if (_sfxCtx?.state === 'suspended') _sfxCtx.resume?.();
   return _sfxCtx;
 }
+// SINGLE volume knob for ALL synthesized sound effects — UI clicks /
+// tabs / confirm / error / delete bleeps AND the boot sequence. Both
+// playSfx and playBootSfx route through this. Tweak this one number
+// to make every dash sound louder or quieter; no need to touch per-
+// kind gain ramps below. 10.0 = +100% over the 5.0 step.
+// Clip note: the two loudest boot peaks (boot-power 0.105, boot-think
+// sub 0.11) now exceed full-scale (1.05 and 1.10). Listen for crackle
+// on those specifically — if you hear it, back off to ~9.0 or we can
+// re-engineer the per-kind ramps. UI clicks all stay safely below 1.0.
+const SFX_GAIN = 10.0;
+// Dedup window for double-trigger suppression. The document-level
+// click delegate (~line 753) auto-plays a sound for any button with
+// one of a handful of marker classes; many feature modules also call
+// playSfx() explicitly in their own click handlers. When a button
+// matches both paths, the same DOM event fires playSfx twice within
+// the same tick → audible doubled / overlapping bleep.
+//
+// Global (any-kind) dedup, not per-kind: toggle handlers now pick
+// between 'click' and 'close' depending on the button's state, while
+// the delegate still emits a generic 'click'. Without a global window
+// we'd hear close+click stacked on every toggle-off. 30 ms is below
+// the ~50 ms temporal resolution at which the ear hears two distinct
+// click events, so legit fast user-clicking still rings each time,
+// but two fires for the same DOM event collapse into one.
+let _sfxLastFireAt = -1;
+// 'type' has its own dedup so sustained typing doesn't block a click
+// happening alongside it (and vice versa). 8 ms covers the same-event
+// double-fire case without suppressing legit fast keystrokes — 125
+// chars/sec is well above any realistic typing speed.
+let _sfxLastTypeAt = -1;
+const _SFX_DEDUP_WINDOW = 0.03;
+const _SFX_TYPE_DEDUP_WINDOW = 0.008;
 function playSfx(kind) {
   if (!_sfxEnabled) return;
   const ctx = _sfxGetCtx();
   if (!ctx) return;
-  const t = ctx.currentTime;
+  const now = ctx.currentTime;
+  if (kind === 'type') {
+    if (_sfxLastTypeAt >= 0 && now - _sfxLastTypeAt < _SFX_TYPE_DEDUP_WINDOW) return;
+    _sfxLastTypeAt = now;
+  } else {
+    if (_sfxLastFireAt >= 0 && now - _sfxLastFireAt < _SFX_DEDUP_WINDOW) return;
+    _sfxLastFireAt = now;
+  }
+  const t = now;
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  osc.connect(gain).connect(ctx.destination);
+  const master = ctx.createGain();
+  master.gain.value = SFX_GAIN;
+  osc.connect(gain).connect(master).connect(ctx.destination);
+  // Start BEFORE the switch — modern Chromium throws "cannot call
+  // stop without calling start first" if the case below schedules
+  // osc.stop() on a not-yet-started source. (Used to be permissive;
+  // tightened up in a recent Web Audio spec change.)
+  osc.start(t);
   switch (kind) {
-    case 'click':   // generic button — quick high chirp
-      osc.type = 'square';
-      osc.frequency.setValueAtTime(880, t);
-      osc.frequency.exponentialRampToValueAtTime(660, t + 0.04);
-      gain.gain.setValueAtTime(0.05, t);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
-      osc.stop(t + 0.07); break;
-    case 'tab':     // tab / mode switch — single triangle tick
+    // 'click' shares the soft triangle character with 'tab' — square
+    // waves felt harsh in the rec room buttons (lots of odd harmonics
+    // → buzzy), so we moved the default click to a triangle tick that
+    // sits well across every surface. Kept as a separate kind from
+    // 'tab' for semantic clarity (tabs vs buttons) and future tuning.
+    case 'click':   // generic button — soft triangle tick
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(1320, t);
       gain.gain.setValueAtTime(0.035, t);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
       osc.stop(t + 0.06); break;
+    case 'close':   // dismiss / toggle-OFF — descending triangle
+      // Mirrors 'click' but pitched downward: 1320 → 660 Hz (full
+      // octave drop) across a slightly longer envelope so the
+      // descent reads as a "settling down" / dismissal gesture.
+      // Same triangle family so it doesn't feel like a different
+      // button — just the same surface going the other way.
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(1320, t);
+      osc.frequency.exponentialRampToValueAtTime(660, t + 0.05);
+      gain.gain.setValueAtTime(0.035, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+      osc.stop(t + 0.08); break;
+    case 'tab':     // tab / mode switch — same triangle as 'click'
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(1320, t);
+      gain.gain.setValueAtTime(0.035, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+      osc.stop(t + 0.06); break;
+    case 'type':    // keystroke — high triangle chirp with jitter
+      // Per-keystroke pitch jitter (~±5%) keeps sustained typing from
+      // feeling mechanical / sample-loop-y. Very short envelope (~15 ms)
+      // keeps it from stacking into noise during fast typing. At
+      // SFX_GAIN=10 the peak lands at ~0.45 of full-scale, comparable
+      // in loudness to the click/close family — clearly audible without
+      // dominating UI clicks happening alongside.
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(2100 * (0.95 + Math.random() * 0.10), t);
+      gain.gain.setValueAtTime(0.045, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.012);
+      osc.stop(t + 0.018); break;
     case 'delete':  // destructive — descending sawtooth bleep
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(440, t);
@@ -511,24 +591,15 @@ function playSfx(kind) {
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
       osc.stop(t + 0.06);
   }
-  osc.start(t);
 }
-function setSfxEnabled(on) {
-  _sfxEnabled = !!on;
-  document.querySelector('#sfx-btn')?.classList.toggle('is-muted', !_sfxEnabled);
-}
-
 // Techy boot SFX — separate bank from the UI playSfx because each kind
 // needs its own Web Audio node graph (noise buffers, multi-oscillator
 // blends, etc.) rather than the single-osc shape playSfx uses. All
 // sounds are procedurally generated so there are no audio file assets
 // to ship. Routed through the same `_sfxEnabled` flag and AudioContext
 // so user mute state and the audio-context resume logic still apply.
-// Single multiplier applied to every boot-time sound effect. Set to 1.3
-// = +30% over the original procedural levels. Centralized here so future
-// volume tweaks are a one-line change instead of hunting through every
-// individual oscillator's gain ramps.
-const BOOT_SFX_GAIN = 1.3;
+// Boot sounds share the unified SFX_GAIN multiplier with playSfx —
+// see top of file. One number controls everything.
 function playBootSfx(kind) {
   if (!_sfxEnabled) return;
   const ctx = _sfxGetCtx();
@@ -536,10 +607,9 @@ function playBootSfx(kind) {
   const t = ctx.currentTime;
   // Master gain for this sound event. Every oscillator / noise source
   // below connects through here instead of straight to ctx.destination,
-  // so the BOOT_SFX_GAIN multiplier (and any future master fades) applies
-  // to all of them uniformly.
+  // so the SFX_GAIN multiplier applies uniformly to all of them.
   const master = ctx.createGain();
-  master.gain.value = BOOT_SFX_GAIN;
+  master.gain.value = SFX_GAIN;
   master.connect(ctx.destination);
 
   switch (kind) {
@@ -553,7 +623,10 @@ function playBootSfx(kind) {
       osc.frequency.setValueAtTime(50, t);
       osc.frequency.exponentialRampToValueAtTime(110, t + 0.4);
       gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.exponentialRampToValueAtTime(0.105, t + 0.08);
+      // Was 0.105 (clipped at SFX_GAIN=10 → 1.05). Trim to 0.09 so
+      // the post-master signal lands at 0.90 — clean, no harmonic
+      // crackle from a flat-topped sawtooth.
+      gain.gain.exponentialRampToValueAtTime(0.09, t + 0.08);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
       osc.start(t);
       osc.stop(t + 0.6);
@@ -569,7 +642,11 @@ function playBootSfx(kind) {
       const freq = 800 + Math.random() * 1800;
       osc.type = 'square';
       osc.frequency.setValueAtTime(freq, t);
-      gain.gain.setValueAtTime(0.027, t);
+      // Was 0.027 — bumped to 0.07 so each bit-tick reads as a sharp
+      // pop instead of a faint click. Stays well clear of clip (0.70
+      // final at SFX_GAIN=10). Square-wave at 800–2600 Hz lands in
+      // the ear's most-sensitive band so this carries audible weight.
+      gain.gain.setValueAtTime(0.07, t);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.028);
       osc.start(t);
       osc.stop(t + 0.035);
@@ -596,8 +673,12 @@ function playBootSfx(kind) {
       sub.frequency.setValueAtTime(45, t);
       sub.frequency.linearRampToValueAtTime(60, t + tdur);
       subGain.gain.setValueAtTime(0.0001, t);
-      subGain.gain.exponentialRampToValueAtTime(0.11, t + 1.2);
-      subGain.gain.linearRampToValueAtTime(0.09, t + tdur * 0.85);
+      // Was 0.11 (clipped at SFX_GAIN=10 → 1.10). Trim sub to 0.08
+      // so the bass layer stays clean. Sub-bass at 45–60 Hz is
+      // mostly felt rather than heard, so this drop is barely
+      // audible — the body layer below does the actual lifting.
+      subGain.gain.exponentialRampToValueAtTime(0.08, t + 1.2);
+      subGain.gain.linearRampToValueAtTime(0.07, t + tdur * 0.85);
       subGain.gain.exponentialRampToValueAtTime(0.0001, t + tdur);
       sub.start(t);
       sub.stop(t + tdur + 0.02);
@@ -610,8 +691,11 @@ function playBootSfx(kind) {
       body.frequency.setValueAtTime(90, t);
       body.frequency.linearRampToValueAtTime(120, t + tdur);
       bodyGain.gain.setValueAtTime(0.0001, t);
-      bodyGain.gain.exponentialRampToValueAtTime(0.06, t + 1.6);
-      bodyGain.gain.linearRampToValueAtTime(0.05, t + tdur * 0.85);
+      // Was 0.06 — bumped to 0.09 so the mid-hum (the actual audible
+      // layer for most speakers) gets close to full-scale at the
+      // SFX_GAIN=10 master. Final 0.90; clean.
+      bodyGain.gain.exponentialRampToValueAtTime(0.09, t + 1.6);
+      bodyGain.gain.linearRampToValueAtTime(0.08, t + tdur * 0.85);
       bodyGain.gain.exponentialRampToValueAtTime(0.0001, t + tdur);
       body.start(t);
       body.stop(t + tdur + 0.02);
@@ -633,7 +717,10 @@ function playBootSfx(kind) {
       nFilter.frequency.setValueAtTime(200, t);
       nFilter.frequency.linearRampToValueAtTime(400, t + tdur);
       nGain.gain.setValueAtTime(0.0001, t);
-      nGain.gain.exponentialRampToValueAtTime(0.025, t + 1.4);
+      // Was 0.025 — bumped to 0.05 so the "live circuit" texture
+      // sits more audibly under the body hum. Still subtle by design;
+      // this is texture, not melody.
+      nGain.gain.exponentialRampToValueAtTime(0.05, t + 1.4);
       nGain.gain.exponentialRampToValueAtTime(0.0001, t + ndur);
       noise.start(t);
       noise.stop(t + ndur + 0.02);
@@ -657,7 +744,10 @@ function playBootSfx(kind) {
         osc.connect(gain).connect(master);
         osc.type = 'square';
         osc.frequency.setValueAtTime(f, t + b.off);
-        gain.gain.setValueAtTime(0.022, t + b.off);
+        // Was 0.022 — bumped to 0.07 so the 3-blip flicker cluster
+        // reads as a distinct data-burst event, not faint background
+        // ticking. Final 0.70 at SFX_GAIN=10; clean.
+        gain.gain.setValueAtTime(0.07, t + b.off);
         gain.gain.exponentialRampToValueAtTime(0.0001, t + b.off + 0.022);
         osc.start(t + b.off);
         osc.stop(t + b.off + 0.028);
@@ -665,50 +755,77 @@ function playBootSfx(kind) {
       break;
     }
     case 'boot-ready': {
-      // Glass bulb pings — cascade of 5 short high-pitched sine bursts
-      // with exponential decay (the "ring-out" of struck glass), each
-      // paired with a slightly-detuned 2.5x partial that decays faster.
-      // The 2.5x ratio is intentionally inharmonic — that's what gives
-      // glass / bell sounds their distinctive non-musical shimmer, vs
-      // a perfect 2x or 3x which sounds like a synth octave/fifth.
-      // Pings stagger over ~0.45 s, like a chandelier of incandescent
-      // bulbs popping on one after another.
-      const pings = [
-        { off: 0.00, freq: 2200 },
-        { off: 0.10, freq: 1760 },
-        { off: 0.21, freq: 2640 },
-        { off: 0.31, freq: 1980 },
-        { off: 0.42, freq: 2940 },
+      // High-sci-fi "system online" arpeggio. Replaces the prior glass-
+      // bell cascade (warm/incandescent) with a clean ascending tonal
+      // sequence (cool/digital) — think TNG bridge panel powering up
+      // or Mass Effect's interface chime.
+      //
+      // Composition: ascending A-major arpeggio (A4 → C#5 → E5 → A5)
+      // — four staccato notes 80 ms apart — resolving onto a sustained
+      // C#6 with a perfect-fifth (G#6) layered on top for the "lock-in"
+      // chord. Tonal harmony (vs the prior inharmonic 2.51x ratio) is
+      // what gives this the synth-console character: every interval is
+      // a "real" musical relationship, not a struck-glass overtone.
+      //
+      // Voice: triangle waves with a slightly-detuned second oscillator
+      // per note (+7 cents) for synth-chorus thickness — close enough
+      // to unison to read as one voice, far enough apart to feel like
+      // hardware/analog rather than a single sterile sine.
+      const ARP_NOTES = [
+        { off: 0.00, freq: 440,  dur: 0.18, peak: 0.045 }, // A4
+        { off: 0.08, freq: 554,  dur: 0.18, peak: 0.045 }, // C#5
+        { off: 0.16, freq: 660,  dur: 0.18, peak: 0.045 }, // E5
+        { off: 0.24, freq: 880,  dur: 0.20, peak: 0.05  }, // A5
+        { off: 0.34, freq: 1108, dur: 0.60, peak: 0.06  }, // C#6 — sustained final
       ];
-      for (const p of pings) {
-        // Tiny per-ping detune so the cascade doesn't feel mechanical.
-        const f = p.freq * (0.97 + Math.random() * 0.06);
-
-        // Fundamental — sine, very fast attack, long exponential decay
+      for (const n of ARP_NOTES) {
+        // Primary triangle voice — clean, soft, no buzzy harmonics.
         const osc1 = ctx.createOscillator();
         const g1 = ctx.createGain();
         osc1.connect(g1).connect(master);
-        osc1.type = 'sine';
-        osc1.frequency.setValueAtTime(f, t + p.off);
-        g1.gain.setValueAtTime(0.0001, t + p.off);
-        g1.gain.exponentialRampToValueAtTime(0.085, t + p.off + 0.003);
-        g1.gain.exponentialRampToValueAtTime(0.0001, t + p.off + 0.5);
-        osc1.start(t + p.off);
-        osc1.stop(t + p.off + 0.52);
+        osc1.type = 'triangle';
+        osc1.frequency.setValueAtTime(n.freq, t + n.off);
+        g1.gain.setValueAtTime(0.0001, t + n.off);
+        g1.gain.exponentialRampToValueAtTime(n.peak, t + n.off + 0.005);
+        g1.gain.exponentialRampToValueAtTime(0.0001, t + n.off + n.dur);
+        osc1.start(t + n.off);
+        osc1.stop(t + n.off + n.dur + 0.01);
 
-        // Inharmonic upper partial — sine at 2.51x, half the level,
-        // decays faster, gives the "real glass" shimmer.
+        // Detuned chorus partner — +7 cents (×1.004) above the
+        // fundamental, ~60% level. Tight enough to fuse with osc1 into
+        // one perceived note; the small phase drift makes it "alive".
         const osc2 = ctx.createOscillator();
         const g2 = ctx.createGain();
         osc2.connect(g2).connect(master);
-        osc2.type = 'sine';
-        osc2.frequency.setValueAtTime(f * 2.51, t + p.off);
-        g2.gain.setValueAtTime(0.0001, t + p.off);
-        g2.gain.exponentialRampToValueAtTime(0.035, t + p.off + 0.003);
-        g2.gain.exponentialRampToValueAtTime(0.0001, t + p.off + 0.22);
-        osc2.start(t + p.off);
-        osc2.stop(t + p.off + 0.24);
+        osc2.type = 'triangle';
+        osc2.frequency.setValueAtTime(n.freq * 1.004, t + n.off);
+        g2.gain.setValueAtTime(0.0001, t + n.off);
+        g2.gain.exponentialRampToValueAtTime(n.peak * 0.6, t + n.off + 0.005);
+        g2.gain.exponentialRampToValueAtTime(0.0001, t + n.off + n.dur);
+        osc2.start(t + n.off);
+        osc2.stop(t + n.off + n.dur + 0.01);
       }
+
+      // "Lock-in" chord — perfect fifth above the sustained final note
+      // (C#6 + 5th = G#6 ≈ 1661 Hz), enters with the final note and
+      // sustains alongside it. A perfect fifth is the most consonant
+      // non-unison interval — what makes the sound feel resolved /
+      // "system ready" rather than still climbing.
+      const FINAL_OFF = 0.34;
+      const FINAL_DUR = 0.60;
+      const fifth = ctx.createOscillator();
+      const gF = ctx.createGain();
+      fifth.connect(gF).connect(master);
+      fifth.type = 'triangle';
+      fifth.frequency.setValueAtTime(1661, t + FINAL_OFF);
+      gF.gain.setValueAtTime(0.0001, t + FINAL_OFF);
+      // 25 ms attack (slower than the arpeggio notes' 5 ms) so the
+      // chord blooms IN rather than punching. Lower peak than the
+      // root so it feels like harmonic support, not a separate note.
+      gF.gain.exponentialRampToValueAtTime(0.035, t + FINAL_OFF + 0.025);
+      gF.gain.exponentialRampToValueAtTime(0.0001, t + FINAL_OFF + FINAL_DUR);
+      fifth.start(t + FINAL_OFF);
+      fifth.stop(t + FINAL_OFF + FINAL_DUR + 0.01);
       break;
     }
   }
@@ -721,37 +838,108 @@ function playBootSfx(kind) {
 document.addEventListener('click', (e) => {
   const t = e.target;
   if (!t || !t.closest) return;
-  // Anything that's a "destructive" surface gets the delete bleep.
-  if (t.closest('.note-tab-close, [data-explore-delete], #close-btn')) {
+  // Truly destructive surfaces — file deletion etc. — get the
+  // descending sawtooth 'delete' bleep. Don't add X-style dismiss
+  // buttons here; those belong on 'close'.
+  if (t.closest('[data-explore-delete]')) {
     playSfx('delete');
     return;
   }
-  // Tabs / mode switches — softer tick.
+  // X-style close buttons across every modal / overlay / tab — these
+  // are dismissals, not deletions, so they get the soft descending
+  // 'close' tick that mirrors the standard 'click'. Centralising the
+  // selector list here means new overlays only need to use one of
+  // these class hooks to inherit the sound automatically.
+  if (t.closest([
+    '.note-tab-close',         // note tab × (dismisses the tab, not the note)
+    '.browser-tab-close',      // browser tab ×
+    '.explore-viewer-close',   // EXPLORE inline-viewer ×
+    '.browser-history-close',  // history / bookmarks / scrape ×
+    '.fans-editor-close',      // fans editor ×
+    '.trim-close',             // trim modal ×
+    '.lx-close',               // launcher ×
+    '.picture-picker-close',   // picture / source picker ×
+    '.fr-close-btn',           // first-run wizard ×
+    '.terminal-close',         // terminal ×
+    '.webcam-close',           // webcam popout ×
+    '#close-btn',              // topbar quit
+  ].join(','))) {
+    playSfx('close');
+    return;
+  }
+  // Tabs / mode switches — same triangle as 'click', kept as its own
+  // kind so we can re-pitch them independently later if needed.
   if (t.closest('.combo-mode-tab, .explore-tab, .note-tab')) {
     playSfx('tab');
     return;
   }
-  // Generic buttons.
-  if (t.closest('.topbar-btn, .explore-action, .panel-collapse-btn, .audio-mute-btn, .audio-gain-btn, .paper-tool-btn')) {
+  // Generic buttons — catch-all so every room (rec, music, edit,
+  // browser, visualizer, etc.) gets a click sound without each
+  // module needing its own per-element wiring. Native <button>
+  // and role="button" elements catch the bulk; the explicit class
+  // hooks below stay for the few clickable non-button elements
+  // (spans / divs with click handlers) that should also chirp.
+  if (t.closest('button, [role="button"], .topbar-btn, .explore-action, .panel-collapse-btn, .audio-mute-btn, .audio-gain-btn, .paper-tool-btn')) {
     playSfx('click');
   }
-}, true);
-
-// Alert-theme state. Declared at module top so refreshSystem / refreshTemps
-// (which run synchronously during module init) can call setAlertReason
-// without hitting the TDZ. The setter functions themselves are defined
-// further down with the rest of the theme code.
-const ALERT_REASON = Object.freeze({
-  CPU_90:      'cpu-90',
-  GPU_90:      'gpu-90',
-  OFFLINE:     'offline',
-  ERROR_SYS:   'error-sys',
-  ERROR_TEMPS: 'error-temps',
-  ERROR_NET:   'error-net',
 });
+// Bubble phase (no capture flag) is deliberate: per-element click
+// handlers run first and can play a more specific kind ('close' for
+// toggle-off, etc.); the delegate above falls back with 'click' only
+// when nothing else claimed the event. With capture phase the delegate
+// would fire first and the global dedup would suppress the more
+// specific per-element sound.
+
+// Keystroke SFX: a quiet sci-fi chirp on every typing keydown while
+// the user is focused in a text-input context. Wired at the document
+// level so all rooms / overlays pick it up automatically.
+//
+// Filters out:
+//   • modifier-only or shortcut combos (Ctrl/Cmd/Alt) — those are
+//     commands, not characters
+//   • pure navigation keys (Arrow*, Home/End, PageUp/Down, etc.) —
+//     they don't insert characters
+//   • events outside text-input surfaces — clicking elsewhere and
+//     hitting Space shouldn't chirp
+//
+// Tab triggers a chirp because in a multiline textarea it inserts
+// a tab character; in inputs that move focus it still feels like
+// keyboard activity.
+const _TYPE_INPUT_SELECTOR = [
+  'input[type="text"]',
+  'input[type="search"]',
+  'input[type="url"]',
+  'input[type="email"]',
+  'input[type="password"]',
+  'input[type="number"]',
+  'input[type="tel"]',
+  'input:not([type])',
+  'textarea',
+  '[contenteditable=""]',
+  '[contenteditable="true"]',
+].join(',');
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  // Held-key auto-repeat would machine-gun the chirp every ~30 ms
+  // once the OS kicks in. Skip the repeated events so the sound only
+  // fires on the user's actual key-down moment.
+  if (e.repeat) return;
+  const k = e.key;
+  // Single-char keys (letters / digits / punctuation / space) plus
+  // the editing keys that insert or remove visible characters.
+  const isTypingKey = k.length === 1
+    || k === 'Backspace' || k === 'Delete' || k === 'Enter' || k === 'Tab';
+  if (!isTypingKey) return;
+  const target = e.target;
+  if (!target || !target.matches) return;
+  if (!target.matches(_TYPE_INPUT_SELECTOR)) return;
+  playSfx('type');
+});
+
+// Tracks the user-chosen theme so setTheme can persist it. The auto-engaged
+// "alert" theme override was removed — error paths still surface ERR inline
+// without forcing a global palette swap.
 let   _userTheme   = null;
-let   _alertActive = false;
-const _alertReasons = new Set();
 
 // ── Browser-mode shim ───────────────────────────────────────────────────────
 // When loaded outside Electron (iPad, phone, another laptop on the LAN), the
@@ -934,8 +1122,10 @@ function paintZenTime(text) {
   }
 }
 
-// 5-day calendar strip — today + the next four days. Rebuilt only when
-// the calendar date rolls over (cheap day-key compare), not every tick.
+// Whole-month calendar — every day of the current month, laid out
+// Sun-to-Sat with a week-aligned header row and leading/trailing pad
+// cells from the adjacent months so the grid always fills a clean
+// 7-column block. Rebuilt only when the calendar date rolls over.
 const clockCalEl = document.querySelector('#clock-calendar');
 const calWdFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
 const calMoFmt = new Intl.DateTimeFormat(undefined, { month: 'short' });
@@ -946,23 +1136,50 @@ function renderCalendar(now) {
   if (key === _calDayKey) return;
   _calDayKey = key;
   clockCalEl.replaceChildren();
-  for (let i = 0; i < 5; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+
+  // Weekday header row (S M T W T F S) so the user can scan columns
+  // without each cell needing its own weekday chip.
+  const sundayRef = new Date(2024, 5, 2); // any Sunday — used purely to format weekday names
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(sundayRef.getFullYear(), sundayRef.getMonth(), sundayRef.getDate() + i);
+    const head = document.createElement('div');
+    head.className = 'cal-head';
+    if (i === 0 || i === 6) head.classList.add('is-weekend');
+    head.textContent = calWdFmt.format(d).slice(0, 1).toUpperCase();
+    clockCalEl.appendChild(head);
+  }
+
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const firstOfMonth = new Date(year, month, 1);
+  const startWeekday = firstOfMonth.getDay();           // 0 = Sun
+  // The "grid start" is the Sunday on or before the 1st — so leading
+  // pad cells show the previous month's tail. Total cells = 6 rows ×
+  // 7 cols = 42, which always covers the longest possible month
+  // alignment (29-31 days starting on any weekday).
+  const gridStart = new Date(year, month, 1 - startWeekday);
+  const today = now.getDate();
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i);
     const cell = document.createElement('div');
     cell.className = 'cal-day';
-    if (i === 0) cell.classList.add('is-today');
+    const inMonth = (d.getMonth() === month && d.getFullYear() === year);
+    if (!inMonth) cell.classList.add('is-out-of-month');
+    if (inMonth && d.getDate() === today) cell.classList.add('is-today');
     const wd = d.getDay();
     if (wd === 0 || wd === 6) cell.classList.add('is-weekend');
-    const wdEl = document.createElement('span');
-    wdEl.className = 'cal-day-wd';
-    wdEl.textContent = calWdFmt.format(d).toUpperCase();
     const numEl = document.createElement('span');
     numEl.className = 'cal-day-num';
     numEl.textContent = String(d.getDate());
-    const moEl = document.createElement('span');
-    moEl.className = 'cal-day-mo';
-    moEl.textContent = calMoFmt.format(d).toUpperCase();
-    cell.append(wdEl, numEl, moEl);
+    cell.appendChild(numEl);
+    // First cell of any month (the 1st) gets a small MMM tag so the
+    // user can see which month the pad cells belong to.
+    if (d.getDate() === 1) {
+      const moEl = document.createElement('span');
+      moEl.className = 'cal-day-mo';
+      moEl.textContent = calMoFmt.format(d).toUpperCase();
+      cell.appendChild(moEl);
+    }
     clockCalEl.appendChild(cell);
   }
 }
@@ -977,6 +1194,8 @@ function tickClock() {
   clockDoyEl.textContent    = doy;
   clockDoyHdrEl.textContent = doy;
   clockIdentEl.textContent  = doy;
+  const clockCodeEl = document.getElementById('clock-code');
+  if (clockCodeEl) clockCodeEl.textContent = `${lhms} ${lap} · DOY ${doy}`;
   renderCalendar(now);
   // Mirror to the zen overlay (visible only while idle). Mirror element
   // tracks the visible AM/PM text so the invisible spacer width matches
@@ -1062,8 +1281,8 @@ const sysMemValEl      = document.querySelector('#sys-mem-value');
 const coreGridEl       = document.querySelector('#core-grid');
 const memHistGridEl    = document.querySelector('#mem-hist-grid');
 const memHistValueEl   = document.querySelector('#sys-mem-hist-value');
-const scratchGridEl    = document.querySelector('#scratch-grid');
-const scratchValueEl   = document.querySelector('#sys-scratch-value');
+// SCRATCH DISK meter (scratchGridEl / scratchValueEl) was removed from
+// the RAM panel — per-drive usage is already covered by the STORAGE panel.
 
 let lastCpuTimes = null;
 const coreFillEls = []; // index = logical processor
@@ -1195,8 +1414,23 @@ function paintCore(fill, load) {
   setMetricBar(fill, load * 100);
 }
 
+// Per-core rolling-average smoothing. Individual logical cores spike
+// wildly between samples even at a slow refresh rate — the OS shifts
+// threads between cores constantly, so any single 500 ms window can
+// catch a core idle one tick and pegged the next. Averaging the last
+// N samples per core damps the visual chaos without hiding real
+// trends; total cpuLoad (mean of smoothed cores) becomes calmer too,
+// which feeds the TASKS-pane wire-graph cleanly.
+//
+// 4 samples × 500 ms PANEL_REFRESH_MS = 2 s smoothing window.
+const CORE_LOAD_SMOOTH_N = 4;
+const _coreLoadHistory = [];
+
 // Memory history — time-series of system memory % usage.
-const MEM_HIST_LEN = 30;                              // 30 samples × 2s = 60s window
+// 33 samples × 2s = 66s window. Length was bumped from 30 to align with
+// the DOS-theme #mem-hist-grid layout (11 cols × 3 rows = 33 cells) so
+// the grid fills cleanly with no trailing empty cells.
+const MEM_HIST_LEN = 32;
 const memHistBuf = new Array(MEM_HIST_LEN).fill(0);
 const memHistFills = [];
 const zenMemGridEl  = document.querySelector('#zen-mem-grid');
@@ -1252,58 +1486,12 @@ function pushMemHistory(pct) {
   }
 }
 
-// Scratch-disk grid — one vertical bar per drive (built from storageInfo).
-const scratchFills = [];
-const scratchLabels = [];
-let scratchKeys = [];
-
-function buildScratchGrid(drives) {
-  scratchGridEl.innerHTML = '';
-  scratchFills.length = 0;
-  scratchLabels.length = 0;
-  scratchKeys = drives.map(d => d.mount);
-  for (const d of drives) {
-    const bar = document.createElement('div');
-    bar.className = 'core-bar';
-    const track = document.createElement('div');
-    track.className = 'core-bar-track';
-    const fill = document.createElement('div');
-    fill.className = 'core-bar-fill';
-    track.appendChild(fill);
-    const label = document.createElement('span');
-    label.className = 'core-bar-label';
-    label.textContent = d.mount.replace(/:$/, '');
-    bar.appendChild(track);
-    bar.appendChild(label);
-    scratchGridEl.appendChild(bar);
-    scratchFills.push(fill);
-    scratchLabels.push(label);
-  }
-}
-
-function paintScratchGrid(drives) {
-  // If the set of drive letters changed, rebuild
-  const keys = drives.map(d => d.mount);
-  const changed = keys.length !== scratchKeys.length || keys.some((k, i) => k !== scratchKeys[i]);
-  if (changed) buildScratchGrid(drives);
-
-  let totalUsed = 0, totalCap = 0;
-  for (let i = 0; i < drives.length; i++) {
-    const d = drives[i];
-    const sized = d.total > 0;
-    const pct = sized ? (d.used / d.total) * 100 : 0;
-    const fill = scratchFills[i];
-    if (!fill) continue;
-    setMetricBar(fill, pct);
-    fill.style.opacity = sized ? '' : '0.25';
-    if (sized) { totalUsed += d.used; totalCap += d.total; }
-  }
-  if (scratchValueEl) {
-    scratchValueEl.textContent = totalCap > 0
-      ? `${((totalUsed / totalCap) * 100).toFixed(0)}% USED`
-      : '—';
-  }
-}
+// SCRATCH DISK grid (buildScratchGrid / paintScratchGrid) removed — the
+// per-drive bar grid that used to sit in the RAM panel under
+// MEM HISTORY · 60S no longer exists. The STORAGE panel already shows
+// per-drive usage in more detail, so this was redundant. paintStorage
+// no longer calls paintScratchGrid; the 500ms grid-line sweep loop also
+// drops scratchGridEl from its iteration list.
 
 async function refreshSystem() {
   if (!window.dash) return;
@@ -1321,7 +1509,13 @@ async function refreshSystem() {
     if (lastCpuTimes && info.cpuTimes.length === lastCpuTimes.length) {
       let sum = 0;
       for (let i = 0; i < info.cpuTimes.length; i++) {
-        const load = deltaLoad(lastCpuTimes[i], info.cpuTimes[i]);
+        const raw = deltaLoad(lastCpuTimes[i], info.cpuTimes[i]);
+        // Per-core rolling avg — see CORE_LOAD_SMOOTH_N comment.
+        let hist = _coreLoadHistory[i];
+        if (!hist) { hist = []; _coreLoadHistory[i] = hist; }
+        hist.push(raw);
+        if (hist.length > CORE_LOAD_SMOOTH_N) hist.shift();
+        const load = hist.reduce((a, b) => a + b, 0) / hist.length;
         if (coreFillEls[i])    paintCore(coreFillEls[i], load);
         if (zenCoreFillEls[i]) paintCore(zenCoreFillEls[i], load);
         sum += load;
@@ -1337,28 +1531,59 @@ async function refreshSystem() {
     window._lastCpuLoadFrac = cpuLoad;
 
     const cpuPct = cpuLoad * 100;
+    // Feed the TASKS-pane wire-graph. CPU buffer captured here so the
+    // line reflects the same number the bar shows below.
+    pushTasksCpuHist(cpuLoad);
     sysCpuBarEl.style.width = `${cpuPct.toFixed(0)}%`;
     sysCpuBarEl.classList.toggle('high', cpuPct >= 85);
     sysCpuValEl.textContent = `${cpuPct.toFixed(0)}%`;
     if (zenCpuValueEl) zenCpuValueEl.textContent = `${cpuPct.toFixed(0)}%`;
-    setAlertReason(ALERT_REASON.CPU_90, cpuPct >= 90);
-    setAlertReason(ALERT_REASON.ERROR_SYS, false);
+    // HUD theme — CPU LOAD bar joins the gauge family (badge above +
+    // segmented LEDs + tick scale below).
+    if (document.documentElement.dataset.theme?.startsWith('hud')) {
+      const cpuBarParent = sysCpuBarEl.parentElement;
+      if (cpuBarParent) _renderFixedGauge(cpuBarParent, cpuPct, `${Math.round(cpuPct)}%`);
+    }
 
     const memFrac = info.usedMem / info.totalMem;
     const memPct  = memFrac * 100;
     sysMemBarEl.style.width = `${memPct.toFixed(0)}%`;
     sysMemBarEl.classList.toggle('high', memPct >= 85);
     sysMemValEl.textContent = `${fmtBytes(info.usedMem)} / ${fmtBytes(info.totalMem)}`;
+    // HUD theme — paint the memory bar with the full canvas gauge
+    // (badge above + marker + tick scale below), same shape the
+    // thermal panel uses.
+    if (document.documentElement.dataset.theme?.startsWith('hud')) {
+      const memBarParent = sysMemBarEl.parentElement;
+      if (memBarParent) _renderFixedGauge(memBarParent, memPct, `${Math.round(memPct)}%`);
+    }
 
     pushMemHistory(memPct);
+    // Feed the TASKS-pane wire-graph RAM line.
+    pushTasksRamHist(memPct);
+
+    // Live header summaries — show at-a-glance state in the panel
+    // headers so the user can read current usage even when the panel
+    // is collapsed.
+    const cpuCodeEl = document.getElementById('cpu-code');
+    if (cpuCodeEl) cpuCodeEl.textContent = `${cpuPct.toFixed(0)}% · ${info.cpuCount} CORES`;
+    const ramCodeEl = document.getElementById('ram-code');
+    if (ramCodeEl) ramCodeEl.textContent = `${memPct.toFixed(0)}% · ${fmtBytes(info.usedMem)} / ${fmtBytes(info.totalMem)}`;
   } catch (err) {
     sysCoresValueEl.textContent = `ERR: ${err.message}`;
-    setAlertReason(ALERT_REASON.ERROR_SYS, true);
   }
 }
 
-refreshSystem();
-setInterval(() => { if (!document.hidden) refreshSystem(); }, UI_REFRESH_MS);
+// CPU/RAM tick. Chained setTimeout at PANEL_REFRESH_MS — decoupled
+// from the audio visualizer so the wire-graph CPU line stays alive
+// (10 Hz feed) even when the user has throttled audio to a calm
+// 1–2 Hz on the topbar dial. systemInfo IPC is os.cpus() + os.totalmem()
+// in-process, microseconds per call, so 10 Hz is essentially free.
+async function _systemLoop() {
+  if (!document.hidden) await refreshSystem();
+  setTimeout(_systemLoop, PANEL_REFRESH_MS);
+}
+_systemLoop();
 
 // ── HUD: Battery ─────────────────────────────────────────────────────────────
 // Laptop-only. si.battery() reports hasBattery:false on a desktop — in
@@ -1404,53 +1629,74 @@ _batteryTimer = setInterval(() => { if (!document.hidden) refreshBattery(); }, 3
 refreshBattery();
 
 // ── HUD: Storage ─────────────────────────────────────────────────────────────
-const storageListEl   = document.querySelector('#storage-list');
-const storageCountEl  = document.querySelector('#storage-count');
-const storageStatusEl = document.querySelector('#storage-status');
+// Drives render as a 3-column grid that auto-flows into as many rows as
+// it needs — every drive is on screen at once, no cycling. _storageDrives
+// is kept around purely as a "last known list" cache in case other code
+// (footer totals etc.) wants to read it between polls.
+const storageListEl      = document.querySelector('#storage-list');
+const storageCountEl     = document.querySelector('#storage-count');
+const storageStatusEl    = document.querySelector('#storage-status');
+let _storageDrives = [];
+
+function _renderStorageList() {
+  const drives = _storageDrives;
+  storageListEl.innerHTML = '';
+  for (const d of drives) {
+    const sized = d.total > 0;
+    const usedPct = sized ? (d.used / d.total) * 100 : 0;
+    const high = usedPct >= 90;
+    const labelHtml = d.label ? ` <em>${escapeText(d.label)}</em>` : '';
+    const valsHtml = sized
+      ? `${fmtBytes(d.used)} / ${fmtBytes(d.total)}`
+      : `<span class="amber">[${(d.type || 'NETWORK').toUpperCase()}]</span>`;
+    const barHtml = sized
+      ? `<div class="seg-bar"><div class="seg-bar-fill seg-disk${high ? ' high' : ''}" style="width:${usedPct.toFixed(1)}%"></div></div>`
+      : `<div class="seg-bar"><div class="seg-bar-fill seg-disk" style="width:0%; opacity:0.3"></div></div>`;
+    const row = document.createElement('div');
+    row.className = 'storage-row';
+    row.innerHTML = `
+      <div class="storage-row-head">
+        <span class="storage-mount">&#9656; ${escapeText(d.mount)}${labelHtml}</span>
+        <span class="storage-vals">${valsHtml}</span>
+      </div>
+      ${barHtml}
+    `;
+    storageListEl.appendChild(row);
+  }
+}
 
 async function refreshStorage() {
   if (!window.dash) return;
   try {
     const drives = await window.dash.storageInfo();
     if (!drives?.length) {
+      _storageDrives = [];
       storageListEl.innerHTML = '<div class="storage-empty">NO DRIVES DETECTED.</div>';
       storageCountEl.textContent = '0';
       storageStatusEl.textContent = 'OFFLINE';
       storageStatusEl.className = 'footer-readout red';
       return;
     }
+    _storageDrives = drives;
     storageCountEl.textContent = String(drives.length).padStart(2, '0');
-    storageListEl.innerHTML = '';
+    // Totals across every drive — same set the list shows, since the
+    // grid no longer pages.
     let totalAll = 0, usedAll = 0;
     for (const d of drives) {
-      const sized = d.total > 0;
-      if (sized) { totalAll += d.total; usedAll += d.used; }
-      const usedPct = sized ? (d.used / d.total) * 100 : 0;
-      const high = usedPct >= 90;
-      const labelHtml = d.label ? ` <em>${escapeText(d.label)}</em>` : '';
-      const valsHtml = sized
-        ? `${fmtBytes(d.used)} / ${fmtBytes(d.total)}`
-        : `<span class="amber">[${(d.type || 'NETWORK').toUpperCase()}]</span>`;
-      const barHtml = sized
-        ? `<div class="seg-bar"><div class="seg-bar-fill seg-disk${high ? ' high' : ''}" style="width:${usedPct.toFixed(1)}%"></div></div>`
-        : `<div class="seg-bar"><div class="seg-bar-fill seg-disk" style="width:0%; opacity:0.3"></div></div>`;
-      const row = document.createElement('div');
-      row.className = 'storage-row';
-      row.innerHTML = `
-        <div class="storage-row-head">
-          <span class="storage-mount">&#9656; ${escapeText(d.mount)}${labelHtml}</span>
-          <span class="storage-vals">${valsHtml}</span>
-        </div>
-        ${barHtml}
-      `;
-      storageListEl.appendChild(row);
+      if (d.total > 0) { totalAll += d.total; usedAll += d.used; }
     }
+    _renderStorageList();
     const overallPct = totalAll > 0 ? (usedAll / totalAll) * 100 : 0;
     storageStatusEl.innerHTML = `<em>OVERALL</em> <strong class="amber">${overallPct.toFixed(0)}%</strong> <em>FREE</em> <strong class="ok">${fmtBytes(totalAll - usedAll)}</strong>`;
     storageStatusEl.className = 'footer-readout';
 
-    paintScratchGrid(drives);
+    const storageCodeEl = document.getElementById('storage-code');
+    if (storageCodeEl) {
+      storageCodeEl.textContent = `${overallPct.toFixed(0)}% · ${drives.length} DRIVE${drives.length === 1 ? '' : 'S'} · ${fmtBytes(totalAll - usedAll)} FREE`;
+    }
+
   } catch (err) {
+    _storageDrives = [];
     storageListEl.innerHTML = `<div class="storage-empty">ERROR: ${err.message}</div>`;
     storageStatusEl.textContent = 'ERR';
     storageStatusEl.className = 'footer-readout red';
@@ -1464,45 +1710,74 @@ setInterval(() => { if (!document.hidden) refreshStorage(); }, 30_000);
 const tempCpuEl       = document.querySelector('#temp-cpu');
 const tempCpuBarEl    = document.querySelector('#temp-cpu-bar');
 const tempCpuNameEl   = document.querySelector('#temp-cpu-name');
-const tempGpu0El      = document.querySelector('#temp-gpu0');
-const tempGpu0BarEl   = document.querySelector('#temp-gpu0-bar');
-const tempGpu0NameEl  = document.querySelector('#temp-gpu0-name');
+// GPU 0 (integrated) row was removed from the thermal panel — the iGPU
+// reading always tracks the CPU package since it's on the same die,
+// which made the row redundant.
 const tempGpu1El      = document.querySelector('#temp-gpu1');
 const tempGpu1BarEl   = document.querySelector('#temp-gpu1-bar');
 const tempGpu1NameEl  = document.querySelector('#temp-gpu1-name');
 const tempsTagEl      = document.querySelector('#temps-tag');
-const powerCpuEl      = document.querySelector('#power-cpu');
-const powerGpu0El     = document.querySelector('#power-gpu0');
-const powerGpu1El     = document.querySelector('#power-gpu1');
+// Power graphs replace the inline wattage numbers — each thermal row
+// now shows a POWER gauge under the temp gauge, styled the same way
+// (HUD pill+badge+ticks in HUD theme, flat seg-bar fill elsewhere).
+const powerCpuBarEl   = document.querySelector('#power-cpu-bar');
+const powerGpu1BarEl  = document.querySelector('#power-gpu1-bar');
+const powerCpuNameEl  = document.querySelector('#power-cpu-name');
+const powerGpu1NameEl = document.querySelector('#power-gpu1-name');
+// RAM temp row + bar — populated only when a sensor backend reports
+// DIMM temps; the row stays hidden otherwise.
+const tempRamRowEl    = document.querySelector('#temp-row-ram');
+const tempRamEl       = document.querySelector('#temp-ram');
+const tempRamBarEl    = document.querySelector('#temp-ram-bar');
+const tempRamNameEl   = document.querySelector('#temp-ram-name');
 const zenCpuTempEl    = document.querySelector('#zen-cpu-temp');
 
-function paintPower(el, watts, isEstimate) {
-  if (!el) return;
+// Per-rail full-scale wattage for the power gauges. The bar tops out
+// at the max so the rail still reads % full but the badge shows real
+// watts. CPU envelope tracks modern desktop chips (~250 W absolute
+// max under boost); GPU envelope covers a flagship card (~500 W).
+const POWER_MAX_CPU = 250;
+const POWER_MAX_GPU = 500;
+function paintPowerBar(barEl, nameEl, watts, isEstimate, maxW) {
+  if (!barEl) return;
+  const isHud = document.documentElement.dataset.theme?.startsWith('hud');
+  const parent = barEl.parentElement;
   if (!Number.isFinite(watts) || watts <= 0) {
-    el.textContent = '—';
-    el.classList.remove('is-estimate');
-    el.title = '';
+    barEl.style.width = '0%';
+    if (nameEl) { nameEl.textContent = '—'; nameEl.title = ''; }
+    if (isHud && parent) _renderFixedGauge(parent, 0, 'N/A');
     return;
   }
-  // Prefix estimates with `~` so the user can tell at a glance which
-  // readout is a hardware measurement and which is a load-derived guess.
-  // Hover tooltip explains the fallback so it doesn't look like a bug.
-  el.textContent = isEstimate ? `~${watts.toFixed(0)}` : watts.toFixed(0);
-  el.classList.toggle('is-estimate', !!isEstimate);
-  el.title = isEstimate
-    ? 'Estimated from CPU load — Windows RAPL energy meter is not reporting. This usually happens when Processor Performance Boost Mode is set to Disabled. Switching it to Aggressive or Efficient Aggressive restores live wattage reporting.'
-    : '';
+  const pct = Math.max(0, Math.min(100, (watts / maxW) * 100));
+  barEl.style.width = `${pct.toFixed(0)}%`;
+  if (nameEl) {
+    nameEl.textContent = isEstimate ? `~${watts.toFixed(0)} W` : `${watts.toFixed(0)} W`;
+    nameEl.title = isEstimate
+      ? 'Estimated from CPU load — Windows RAPL energy meter is not reporting. Switching Processor Performance Boost Mode to Aggressive restores live wattage.'
+      : '';
+  }
+  if (isHud && parent) {
+    const label = isEstimate ? `~${Math.round(watts)}W` : `${Math.round(watts)}W`;
+    _renderFixedGauge(parent, pct, label);
+  }
 }
 const thermalStatusEl = document.querySelector('#thermal-status');
 
 const TEMP_MAX = 100; // °C — bar fill scales 0..TEMP_MAX
 
 function paintTemp(valueEl, barEl, temp, isEstimate) {
+  const isHud = document.documentElement.dataset.theme?.startsWith('hud');
   if (temp == null || !Number.isFinite(temp)) {
     valueEl.textContent = 'N/A';
     barEl.style.width = '0%';
     barEl.classList.remove('warn', 'high');
     valueEl.classList?.remove('is-estimate');
+    // HUD theme — draw an empty gauge so the row doesn't go blank
+    // when a sensor isn't reporting; badge reads "N/A".
+    if (isHud) {
+      const parent = barEl.parentElement;
+      if (parent) _renderFixedGauge(parent, 0, 'N/A');
+    }
     return;
   }
   // Prefix estimates with ~ so the user can tell at a glance that the
@@ -1513,6 +1788,14 @@ function paintTemp(valueEl, barEl, temp, isEstimate) {
   barEl.style.width = `${pct.toFixed(0)}%`;
   barEl.classList.toggle('warn', temp >= 70 && temp < 85);
   barEl.classList.toggle('high', temp >= 85);
+  // HUD theme — additionally paint the canvas gauge (badge + marker
+  // + tick scale) into the parent .seg-bar so thermal bars match the
+  // network-style gauge look. Badge shows percent (of TEMP_MAX) so
+  // every HUD gauge reads with the same "<N>%" chip language.
+  if (isHud) {
+    const parent = barEl.parentElement;
+    if (parent) _renderFixedGauge(parent, pct, `${Math.round(pct)}%`);
+  }
 }
 
 function shortGpuName(name) {
@@ -1619,19 +1902,36 @@ function paintGpuUtil(fill, pctEl, util, gpuIndex) {
   const pct = Math.max(0, Math.min(100, avg));
   setMetricBar(fill, pct);
   pctEl.textContent = `${pct.toFixed(0)}%`;
+  // Wire-graph push is centralised in paintGpuPanel (uses the max
+  // across all GPUs) so Intel-iGPU-at-index-0-with-null-load systems
+  // still report the dGPU's real load to the chart.
 }
 
 function paintGpuMem(rowEls, used, total) {
+  const isHud = document.documentElement.dataset.theme?.startsWith('hud');
   if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
     rowEls.fill.style.width = '0%';
     rowEls.fill.classList.remove('high');
     rowEls.vals.textContent = 'N/A';
+    // HUD theme — even with no data, draw an empty gauge so the row
+    // doesn't go blank (matches the thermal panel when a sensor
+    // isn't reporting). The badge reads "N/A" instead of a number.
+    if (isHud) {
+      const parent = rowEls.fill.parentElement;
+      if (parent) _renderFixedGauge(parent, 0, 'N/A');
+    }
     return;
   }
   const pct = (used / total) * 100;
   rowEls.fill.style.width = `${pct.toFixed(0)}%`;
   rowEls.fill.classList.toggle('high', pct >= 90);
   rowEls.vals.textContent = `${fmtBytes(used)} / ${fmtBytes(total)}`;
+  // HUD theme — paint the same canvas gauge as the thermal + RAM
+  // bars so per-GPU memory reads with badge + marker + tick scale.
+  if (isHud) {
+    const parent = rowEls.fill.parentElement;
+    if (parent) _renderFixedGauge(parent, pct, `${Math.round(pct)}%`);
+  }
 }
 
 // Zen overlay GPU mirror — one vertical bar per GPU, parallel to CPU cores.
@@ -1660,7 +1960,7 @@ function buildZenGpuGrid(count) {
 
 // ── Matte grid charts ───────────────────────────────────────────
 // Under a matte-* theme the DOM .core-bar / .gpu-bar grids (CPU cores,
-// memory history, GPU util, scratch drives) are hidden by CSS and this
+// memory history, GPU util) are hidden by CSS and this
 // draws a flat line chart over the same container instead — the same
 // treatment the network / drive sparklines and the audio visualizers
 // get. Values are read straight off each fill's --bar-pct, so one
@@ -1764,7 +2064,7 @@ function renderGridLine(container) {
 // own paint path.
 setInterval(() => {
   if (document.hidden) return;
-  for (const el of [coreGridEl, memHistGridEl, gpuGridEl, scratchGridEl,
+  for (const el of [coreGridEl, memHistGridEl, gpuGridEl,
                     zenCoreGridEl, zenMemGridEl, zenGpuGridEl]) {
     renderGridLine(el);
   }
@@ -1777,6 +2077,7 @@ function paintGpuPanel(gpus) {
   buildZenGpuGrid(list.length);
 
   let totalUsed = 0, totalCap = 0;
+  let maxLoad = null;  // for the TASKS-pane wire-graph
   const tempBits = [];
   for (let i = 0; i < list.length; i++) {
     const g = list[i];
@@ -1789,7 +2090,19 @@ function paintGpuPanel(gpus) {
     if (Number.isFinite(g?.temp)) tempBits.push(`G${i} ${Math.round(g.temp)}°`);
     if (Number.isFinite(g?.memUsed))  totalUsed += g.memUsed;
     if (Number.isFinite(g?.memTotal)) totalCap  += g.memTotal;
+    // Track the busiest GPU's load — on Intel-iGPU + NVIDIA-dGPU
+    // setups the iGPU at index 0 often reports null, so we can't
+    // rely on a fixed index. Max across the list captures whichever
+    // card is actually doing work.
+    if (Number.isFinite(g?.load) && (maxLoad == null || g.load > maxLoad)) {
+      maxLoad = g.load;
+    }
   }
+  // Feed the wire-graph once per refresh with the busiest GPU's load.
+  // Push 0 if no GPU reported a valid load — keeps the line alive at
+  // the floor instead of going flat-missing on iGPU-only systems with
+  // no telemetry.
+  pushTasksGpuHist(maxLoad == null ? 0 : maxLoad);
   if (zenGpuTempsEl) {
     zenGpuTempsEl.textContent = tempBits.length ? tempBits.join(' · ') : '—';
   }
@@ -1799,6 +2112,18 @@ function paintGpuPanel(gpus) {
   }
   if (sysGpuMemEl) {
     sysGpuMemEl.textContent = totalCap > 0 ? `${fmtBytes(totalUsed)} / ${fmtBytes(totalCap)}` : 'N/A';
+  }
+  // Live header summary — average GPU load + count.
+  const gpuCodeEl = document.getElementById('gpu-code');
+  if (gpuCodeEl) {
+    if (!list.length) {
+      gpuCodeEl.textContent = 'NONE';
+    } else {
+      const loads = list.map((g) => Number.isFinite(g?.load) ? g.load : null).filter((v) => v != null);
+      const avgLoad = loads.length ? loads.reduce((a, b) => a + b, 0) / loads.length : null;
+      const memBit  = totalCap > 0 ? ` · ${fmtBytes(totalUsed)} / ${fmtBytes(totalCap)}` : '';
+      gpuCodeEl.textContent = `${avgLoad != null ? `${avgLoad.toFixed(0)}%` : '—%'} · ${list.length} GPU${list.length === 1 ? '' : 'S'}${memBit}`;
+    }
   }
 }
 
@@ -1874,7 +2199,7 @@ async function refreshTemps() {
       displayPower = 20 + Math.min(1, Math.max(0, load)) * 105;
       isPowerEst = true;
     }
-    paintPower(powerCpuEl, displayPower, isPowerEst);
+    paintPowerBar(powerCpuBarEl, powerCpuNameEl, displayPower, isPowerEst, POWER_MAX_CPU);
     if (zenCpuTempEl) zenCpuTempEl.textContent = Number.isFinite(t.cpu) ? `${Math.round(t.cpu)}` : '—';
     // Honest source label — reflects what probe actually succeeded
     // rather than always claiming "ACPI/SMBUS". systeminformation's
@@ -1924,16 +2249,24 @@ async function refreshTemps() {
       }) || null;
     }
 
-    const g0 = t.gpus?.[0];
-    const g0LhmTemp = pickLhmGpuTemp(g0?.name);
-    paintTemp(tempGpu0El, tempGpu0BarEl, g0LhmTemp ? g0LhmTemp.value : g0?.temp);
-    paintPower(powerGpu0El, g0?.power);
-    tempGpu0NameEl.textContent = g0 ? shortGpuName(g0.name) : 'NONE';
-
     const g1 = t.gpus?.[1];
     const g1LhmTemp = pickLhmGpuTemp(g1?.name);
     paintTemp(tempGpu1El, tempGpu1BarEl, g1LhmTemp ? g1LhmTemp.value : g1?.temp);
-    paintPower(powerGpu1El, g1?.power);
+    paintPowerBar(powerGpu1BarEl, powerGpu1NameEl, g1?.power, false, POWER_MAX_GPU);
+
+    // RAM temperature — only shown when a sensor backend (LHM/HWiNFO)
+    // reports DIMM temps. Search lhm.temps for memory/dram/dimm
+    // sensors; show the hottest reading. Row stays hidden otherwise.
+    if (tempRamRowEl) {
+      const ramSensor = lhm?.temps?.find?.((s) => /memory|dram|dimm/i.test(s.name) || /memory|dram|dimm/i.test(s.device));
+      if (ramSensor && Number.isFinite(ramSensor.value)) {
+        tempRamRowEl.removeAttribute('hidden');
+        paintTemp(tempRamEl, tempRamBarEl, ramSensor.value);
+        if (tempRamNameEl) tempRamNameEl.textContent = (ramSensor.device || 'LHM · RAM').toUpperCase().slice(0, 24);
+      } else {
+        tempRamRowEl.setAttribute('hidden', '');
+      }
+    }
     tempGpu1NameEl.textContent = g1 ? shortGpuName(g1.name) : 'NONE';
 
     const sources = [];
@@ -1948,20 +2281,34 @@ async function refreshTemps() {
       thermalStatusEl.innerHTML = `<em>SOURCES</em> <strong class="ok">${sources.join(' · ')}</strong>`;
       thermalStatusEl.className = 'footer-readout';
     }
-    // Trigger alert if any GPU's load is at/above 90%.
-    const gpuPeak = (t.gpus || []).reduce((m, g) =>
-      Math.max(m, Number.isFinite(g?.load) ? g.load : 0), 0);
-    setAlertReason(ALERT_REASON.GPU_90, gpuPeak >= 90);
-    setAlertReason(ALERT_REASON.ERROR_TEMPS, false);
+
+    const thermalCodeEl = document.getElementById('thermal-code');
+    if (thermalCodeEl) {
+      const gpu0 = t.gpus?.[0];
+      const gpu1 = t.gpus?.[1];
+      const bits = [];
+      if (Number.isFinite(displayTemp))   bits.push(`CPU ${Math.round(displayTemp)}°`);
+      if (Number.isFinite(gpu0?.temp))    bits.push(`GPU ${Math.round(gpu0.temp)}°`);
+      if (Number.isFinite(gpu1?.temp))    bits.push(`GPU2 ${Math.round(gpu1.temp)}°`);
+      thermalCodeEl.textContent = bits.length ? bits.join(' · ') : 'OFFLINE';
+    }
   } catch (err) {
     thermalStatusEl.textContent = `ERR: ${err.message}`.toUpperCase();
     thermalStatusEl.className = 'footer-readout red';
-    setAlertReason(ALERT_REASON.ERROR_TEMPS, true);
   }
 }
 
-refreshTemps();
-setInterval(() => { if (!document.hidden) refreshTemps(); }, 5000);
+// Temps / GPU tick. Chained setTimeout at PANEL_REFRESH_MS — matches
+// net/disk/system, so the wire-graph GPU line ticks at the same
+// cadence as the CPU line. Safe to poll fast because the main-process
+// getTempsInfoCached wrapper rate-limits the actual nvidia-smi +
+// si.graphics() work to ~1 underlying refresh per 1.5 s regardless
+// of how many renderer-side calls arrive in between.
+async function _tempsLoop() {
+  if (!document.hidden) await refreshTemps();
+  setTimeout(_tempsLoop, PANEL_REFRESH_MS);
+}
+_tempsLoop();
 
 // ── HUD: Network ─────────────────────────────────────────────────────────────
 const netRxEl       = document.querySelector('#net-rx');
@@ -1995,6 +2342,127 @@ function fmtRate(bytesPerSec) {
 function pushSpark(buf, val) {
   buf.push(val);
   if (buf.length > SPARK_SAMPLES) buf.shift();
+}
+
+// ── Tasks pane wire-graph history ───────────────────────────────────
+// Rolling buffers of CPU + GPU + RAM utilisation feeding the line
+// chart in the TASKS pane. Kept renderer-side (no extra IPC) — we
+// snoop on values already being computed by refreshSystem (CPU/RAM)
+// and paintGpuUtil (GPU). Length intentionally short — too long and
+// the lines compress into a flat smear at higher Hz settings.
+const TASKS_HIST_LEN = 180;
+const _tasksCpuHist = [];
+const _tasksGpuHist = [];
+const _tasksRamHist = [];
+let   _tasksGraphRafPending = false;
+function _scheduleTasksGraphDraw() {
+  if (_tasksGraphRafPending) return;
+  // Only draw when the user is looking at the tasks tab — the rest
+  // of the time we just accumulate samples in the buffers.
+  if (typeof comboPanel !== 'undefined' && comboPanel?.dataset.mode !== 'tasks') return;
+  _tasksGraphRafPending = true;
+  requestAnimationFrame(() => {
+    _tasksGraphRafPending = false;
+    drawTasksGraph();
+  });
+}
+function pushTasksCpuHist(loadFrac) {
+  // loadFrac is 0..1; store as percent for direct plot mapping.
+  _tasksCpuHist.push(Math.max(0, Math.min(100, (loadFrac || 0) * 100)));
+  if (_tasksCpuHist.length > TASKS_HIST_LEN) _tasksCpuHist.shift();
+  _scheduleTasksGraphDraw();
+}
+function pushTasksGpuHist(utilPct) {
+  // utilPct is already 0..100.
+  _tasksGpuHist.push(Math.max(0, Math.min(100, utilPct || 0)));
+  if (_tasksGpuHist.length > TASKS_HIST_LEN) _tasksGpuHist.shift();
+  _scheduleTasksGraphDraw();
+}
+function pushTasksRamHist(pct) {
+  // pct is 0..100 (system RAM usage).
+  _tasksRamHist.push(Math.max(0, Math.min(100, pct || 0)));
+  if (_tasksRamHist.length > TASKS_HIST_LEN) _tasksRamHist.shift();
+  _scheduleTasksGraphDraw();
+}
+let _tasksGraphRO = null;
+function drawTasksGraph() {
+  const canvas = document.getElementById('tasks-graph-canvas');
+  if (!canvas) return;
+  // First call: attach a ResizeObserver so the chart re-paints any
+  // time the canvas changes size — covers the case where the tasks
+  // pane is hidden → visible transition lays it out asynchronously
+  // and the initial requestAnimationFrame draw lands while rect is
+  // still 0×0. Without this the chart often stays blank on first
+  // open until a sample arrives that triggers a redraw.
+  if (!_tasksGraphRO && typeof ResizeObserver !== 'undefined') {
+    _tasksGraphRO = new ResizeObserver(() => {
+      if (typeof comboPanel !== 'undefined' && comboPanel?.dataset.mode !== 'tasks') return;
+      _scheduleTasksGraphDraw();
+    });
+    _tasksGraphRO.observe(canvas);
+  }
+  // Size the backing buffer to the layout box × DPR so lines stay
+  // crisp at any zoom level. If the canvas is still 0×0 (pane not
+  // yet laid out) bail — the ResizeObserver above will fire us back
+  // when it gets size.
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const wantW = Math.round(rect.width * dpr);
+  const wantH = Math.round(rect.height * dpr);
+  if (canvas.width !== wantW || canvas.height !== wantH) {
+    canvas.width = wantW; canvas.height = wantH;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = rect.width, H = rect.height;
+  ctx.clearRect(0, 0, W, H);
+  // Pull theme colours fresh so the chart re-tints on theme switch
+  // without restart. RAM uses a fixed white-with-alpha rather than a
+  // theme var because every theme already paints CPU + GPU lines and
+  // we need a third hue that contrasts on all of them.
+  const cs = getComputedStyle(canvas);
+  const accent = cs.getPropertyValue('--accent').trim() || '#5fa';
+  const amber  = cs.getPropertyValue('--amber').trim()  || '#ffaa00';
+  const ramCol = 'rgba(255, 255, 255, 0.7)';
+  const rule   = cs.getPropertyValue('--rule-dim').trim() || 'rgba(255,255,255,0.12)';
+  // Grid: faint horizontal rules at 25/50/75/100% to read amplitude.
+  ctx.strokeStyle = rule;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const frac of [0.25, 0.5, 0.75]) {
+    const y = Math.round(H * (1 - frac)) + 0.5;
+    ctx.moveTo(0, y); ctx.lineTo(W, y);
+  }
+  ctx.stroke();
+  // Plot a single buffer as a polyline. We render against the full
+  // TASKS_HIST_LEN so newer samples land at the right edge regardless
+  // of how full the buffer is — the line grows left-to-right as data
+  // accumulates instead of stretching across the whole width with N=2.
+  const plot = (buf, colour, glow) => {
+    if (!buf.length) return;
+    const n = buf.length;
+    const start = TASKS_HIST_LEN - n; // pad the left
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.lineCap  = 'round';
+    if (glow) { ctx.shadowColor = colour; ctx.shadowBlur = 6; }
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = ((start + i) / (TASKS_HIST_LEN - 1)) * W;
+      const y = H * (1 - buf[i] / 100);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  };
+  // Draw order (back-to-front): RAM (usually high, would obscure others
+  // if on top) → GPU → CPU. CPU + GPU are the most-watched lines so
+  // they sit foreground.
+  plot(_tasksRamHist, ramCol, false);
+  plot(_tasksGpuHist, amber,  true);
+  plot(_tasksCpuHist, accent, true);
 }
 
 // Bar-grid sparkline renderer: builds N skinny bars on first call, then on
@@ -2104,8 +2572,230 @@ function drawEinkChartFrame(ctx, w, h, rgb, yLabels) {
 // e-ink visualizers can draw the same axis-framed line chart.
 window.drawEinkChartFrame = drawEinkChartFrame;
 
+// HUD-mode spark renderer — replaces the bar-grid with a horizontal
+// pill gauge: segmented LED fill up to the current value, a vertical
+// white marker line, a small red-outlined badge above the marker
+// with the value, and a tick scale (10/20/.../100) along the bottom.
+// For sparklines the value is "current sample / recent max %" so the
+// gauge stays meaningful without a fixed scale; for thermal /
+// other fixed-range bars there's a sibling _renderFixedGauge.
+function _renderSparkGauge(container, samples) {
+  if (!samples?.length) return;
+  const max = Math.max(1, ...samples);
+  const cur = samples[samples.length - 1] || 0;
+  const pct = Math.max(0, Math.min(100, (cur / max) * 100));
+  _renderHudGauge(container, pct, `${Math.round(pct)}%`);
+}
+
+// Fixed-scale gauge (temp, power) — caller passes the already-
+// computed percentage and the display string (e.g. "32°"). Same
+// canvas / state cache as the spark gauges so swapping themes
+// doesn't leak DOM nodes.
+function _renderFixedGauge(container, pct, displayText) {
+  _renderHudGauge(container, pct, displayText);
+}
+
+function _renderHudGauge(container, pct, displayText) {
+  if (!container) return;
+  let st = _sparkState.get(container);
+  if (!st) {
+    // Don't wipe the container — caller may have child elements
+    // (e.g. .seg-bar-fill) that need to stay in the DOM so other
+    // code paths (parentElement lookups, transition listeners) still
+    // work. Just add a canvas as a sibling and let CSS hide whatever
+    // shouldn't paint.
+    let canvas = container.querySelector(':scope > .spark-bars-canvas');
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.className = 'spark-bars-canvas';
+      container.appendChild(canvas);
+    }
+    st = { canvas, ctx: canvas.getContext('2d'), ro: null };
+    _sparkState.set(container, st);
+    _sparkSizeCanvas(st, container);
+    if (typeof ResizeObserver !== 'undefined') {
+      st.ro = new ResizeObserver(() => _sparkSizeCanvas(st, container));
+      st.ro.observe(container);
+    }
+  }
+  const ctx = st.ctx;
+  const dpr = window.devicePixelRatio || 1;
+  const W = st.canvas.width  / dpr;
+  const H = st.canvas.height / dpr;
+  ctx.clearRect(0, 0, W, H);
+  if (W <= 8 || H <= 8) return;
+
+  // Pull theme colors from CSS vars so the gauge re-tints with the
+  // active HUD variant. Lit LEDs use --amber (the variant's LED
+  // colour, distinct from --accent which is the chrome). spark-bars
+  // containers override --spark-color when they want a different
+  // tint (e.g. TX uplink); falls back to --amber, then a default.
+  const cs = getComputedStyle(container);
+  const sparkColor = cs.getPropertyValue('--spark-color').trim()
+                  || cs.getPropertyValue('--amber').trim()
+                  || '#5fe6c0';
+  const redColor   = cs.getPropertyValue('--red').trim() || '#ff3b3b';
+  // Badge fill follows the panel-bg grey so the chip blends into the
+  // panel surface — the red outline + number still pop. Reading from
+  // CSS keeps it in sync if the HUD palette retunes the grey later.
+  const panelBg    = cs.getPropertyValue('--panel-bg').trim() || '#333333';
+
+  // Layout: % badge on TOP, pill in the middle, tick scale below.
+  // The right side reserves extra padding so the "100" tick label
+  // doesn't get clipped at the panel edge.
+  // Shift the gauge content left by reserving more right padding —
+  // the "100" tick label has room AND the whole graph reads as
+  // pushed toward the left of its container.
+  // Bars start close to the canvas left edge so they read as a
+  // continuation of the row label sitting to the LEFT of the spark
+  // container, not as a centered chip floating in white space. The
+  // right side still reserves room for the "100" tick label.
+  const padLeft  = 6;
+  const padRight = 28;
+  // Fully fixed-pixel sizes (no H scaling) so every gauge across the
+  // dashboard renders at identical dimensions regardless of how tall
+  // its host container ends up — the Network sparks now match the
+  // Drive I/O sparks pixel-for-pixel.
+  const badgeH   = 16;
+  const barH     = 18;
+  const tickH    = 14;            // height reserved for the tick label baseline
+  const badgeGap = 3;             // gap between badge and bar
+  const tickGap  = 4;             // gap between bar and tick scale
+  // Total stack height: badge + gap + bar + gap + tick label.
+  const contentH = badgeH + badgeGap + barH + tickGap + tickH;
+  // Vertical-center the whole composition inside the canvas so a tall
+  // host container doesn't push the bar up against the top — extra
+  // space gets split evenly above the badge and below the ticks.
+  const yOffset  = Math.max(1, Math.floor((H - contentH) / 2));
+  const badgeY   = yOffset;
+  const barTop   = badgeY + badgeH + badgeGap;
+  const barLeft  = padLeft;
+  const barRight = W - padRight;
+  const barW     = barRight - barLeft;
+  const radius   = barH / 2;
+  const fillEnd  = barLeft + (pct / 100) * barW;
+  const tickTop  = barTop + barH + tickGap;
+  const labelY   = tickTop + tickH;
+
+  // Pill outline (track).
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = sparkColor;
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(barLeft + 0.5, barTop + 0.5, barW - 1, barH - 1, radius);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(barLeft + 0.5, barTop + 0.5, barW - 1, barH - 1);
+  }
+
+  // Clip to the pill so the segmented LED tiles never poke past the
+  // curved ends.
+  ctx.save();
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(barLeft, barTop, barW, barH, radius);
+    ctx.clip();
+  }
+  // Segmented LED tiles — each tile is 6 px wide with a 3 px gap.
+  // A tile is "lit" if its centre lies left of the current fillEnd.
+  // Lit tiles paint in the bright spark color; unlit tiles paint at
+  // 14 % opacity so the track structure is visible end-to-end.
+  // Vertical inset of 4 px top + 4 px bottom leaves a visible gap
+  // between the tiles and the pill border (tile height = barH - 8).
+  const tileW   = 6;
+  const tileGap = 3;
+  const stepX   = tileW + tileGap;
+  // Vertical inset bumped from 4 → 6 so each tile sits visibly INSIDE
+  // the pill outline with clear breathing room above + below. Tile
+  // height = barH − (inset * 2) = 18 − 12 = 6 px.
+  const tileInsetY = 6;
+  for (let tx = barLeft + 2; tx + tileW <= barRight - 2; tx += stepX) {
+    const centre = tx + tileW / 2;
+    const lit = centre <= fillEnd;
+    ctx.fillStyle = sparkColor;
+    ctx.globalAlpha = lit ? 1 : 0.14;
+    ctx.fillRect(tx, barTop + tileInsetY, tileW, barH - tileInsetY * 2);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Vertical marker line through the bar at the current value.
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(Math.round(fillEnd), barTop - 2);
+  ctx.lineTo(Math.round(fillEnd), barTop + barH + 2);
+  ctx.stroke();
+
+  // Black-fill / red-outlined-and-numbered badge ABOVE the marker.
+  // Red keeps the alarm-chip association — the value chip reads
+  // as the focal point against the white chrome.
+  const badgeText = String(displayText ?? `${Math.round(pct)}%`);
+  ctx.font = `bold 12px 'Share Tech Mono', monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const badgeW = Math.max(22, ctx.measureText(badgeText).width + 8);
+  const badgeX = Math.max(badgeW / 2 + 1, Math.min(W - badgeW / 2 - 1, fillEnd));
+  // Panel-bg fill so the chip blends into the surrounding grey instead
+  // of punching a black hole in it. Red outline + number still pop.
+  ctx.fillStyle = panelBg;
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(badgeX - badgeW / 2, badgeY, badgeW, badgeH, 3);
+    ctx.fill();
+  } else {
+    ctx.fillRect(badgeX - badgeW / 2, badgeY, badgeW, badgeH);
+  }
+  // Red outline
+  ctx.strokeStyle = redColor;
+  ctx.lineWidth = 1;
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(badgeX - badgeW / 2 + 0.5, badgeY + 0.5, badgeW - 1, badgeH - 1, 3);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(badgeX - badgeW / 2 + 0.5, badgeY + 0.5, badgeW - 1, badgeH - 1);
+  }
+  // Red number
+  ctx.fillStyle = redColor;
+  ctx.fillText(badgeText, badgeX, badgeY + badgeH / 2 + 0.5);
+
+  // Tick scale (10..100) along the bottom — quiet color so the
+  // badge stays the focal point.
+  ctx.fillStyle = _withAlpha(sparkColor, 0.7);
+  const tickFontSize = 10;
+  ctx.font = `${tickFontSize}px 'Share Tech Mono', monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let v = 10; v <= 100; v += 10) {
+    const x = barLeft + (v / 100) * barW;
+    // tick mark
+    ctx.fillRect(Math.round(x), barTop + barH + 2, 1, 3);
+    ctx.fillText(String(v), x, labelY - tickFontSize);
+  }
+}
+function _withAlpha(hex, a) {
+  // Accept #rgb / #rrggbb. Fall back to rgba on parse fail.
+  let h = (hex || '').trim();
+  if (h.startsWith('#')) h = h.slice(1);
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return `rgba(95,230,192,${a})`;
+  const r = parseInt(h.slice(0,2), 16);
+  const g = parseInt(h.slice(2,4), 16);
+  const b = parseInt(h.slice(4,6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
 function renderSpark(container, samples) {
   if (!container) return;
+  // HUD theme: replace the bar-grid sparkline with a horizontal
+  // pill-gauge + value marker + tick scale, matching the LED-bar
+  // reference. Same _sparkState cache + canvas; just a different
+  // drawing routine.
+  if (document.documentElement.dataset.theme?.startsWith('hud')) {
+    _renderSparkGauge(container, samples);
+    return;
+  }
   const targetN = targetSparkBarCount(container, samples.length);
   const view = tailSamples(samples, targetN);
   let st = _sparkState.get(container);
@@ -2176,7 +2866,12 @@ function renderSpark(container, samples) {
     };
     st.bright = parseHex(sparkStr) || [110, 220, 180];
     st.dim    = [Math.round(st.bright[0]*0.25), Math.round(st.bright[1]*0.25), Math.round(st.bright[2]*0.25)];
-    st.peakColor = redStr;
+    // Peak marker — accent-tinted-white (matches .core-bar-peak's
+    // `color-mix(in srgb, var(--accent) 30%, white)`). Two-colour rule:
+    // sparklines are bright-accent cells + bright-white-accent peak,
+    // no other hues. (Was st.peakColor = redStr — that was the third
+    // colour the user asked to drop.)
+    st.peakColor = `rgb(${Math.round(st.bright[0]*0.3 + 255*0.7)},${Math.round(st.bright[1]*0.3 + 255*0.7)},${Math.round(st.bright[2]*0.3 + 255*0.7)})`;
     st.gradTheme = _themeVersion;
   }
   // E-Ink themes swap the segmented-LED meter for a flat line chart:
@@ -2220,84 +2915,43 @@ function renderSpark(container, samples) {
     ctx.fill();
     return;
   }
-  // DOS themes: a flat terminal bar chart — thin solid bars on a faint
-  // labelled grid (the SCADA-panel look). Same chart frame as the rest
-  // of the DOS dashboard; theme-coloured via st.bright. A thin cap
-  // floats at each band's held peak.
-  if ((document.documentElement.getAttribute('data-theme') || '').startsWith('dos')) {
-    const [pr, pg, pb] = st.bright;
-    const barCol = `rgb(${pr},${pg},${pb})`;
-    const n = view.length;
-    const frame = drawEinkChartFrame(ctx, W, H, st.bright, [
-      { frac: 0,    text: '0' },
-      { frac: 0.25, text: '' },
-      { frac: 0.5,  text: '' },
-      { frac: 0.75, text: '' },
-      { frac: 1,    text: fmtRate(max).num },
-    ]);
-    const baseY = frame.py + frame.ph;
-    // Sparse, wide, well-spaced columns — source samples max-pooled
-    // into ~16px slots: a very sparse terminal look, fewer fillRects.
-    const gap  = 6;
-    const m    = Math.max(1, Math.min(n, Math.floor((frame.pw + gap) / 16)));
-    const barW = Math.max(1, (frame.pw - gap * (m - 1)) / m);
-    ctx.fillStyle = barCol;
-    for (let j = 0; j < m; j++) {
-      const lo = Math.floor(j * n / m);
-      const hi = Math.max(lo + 1, Math.floor((j + 1) * n / m));
-      let v = 0, pkv = 0;
-      for (let i = lo; i < hi && i < n; i++) {
-        if (view[i]     > v)   v   = view[i];
-        if (st.peaks[i] > pkv) pkv = st.peaks[i];
-      }
-      const x   = frame.px + j * (barW + gap);
-      const pct = Math.min(100, (v / max) * 100);
-      const bh  = (pct / 100) * frame.ph;
-      if (bh >= 0.5) ctx.fillRect(x, baseY - bh, barW, bh);
-      if (pkv > pct + 1) ctx.fillRect(x, baseY - (pkv / 100) * frame.ph - 0.75, barW, 1.5);
-    }
-    return;
-  }
-  // Segmented LED-cell layout — same shape as the audio-in / audio-out
-  // visualizers. Each bar is a stack of small horizontal "cells" with a
-  // dim→bright gradient up the stack and a single-pixel gap between
-  // cells. Number of segments scales with the strip height so narrow
-  // panels still show 6 cells minimum.
+  // Segmented LED-cell layout. Each bar is a stack of small horizontal
+  // "cells". Two-colour rule: every lit cell uses the solid bright
+  // accent (no dim→bright per-cell ramp). Number of segments scales
+  // with the strip height so narrow panels still show 6 cells minimum.
   const segments = Math.max(6, Math.min(20, Math.floor(H / 4)));
   const segPitch = H / segments;
   const cellH    = Math.max(1, segPitch * 0.55);
   const cellGapY = segPitch - cellH;
-  // Precompute per-segment colours once per draw (cheap; one fillStyle
-  // string per LED row, not per bar).
-  const colors = new Array(segments);
-  for (let s = 0; s < segments; s++) {
-    const t = s / Math.max(1, segments - 1);
-    const r = Math.round(st.dim[0] * (1 - t) + st.bright[0] * t);
-    const g = Math.round(st.dim[1] * (1 - t) + st.bright[1] * t);
-    const b = Math.round(st.dim[2] * (1 - t) + st.bright[2] * t);
-    colors[s] = `rgb(${r},${g},${b})`;
-  }
+  const fillCol  = `rgb(${st.bright[0]},${st.bright[1]},${st.bright[2]})`;
   const gap = 1;
-  const barW = Math.max(1, (W - gap * (view.length - 1)) / view.length);
+  // slotW = per-sample column width (was the old barW). The sample-
+  // to-sample center distance stays at (slotW + gap), so the graph's
+  // horizontal rhythm is unchanged. barW is the actual painted width
+  // — 50% of the slot, centered inside it — giving thinner cubes
+  // with the same cadence per user feedback ("too wide").
+  const slotW = Math.max(1, (W - gap * (view.length - 1)) / view.length);
+  const barW  = Math.max(1, slotW * 0.5);
+  const barOffset = (slotW - barW) / 2;
+  ctx.fillStyle = fillCol;
   for (let i = 0; i < view.length; i++) {
     const pct = Math.min(100, (view[i] / max) * 100);
     const cellsLit = Math.min(segments, Math.ceil((pct / 100) * segments));
     if (cellsLit <= 0) continue;
-    const x = i * (barW + gap);
+    const x = i * (slotW + gap) + barOffset;
     for (let s = 0; s < cellsLit; s++) {
-      ctx.fillStyle = colors[s];
       const y = H - (s + 1) * segPitch + cellGapY;
       ctx.fillRect(x, y, barW, cellH);
     }
   }
-  // Peak markers — one cell-height tick in --red sitting at the highest
-  // recent value for each sample column.
+  // Peak markers — one cell-height tick sitting at the highest recent
+  // value for each sample column. Same slot + offset math as the bars.
   ctx.fillStyle = st.peakColor;
   for (let i = 0; i < view.length; i++) {
     const peakPct = Math.min(100, st.peaks[i]);
     const peakSeg = Math.min(segments, Math.ceil((peakPct / 100) * segments));
     if (peakSeg <= 0) continue;
-    const x = i * (barW + gap);
+    const x = i * (slotW + gap) + barOffset;
     const y = H - peakSeg * segPitch + cellGapY;
     ctx.fillRect(x, y, barW, cellH);
   }
@@ -2338,18 +2992,25 @@ async function refreshNet() {
       netStatusEl.innerHTML = `<em>STATE</em> <strong class="ok">ACTIVE</strong> <em>RATE</em> <strong>${fmtRate(total).num} ${fmtRate(total).unit}</strong>`;
     }
     netStatusEl.className = 'footer-readout';
-    setAlertReason(ALERT_REASON.ERROR_NET, false);
+
+    const netCodeEl = document.getElementById('network-code');
+    if (netCodeEl) {
+      netCodeEl.textContent = `↓ ${r.num} ${r.unit} · ↑ ${t.num} ${t.unit}`;
+    }
   } catch (err) {
     netStatusEl.textContent = `ERR: ${err.message}`.toUpperCase();
     netStatusEl.className = 'footer-readout red';
-    setAlertReason(ALERT_REASON.ERROR_NET, true);
   }
 }
 
-// First call seeds the rate baseline; chained scheduling keeps calls serialized.
+// First call seeds the rate baseline; chained scheduling keeps calls
+// serialized (next call only schedules after this one's IPC completes,
+// so a slow netInfo can't pile up overlapping calls). Fixed cadence
+// PANEL_REFRESH_MS — decoupled from the audio visualizer Hz so
+// throttling the audio dial doesn't slow the network readout.
 async function netLoop() {
   if (!document.hidden) await refreshNet();
-  setTimeout(netLoop, UI_REFRESH_MS);
+  setTimeout(netLoop, PANEL_REFRESH_MS);
 }
 netLoop();
 
@@ -2358,8 +3019,8 @@ const diskReadEl       = document.querySelector('#disk-read');
 const diskReadUnitEl   = document.querySelector('#disk-read-unit');
 const diskWriteEl      = document.querySelector('#disk-write');
 const diskWriteUnitEl  = document.querySelector('#disk-write-unit');
-const diskXferEl       = document.querySelector('#disk-xfer');
-const diskQueueEl      = document.querySelector('#disk-queue');
+// XFER/S + QUEUE + TARGET micro-grid was removed from the panel —
+// the underlying elements no longer exist, so we drop the cached refs.
 const diskQueueTagEl   = document.querySelector('#disk-queue-tag');
 const diskStatusEl     = document.querySelector('#disk-status');
 const diskReadSparkEl  = document.querySelector('#disk-read-spark');
@@ -2382,8 +3043,6 @@ async function refreshDisk() {
     diskWriteEl.textContent     = w.num;
     diskWriteUnitEl.textContent = w.unit;
 
-    diskXferEl.textContent     = Number.isFinite(d.transferSec) ? d.transferSec.toFixed(0) : '—';
-    diskQueueEl.textContent    = Number.isFinite(d.queue) ? d.queue.toFixed(0) : '—';
     diskQueueTagEl.textContent = Number.isFinite(d.queue) ? String(d.queue).padStart(2, '0') : '00';
 
     renderSpark(diskReadSparkEl,  dRBuf);
@@ -2401,6 +3060,13 @@ async function refreshDisk() {
       }
     }
     diskStatusEl.className = 'footer-readout';
+
+    const driveioCodeEl = document.getElementById('driveio-code');
+    if (driveioCodeEl) {
+      driveioCodeEl.textContent = d.supported
+        ? `R ${r.num} ${r.unit} · W ${w.num} ${w.unit}`
+        : 'UNSUPPORTED';
+    }
   } catch (err) {
     diskStatusEl.textContent = `ERR: ${err.message}`.toUpperCase();
     diskStatusEl.className = 'footer-readout red';
@@ -2408,10 +3074,13 @@ async function refreshDisk() {
 }
 
 // Disk I/O polling — chained scheduling so the PowerShell call (which
-// has ~500 ms cold start) can't overlap itself.
+// has ~500 ms cold start) can't overlap itself. Fixed PANEL_REFRESH_MS
+// cadence; the chained pattern self-limits to ~2 Hz regardless because
+// of the IPC cost, so this naturally caps without needing a separate
+// disk-specific rate.
 async function diskLoop() {
   if (!document.hidden) await refreshDisk();
-  setTimeout(diskLoop, UI_REFRESH_MS);
+  setTimeout(diskLoop, PANEL_REFRESH_MS);
 }
 diskLoop();
 
@@ -2713,6 +3382,12 @@ async function loadWeather(loc) {
     const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     weatherStatusEl.innerHTML = `<em>SYNC</em> <strong class="ok">OK</strong> <em>UPDATED</em> <strong>${stamp}</strong>`;
     weatherStatusEl.className = 'footer-readout';
+
+    const weatherCodeEl = document.getElementById('weather-code');
+    if (weatherCodeEl) {
+      const tempBit = c.temperature_2m != null ? `${Math.round(c.temperature_2m)}°` : '—°';
+      weatherCodeEl.textContent = `${(loc.name || '').toUpperCase()} · ${tempBit} · ${text.toUpperCase()}`;
+    }
   } catch (err) {
     setStatus(err.message, 'red');
   }
@@ -2816,7 +3491,7 @@ weatherCityEl.addEventListener('keydown', (e) => {
 //   AUDIO_BAR_COUNT_* — number of visible bars per visualizer. Bars upsample
 //                       from bands via linear interpolation when count > 24.
 const AUDIO_BAND_COUNT = 24;
-const AUDIO_BAR_COUNT_NORMAL = 24;
+const AUDIO_BAR_COUNT_NORMAL = 12;
 // 96 was visually nice but each FFT update touched 96 × 2 (fill + peak)
 // DOM properties at ~47 Hz — a real cost for the renderer to absorb on
 // top of video decode in zen. 64 still reads as a dense spectrum and
@@ -2834,8 +3509,12 @@ let _audioGainScale = 1.0;
 // the column widths under side-arrange. Kept as literals (not a reference
 // to PANEL_MIN_W/H) because those are declared further down the file and
 // the audio-init runs at module load — referencing them here would TDZ.
-const AUDIO_MIN_W = 280; // == PANEL_MIN_W
-const AUDIO_MIN_H = 120; // == PANEL_MIN_H
+// Constraints loosened to 80×80. The chip needs SOMETHING > 0 or the
+// resize math goes degenerate (negative widths, clamp loops); 80 is
+// small enough to squish to a single-row strip and big enough that
+// the resize handles stay reachable.
+const AUDIO_MIN_W = 80;
+const AUDIO_MIN_H = 80;
 // Mic byte-frequency to percent multiplier. Byte data is already dB-mapped
 // (0 ≈ -100dB, 255 ≈ -30dB on a default AnalyserNode), so this is a linear
 // gain on top of that log scale. ~0.55 saturates roughly at typical speech.
@@ -2877,8 +3556,24 @@ document.addEventListener('visibilitychange', () => {
 // (10 Hz) so the topbar arrows can step in 5 Hz increments across the
 // full 10-200 Hz range.
 let AUDIO_FRAME_MS = 200;
-const AUDIO_FRAME_MS_MIN = 5;     // 200 Hz
-const AUDIO_FRAME_MS_MAX = 500;   // 2 Hz floor — 200 ms (5 Hz) is the default
+// Hz range is intentionally narrow [5, 60] — audio visualizers above
+// 60 Hz buy nothing perceptually (the eye can't follow per-frame
+// changes that fast) and burn CPU. 5 Hz is the slow floor for users
+// who want a chill, minimal-CPU dashboard.
+const AUDIO_FRAME_MS_MIN = 17;    // 60 Hz ceiling — 1000/60 ≈ 16.67 → round up
+const AUDIO_FRAME_MS_MAX = 200;   // 5 Hz floor — 200 ms (5 Hz) is the default
+// Info-panel refresh cadence — net, disk, cpu/ram, temps/gpu.
+// Decoupled from the audio visualizer Hz: panels want a calm rate;
+// audio wants a user-tunable redraw on the topbar dial.
+//
+// 500 ms = 2 Hz. The previous 100 ms (10 Hz) made the readouts feel
+// chaotic — at 100 ms windows the CPU/network rate deltas are small
+// and high-variance, so the bars + wire-graph jittered all over the
+// place even when actual load was steady. 500 ms gives each delta
+// enough time to average out the noise while still feeling live.
+// Bump down (250 ms = 4 Hz) for snappier, up (1000 ms = 1 Hz) for
+// even calmer.
+const PANEL_REFRESH_MS = 500;
 function setAudioFrameMs(ms) {
   const clamped = Math.max(AUDIO_FRAME_MS_MIN, Math.min(AUDIO_FRAME_MS_MAX, Math.round(ms)));
   AUDIO_FRAME_MS = clamped;
@@ -2890,12 +3585,12 @@ function setAudioFrameMs(ms) {
   if (window.dash?.setConfig) window.dash.setConfig({ audioFrameMs: clamped });
   return clamped;
 }
-// Step the rate by ±5 Hz. Clamped to [10, 200] Hz.
+// Step the rate by ±5 Hz. Clamped to [5, 60] Hz.
 function stepHz(deltaHz) {
   const cur = Math.round(1000 / AUDIO_FRAME_MS);
   // Snap to the nearest multiple of 5 first so steps don't drift.
   const snapped = Math.round(cur / 5) * 5;
-  const next = Math.max(10, Math.min(200, snapped + deltaHz));
+  const next = Math.max(5, Math.min(60, snapped + deltaHz));
   setAudioFrameMs(1000 / next);
 }
 // Initial display before any user interaction.
@@ -3090,166 +3785,103 @@ function createAudioVisualizer({
       targetCtx.stroke();
       return;
     }
-    // DOS themes: a flat green-terminal chart — solid spectrum bars on
-    // a faint labelled grid. Reuses the e-ink chart frame (Y-axis +
-    // gridlines + 0-100 scale) so it matches the rest of the DOS
-    // dashboard, then fills each band as one solid block in the theme
-    // colour — no segmented cells, reflection, or peak markers.
-    if ((document.documentElement.getAttribute('data-theme') || '').startsWith('dos')) {
-      const n = barCount;
-      const frame = drawEinkChartFrame(targetCtx, W, H, _brightRgb, [
-        { frac: 0,    text: '0'   },
-        { frac: 0.25, text: '25'  },
-        { frac: 0.5,  text: '50'  },
-        { frac: 0.75, text: '75'  },
-        { frac: 1,    text: '100' },
-      ]);
-      const baseY = frame.py + frame.ph;
-      // Faint vertical gridlines — graph-paper lattice behind the bars.
-      const [gr, gg, gb] = _brightRgb;
-      targetCtx.strokeStyle = `rgba(${gr},${gg},${gb},0.10)`;
-      targetCtx.lineWidth = 1;
-      targetCtx.setLineDash([]);
-      const vStep = Math.max(28, frame.pw / 8);
-      for (let gx = frame.px + vStep; gx < frame.px + frame.pw - 1; gx += vStep) {
-        targetCtx.beginPath();
-        targetCtx.moveTo(Math.round(gx) + 0.5, frame.py);
-        targetCtx.lineTo(Math.round(gx) + 0.5, baseY);
-        targetCtx.stroke();
-      }
-      // Spectrum bars — sparse, wide, well-spaced columns: the source
-      // bands are max-pooled into ~16px slots, so the chart reads as a
-      // very sparse terminal bar graph and costs far fewer fillRects.
-      const gap  = 6;
-      const m    = Math.max(1, Math.min(n, Math.floor((frame.pw + gap) / 16)));
-      const barW = Math.max(1, (frame.pw - gap * (m - 1)) / m);
-      targetCtx.fillStyle = _audioColor;
-      for (let j = 0; j < m; j++) {
-        const lo = Math.floor(j * n / m);
-        const hi = Math.max(lo + 1, Math.floor((j + 1) * n / m));
-        let v = 0;
-        for (let i = lo; i < hi && i < n; i++) {
-          const dist  = n > 1 ? Math.abs(i / (n - 1) - 0.5) * 2 : 0;
-          const shape = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
-          v = Math.max(v, Math.min(1, (displayed[i] / 100) * shape));
-        }
-        const bh = v * frame.ph;
-        if (bh < 0.5) continue;
-        const x = frame.px + j * (barW + gap);
-        targetCtx.fillRect(x, baseY - bh, barW, bh);
-      }
-      return;
-    }
-    // Segmented EQ style: each bar is a vertical stack of small horizontal
-    // cells rising from a baseline near the bottom of the canvas. Below the
-    // baseline a faded copy of the lowest cells reads as a glass-floor
-    // reflection. A floating bright cell marks the held peak above the
-    // live stack — coloured with --red for a hot magenta-ish accent.
-    // Reserve a small strip on the left for the 0–100 amplitude scale so
-    // the eye gets a fixed reference for what the bars are tracking. The
-    // strip width scales with canvas size; on tiny panels we still leave
-    // room for at least the 0/100 endpoints.
+    // CYBER / default: core-bar style — outlined rectangle bars with a
+    // gradient fill (accent → amber → red bottom-to-top), horizontal
+    // scanline overlay, and floating peak markers as bright horizontal
+    // lines. Mirrors the look of the PROCESSORS / MEM HISTORY grids so
+    // the audio meters read as the same UI dialect as the system bars.
+    // No bell-curve falloff (cores show direct readings, not aesthetic
+    // shaping); no reflection floor.
     const fontSize = Math.max(8, Math.min(11, Math.floor(H / 28)));
-    // Wide enough for a 3-digit tick label ("100") in the tech-mono
-    // font even on the smallest panels — was 18, which clipped "100"
-    // off the left edge on narrow viz canvases.
     const scaleW   = Math.max(26, Math.min(36, Math.round(W * 0.06)));
     const stripX   = scaleW;
     const usableW  = W - scaleW;
-    const gap = 1;
-    const barW = Math.max(1, (usableW - gap * (barCount - 1)) / barCount);
-    const baselineY = H * 0.78;          // bars rise upward from here
-    const usableH   = baselineY;
-    const reflectH  = H - baselineY;
-    const segments  = Math.max(6, Math.min(30, Math.floor(usableH / 4)));
-    const segPitch  = usableH / segments;
-    const cellH     = Math.max(1, segPitch * 0.55);
-    const cellGapY  = segPitch - cellH;
-    const reflectSegMax = Math.max(1, Math.floor(reflectH / segPitch));
+    const gap = 3;
+    const barW = Math.max(2, (usableW - gap * (barCount - 1)) / barCount);
+    const padTopH = 3;
+    const padBotH = 3;
+    const trackY  = padTopH;
+    const trackH  = Math.max(8, H - padTopH - padBotH);
 
-    // Two-colour lerp: bottom cells are dim audio-colour, top cells are the
-    // bright audio colour. Same hue throughout the stack, just darker at
-    // the floor and hotter as the bar climbs.
-    const colors = new Array(segments);
-    for (let s = 0; s < segments; s++) {
-      const t = s / Math.max(1, segments - 1);
-      const r = Math.round(_dimRgb[0] * (1 - t) + _brightRgb[0] * t);
-      const g = Math.round(_dimRgb[1] * (1 - t) + _brightRgb[1] * t);
-      const b = Math.round(_dimRgb[2] * (1 - t) + _brightRgb[2] * t);
-      colors[s] = `rgb(${r},${g},${b})`;
-    }
+    // Two-color, NO gradient — solid audio-color fill + dark scanline
+    // overlay. Matches the CSS .core-bar-fill rule which dropped its
+    // accent→amber→red value gradient. Bar colour stays constant
+    // regardless of level.
+    const outlineColor = `rgba(${_brightRgb[0]},${_brightRgb[1]},${_brightRgb[2]},0.30)`;
+    const scanColor    = 'rgba(0,0,0,0.62)';
+    // HUD theme: pill-shaped bars + chunkier 7 px lit / 3 px gap LED
+    // tiles instead of the default 3 px / 2 px scanlines, matching
+    // the LED-strip references the user supplied.
+    const isHud = !!document.documentElement.dataset.theme?.startsWith('hud');
+    const tileLit = isHud ? 7 : 3;
+    const tileGap = isHud ? 3 : 2;
+    const tileCycle = tileLit + tileGap;
+    targetCtx.lineWidth = 1;
 
     for (let i = 0; i < barCount; i++) {
-      const dist = barCount > 1 ? Math.abs(i / (barCount - 1) - 0.5) * 2 : 0;
-      // Bell-curve falloff: bars are tallest at the centre and ease off
-      // smoothly toward the edges. cos(dist*π/2) gives a clean half-
-      // cosine shape; mixing it 0.3..1.0 keeps the edge bars visible
-      // (~30% of centre height) rather than dropping to zero.
-      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
-      const value = (displayed[i] / 100) * scale;
-      const cellsLit = Math.min(segments, Math.ceil(value * segments));
-      const x = stripX + i * (barW + gap);
+      const x  = Math.round(stripX + i * (barW + gap));
+      const bw = Math.max(1, Math.floor(barW));
 
-      // Live stack — cells rise from baselineY upward.
-      for (let s = 0; s < cellsLit; s++) {
-        targetCtx.fillStyle = colors[s];
-        const y = baselineY - (s + 1) * segPitch + cellGapY;
-        targetCtx.fillRect(x, y, barW, cellH);
+      // Outlined box — full track height. HUD theme uses a pill-shaped
+      // rounded outline so each bar reads like the reference LED strip.
+      targetCtx.strokeStyle = outlineColor;
+      if (isHud && typeof targetCtx.roundRect === 'function') {
+        targetCtx.beginPath();
+        targetCtx.roundRect(x + 0.5, trackY + 0.5, bw - 1, trackH - 1, Math.min(bw, trackH) / 2);
+        targetCtx.stroke();
+      } else {
+        targetCtx.strokeRect(x + 0.5, trackY + 0.5, bw - 1, trackH - 1);
       }
 
-      // Reflection — same cells mirrored under the baseline, faded to
-      // a thin glass-floor look. Capped so we only draw the cells that
-      // fit in the reflection band.
-      const reflectN = Math.min(cellsLit, reflectSegMax);
-      if (reflectN > 0) {
-        targetCtx.globalAlpha = 0.22;
-        for (let s = 0; s < reflectN; s++) {
-          targetCtx.fillStyle = colors[s];
-          const y = baselineY + s * segPitch;
-          targetCtx.fillRect(x, y, barW, cellH);
-        }
-        targetCtx.globalAlpha = 1;
+      // Fill — solid audio-color, scaled bottom-up by the displayed value.
+      const value = Math.max(0, Math.min(1, displayed[i] / 100));
+      const fillH = Math.max(0, Math.floor(value * trackH));
+      const fillY = trackY + (trackH - fillH);
+      // Dim-color tint behind the whole bar so the LED groove is
+      // visible even when the bar is silent. Matches the dial gauges
+      // where unlit tiles read as faint colored cells, not voids.
+      const dimFill = `rgba(${_brightRgb[0]},${_brightRgb[1]},${_brightRgb[2]},0.14)`;
+      targetCtx.save();
+      if (isHud && typeof targetCtx.roundRect === 'function') {
+        targetCtx.beginPath();
+        targetCtx.roundRect(x + 1, trackY + 1, Math.max(1, bw - 2), Math.max(1, trackH - 2), Math.min(bw, trackH) / 2);
+        targetCtx.clip();
+      }
+      // 1. Dim background across whole track.
+      targetCtx.fillStyle = dimFill;
+      targetCtx.fillRect(x + 1, trackY + 1, Math.max(1, bw - 2), Math.max(1, trackH - 2));
+      // 2. Bright fill over the lit portion.
+      if (fillH > 0) {
+        targetCtx.fillStyle = _audioColor;
+        targetCtx.fillRect(x + 1, fillY, Math.max(1, bw - 2), fillH);
+      }
+      // 3. Scanline cuts across the WHOLE track so the LED-tile groove
+      //    reads identically in lit and unlit segments.
+      targetCtx.fillStyle = scanColor;
+      for (let sy = trackY + tileLit; sy < trackY + trackH; sy += tileCycle) {
+        targetCtx.fillRect(x + 1, sy, Math.max(1, bw - 2), tileGap);
+      }
+      targetCtx.restore();
+
+      // Peak marker — 2px horizontal line at the held peak position.
+      const peakValue = Math.max(0, Math.min(1, peaks[i] / 100));
+      if (peakValue > 0) {
+        const peakY = trackY + (trackH - Math.floor(peakValue * trackH));
+        targetCtx.fillStyle = _redColor;
+        targetCtx.fillRect(x + 1, Math.max(trackY, peakY - 1), Math.max(1, bw - 2), 2);
       }
     }
 
-    // Floating peak markers — bright cell at the peaks[i] position
-    // (above the live stack since peaks decay slower than the fill).
-    // Coloured --red so transients pop against the audio-colour stack.
-    targetCtx.fillStyle = _redColor;
-    for (let i = 0; i < barCount; i++) {
-      const dist = barCount > 1 ? Math.abs(i / (barCount - 1) - 0.5) * 2 : 0;
-      // Same bell-curve falloff as the bar fill above — keeps the peak
-      // markers in sync with the cell-stack profile they sit on top of.
-      const scale = 0.30 + 0.70 * Math.cos(dist * Math.PI / 2);
-      const peakValue = (peaks[i] / 100) * scale;
-      const peakSeg = Math.min(segments, Math.ceil(peakValue * segments));
-      if (peakSeg <= 0) continue;
-      const x = stripX + i * (barW + gap);
-      const y = baselineY - peakSeg * segPitch + cellGapY;
-      targetCtx.fillRect(x, y, barW, cellH);
-    }
-
-    // Soft baseline glow line — sits at the join between live stack and
-    // reflection so the "floor" of the EQ has a subtle horizon.
-    targetCtx.fillStyle = _audioColor;
-    targetCtx.globalAlpha = 0.18;
-    targetCtx.fillRect(0, baselineY - 1.5, W, 3);
-    targetCtx.globalAlpha = 1;
-
-    // Side scale — 0/25/50/75/100 amplitude ticks on the left strip.
-    // Tiny canvases (e.g. compact bottom panels) drop to just 0/100 so
-    // the labels stay legible. Y positions are clamped so the topmost
-    // label (100) doesn't get its top half clipped against the canvas
-    // edge — `textBaseline: 'middle'` puts half the glyph above y, so
-    // we need at least fontSize/2 of padding from y=0.
-    const ticks = usableH < 90 ? [0, 100] : [0, 25, 50, 75, 100];
+    // Left-side scale — 0/25/50/75/100 amplitude ticks. Tiny canvases
+    // drop to 0/100 only so labels stay legible.
+    const ticks = trackH < 90 ? [0, 100] : [0, 25, 50, 75, 100];
     targetCtx.font = `${fontSize}px var(--font-tech), 'Share Tech Mono', monospace`;
     targetCtx.fillStyle = _mutedColor;
     targetCtx.textAlign = 'right';
     targetCtx.textBaseline = 'middle';
     const padTop = Math.ceil(fontSize / 2) + 1;
     for (const v of ticks) {
-      const rawY = baselineY - (v / 100) * usableH;
+      const rawY = trackY + trackH - (v / 100) * trackH;
       const y    = Math.max(padTop, Math.min(H - padTop, rawY));
       targetCtx.fillText(String(v), scaleW - 4, y);
       targetCtx.fillRect(scaleW - 3, y - 0.5, 3, 1);
@@ -3296,11 +3928,11 @@ function createAudioVisualizer({
     // = ~110 canvas rectangles per redraw, down from 220). Still reads as a
     // dense spectrum at any reasonable panel width; zen mode forces a
     // different count via setAdaptiveBars(false).
-    const AUDIO_BAR_PX = 10;
+    const AUDIO_BAR_PX = 20;
     const targetBarCount = () => {
       const w = barsRowEl.clientWidth;
       if (w <= 0) return null;
-      return Math.max(8, Math.min(72, Math.floor(w / AUDIO_BAR_PX)));
+      return Math.max(4, Math.min(36, Math.floor(w / AUDIO_BAR_PX)));
     };
     const updateBars = () => {
       sizeCanvas();
@@ -3492,16 +4124,18 @@ function createAudioVisualizer({
     document.addEventListener('mouseup', onUp);
   });
 
-  // 4-edge resize: each edge resizes one dimension. N/S = vertical,
-  // E/W = horizontal. No diagonal corner handles — keeps the click
-  // targets along the visible borders.
-  for (const edge of ['n', 's', 'e', 'w']) {
+  // Corner-only resize (matches panels — N/S/E/W edge handles were
+  // dropped so the audio chip behaves the same as a data panel: drag
+  // the body to move, grab a corner to diagonal-resize, grab a side
+  // edge to slide the whole flush column horizontally). `grows` is
+  // computed from the edge string so 'sw' sets both s+w.
+  for (const edge of ['nw', 'ne', 'sw', 'se']) {
     const h = document.createElement('div');
     h.className = `audio-resize-handle audio-resize-${edge}`;
     gridEl?.appendChild(h);
     const grows = {
-      n: edge === 'n', s: edge === 's',
-      w: edge === 'w', e: edge === 'e',
+      n: edge.includes('n'), s: edge.includes('s'),
+      w: edge.includes('w'), e: edge.includes('e'),
     };
     h.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
@@ -3570,11 +4204,6 @@ function createAudioVisualizer({
         document.removeEventListener('mouseup', onUp);
         gridEl.classList.remove('is-resizing');
         saveGeom();
-        // Mirror the new size to the paired visualizer so the in/out grids
-        // always read at identical dimensions. Position stays independent.
-        const w = parseInt(gridEl.style.width,  10);
-        const h = parseInt(gridEl.style.height, 10);
-        if (_partner && Number.isFinite(w) && Number.isFinite(h)) _partner.setSize(w, h);
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
@@ -3604,17 +4233,6 @@ function createAudioVisualizer({
     if (Object.keys(partial).length) await window.dash.setConfig(partial);
   }
 
-  // Set up partner-mirroring so resizing one visualizer also resizes the
-  // other. Drag/position stays independent.
-  let _partner = null;
-  function setPartner(p) { _partner = p; }
-  function setSize(w, h) {
-    if (!gridEl || !Number.isFinite(w) || !Number.isFinite(h)) return;
-    gridEl.style.width  = `${w}px`;
-    gridEl.style.height = `${h}px`;
-    saveGeom();
-  }
-
   function applySavedGeom(savedPos, savedSize, savedMuted) {
     if (!gridEl) return;
     if (savedPos) {
@@ -3632,7 +4250,7 @@ function createAudioVisualizer({
 
   // Apply a previously-persisted gain without writing back to config.
   function applySavedGain(g) { if (Number.isFinite(g)) userGain = clampGain(g); }
-  return { sample, setBands, setMuted, applyMuteUi, isMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom, applySavedGain, rebuildBars, setAdaptiveBars, setPartner, setSize, addMirror, getBarCount: () => barCount };
+  return { sample, setBands, setMuted, applyMuteUi, isMuted, setAnalyserAndTrack, setLabelOnly, getLabel, applySavedGeom, applySavedGain, rebuildBars, setAdaptiveBars, addMirror, getBarCount: () => barCount };
 }
 
 const audioInViz = createAudioVisualizer({
@@ -3641,9 +4259,11 @@ const audioInViz = createAudioVisualizer({
   muteBtnEl:     document.querySelector('#audio-in-mute-btn'),
   deviceNameEl:  document.querySelector('#audio-in-device-name'),
   posKey:        'audioInPos',
-  // Shared size key — both visualizers read/write the same persisted size
-  // so they always match across reloads, no race or post-hoc sync needed.
-  sizeKey:       'audioVizSize',
+  // Per-chip size key — chips are fully independent like panels, so each
+  // one persists its own width/height. Previously both shared
+  // 'audioVizSize' which forced them to the same dimensions on every
+  // reload regardless of how the user resized each one.
+  sizeKey:       'audioInSize',
   mutedKey:      'audioInMuted',
   gainKey:       'audioInGain',
   fallbackLabel: 'DEFAULT MIC',
@@ -3656,20 +4276,12 @@ const audioOutViz = createAudioVisualizer({
   muteBtnEl:     document.querySelector('#audio-out-mute-btn'),
   deviceNameEl:  document.querySelector('#audio-out-device-name'),
   posKey:        'audioOutPos',
-  sizeKey:       'audioVizSize', // shared with audioInViz — see above
+  sizeKey:       'audioOutSize',
   mutedKey:      'audioOutMuted',
   gainKey:       'audioOutGain',
   fallbackLabel: 'SYSTEM AUDIO',
   kind:          'output',
 });
-
-// Pair the two visualizers so resizing either mirrors the other and saves
-// once to the shared 'audioVizSize' key. Also handles initial alignment if
-// the saved config has only one of the legacy 'audioInSize' / 'audioOutSize'
-// keys still around — applySavedGeom (called from main config-load below)
-// reads only audioVizSize now, so legacy keys are harmlessly orphaned.
-audioInViz.setPartner(audioOutViz);
-audioOutViz.setPartner(audioInViz);
 
 // Native WASAPI loopback path: main process pushes RMS levels to us via IPC.
 // When this is wired up, we don't need any browser-side capture at all — the
@@ -4329,6 +4941,13 @@ function applyPanelSize(panel, size) {
     panel.style.top  = `${size.y}px`;
     if (Number.isFinite(size.height)) panel.style.height = `${size.height}px`;
   }
+  // Whenever a SIDE panel moves/resizes, refresh the combo panel's
+  // horizontal pinning so it stays flush against the new edges. Skip
+  // when sizing the combo itself (its own left/width are CSS-forced,
+  // not driven by this code).
+  if (!panel.classList.contains('panel-combo') && typeof _updateComboFoldBoundsRef === 'function') {
+    _updateComboFoldBoundsRef();
+  }
 }
 
 function clearPanelSize(panel) {
@@ -4390,6 +5009,124 @@ function makeResizeHandle(panel, key, dir /* 'nw'|'ne'|'sw'|'se' corners, or 'n'
     panel.style.top  = `${startTop}px`;
     panel.style.flex = '0 0 auto';
 
+    // COHORT detection — only on pure single-axis EDGE handles
+    // ('e','w','n','s'), never corners. Strict FLUSH-TOUCHING rule:
+    // a panel only joins the cohort if it shares the dragged
+    // panel's column (same left + width within tol) AND is
+    // physically touching another cohort member's top or bottom
+    // edge (within tol). For N/S drag the rule flips: same row
+    // (same top + height) + horizontally adjacent.
+    //
+    // A panel on the right side of the screen is NOT in the cohort
+    // even if it vertically overlaps the dragged left-side panel,
+    // because they're not touching. Holding Shift bypasses cohort
+    // entirely (solo resize).
+    const isEdge = (dir === 'e' || dir === 'w' || dir === 'n' || dir === 's');
+    const isHoriz = (dir === 'e' || dir === 'w');
+    const cohortDisabled = e.shiftKey || panel.classList.contains('panel-combo');
+    const cohort = [];
+    if (isEdge && !cohortDisabled) {
+      // Cohort tolerance — was 4 px which was too tight: audio strips
+      // often sit a few extra pixels narrower than the panel above
+      // due to their own border / padding, so a 4 px window missed
+      // them. 10 px is still well below any actual column gap on a
+      // 4K layout so it can't bridge two unrelated columns.
+      const tol = 10;
+      // Snapshot every visible non-combo panel + audio-grid.
+      const all = [];
+      for (const el of document.querySelectorAll('.panel, .audio-grid')) {
+        if (el.classList.contains('is-collapsed')) continue;
+        if (el.classList.contains('panel-combo')) continue;
+        if (el.hasAttribute('hidden')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) continue;
+        all.push({ el, left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height });
+      }
+      // Seed = dragged panel. BFS adds (a) SYNC members — same column
+      // with flush vertical contact (same direction as drag) — and
+      // (b) JOINT members — the adjacent panel sharing the dragged
+      // edge, whose opposite edge tracks the boundary so two
+      // snapped-together panels scale against each other.
+      const addMember = (cand, mode) => {
+        cand.el.style.position = 'fixed';
+        cand.el.style.left   = `${cand.left}px`;
+        cand.el.style.top    = `${cand.top}px`;
+        cand.el.style.width  = `${cand.width}px`;
+        cand.el.style.height = `${cand.height}px`;
+        cand.el.style.maxWidth = `${cand.width}px`;
+        cand.el.style.flex = '0 0 auto';
+        cand.el.classList.add('is-resizing');
+        const isAudio = cand.el.classList.contains('audio-grid');
+        const id = cand.el.id || '';
+        cohort.push({
+          el: cand.el, mode,
+          startLeft: cand.left, startTop: cand.top,
+          startWidth: cand.width, startHeight: cand.height,
+          kind: isAudio ? 'audio' : 'panel',
+          key:  isAudio ? null : panelKey(cand.el),
+          audioSide: isAudio ? (id.includes('out') ? 'out' : 'in') : null,
+        });
+      };
+      const seed = all.find((c) => c.el === panel);
+      if (seed) {
+        const visited = new Set([panel]);
+        const queue = [seed];
+        while (queue.length) {
+          const cur = queue.shift();
+          for (const cand of all) {
+            if (visited.has(cand.el)) continue;
+            let mode = null;
+            if (isHoriz) {
+              // SYNC: same column + vertically flush.
+              const sameCol =
+                Math.abs(cand.left  - cur.left)  <= tol &&
+                Math.abs(cand.right - cur.right) <= tol;
+              const vFlush = sameCol && (
+                Math.abs(cand.top    - cur.bottom) <= tol ||
+                Math.abs(cand.bottom - cur.top)    <= tol);
+              if (vFlush) {
+                mode = 'sync';
+              } else {
+                // JOINT: candidate sits on the dragged-edge side and
+                // its OPPOSITE edge touches the cur element. Must
+                // also vertically overlap so the two share a real
+                // boundary segment (not just a corner).
+                const vOverlap = !(cand.bottom < cur.top || cand.top > cur.bottom);
+                if (vOverlap) {
+                  if (grows.e && Math.abs(cand.left  - cur.right) <= tol) mode = 'joint-east';
+                  if (grows.w && Math.abs(cand.right - cur.left)  <= tol) mode = 'joint-west';
+                }
+              }
+            } else {
+              const sameRow =
+                Math.abs(cand.top    - cur.top)    <= tol &&
+                Math.abs(cand.bottom - cur.bottom) <= tol;
+              const hFlush = sameRow && (
+                Math.abs(cand.left  - cur.right) <= tol ||
+                Math.abs(cand.right - cur.left)  <= tol);
+              if (hFlush) {
+                mode = 'sync';
+              } else {
+                const hOverlap = !(cand.right < cur.left || cand.left > cur.right);
+                if (hOverlap) {
+                  if (grows.s && Math.abs(cand.top    - cur.bottom) <= tol) mode = 'joint-south';
+                  if (grows.n && Math.abs(cand.bottom - cur.top)    <= tol) mode = 'joint-north';
+                }
+              }
+            }
+            if (!mode) continue;
+            visited.add(cand.el);
+            // SYNC members can extend the BFS further (their column
+            // members join too). JOINT neighbours don't transit —
+            // we only want the panel directly sharing the boundary,
+            // not its column.
+            if (mode === 'sync') queue.push(cand);
+            addMember(cand, mode);
+          }
+        }
+      }
+    }
+
     const onMove = (ev) => {
       // Snap the *absolute* edge position to the grid, not the cursor
       // delta. Delta-snap (the old behaviour) keeps a panel off-grid if
@@ -4448,36 +5185,110 @@ function makeResizeHandle(panel, key, dir /* 'nw'|'ne'|'sw'|'se' corners, or 'n'
       panel.style.maxWidth = `${Math.round(newW)}px`;
       panel.style.left = `${Math.round(newLeft)}px`;
       panel.style.top  = `${Math.round(newTop)}px`;
+
+      // Apply per-member geometry. `sync` members scale with the
+      // dragged edge (same direction). `joint-*` members are the
+      // adjacent panel sharing the dragged boundary: their OPPOSITE
+      // edge tracks the moved edge, so dragging the boundary
+      // grows one panel while shrinking its neighbour.
+      if (cohort.length) {
+        const dxLeft  = Math.round(newLeft) - startLeft;
+        const dxRight = (Math.round(newLeft) + Math.round(newW)) - (startLeft + startW);
+        const dyTop   = Math.round(newTop)  - startTop;
+        const dyBot   = (Math.round(newTop)  + Math.round(newH)) - (startTop  + startH);
+        for (const m of cohort) {
+          let mx = m.startLeft, my = m.startTop, mw = m.startWidth, mh = m.startHeight;
+          if (m.mode === 'sync') {
+            if (isHoriz) {
+              if (grows.w) { mx = m.startLeft + dxLeft; mw = m.startWidth - dxLeft; }
+              if (grows.e) { mw = m.startWidth + dxRight; }
+            } else {
+              if (grows.n) { my = m.startTop + dyTop; mh = m.startHeight - dyTop; }
+              if (grows.s) { mh = m.startHeight + dyBot; }
+            }
+          } else if (m.mode === 'joint-east') {
+            // Neighbour to the east of dragged panel. Its left edge
+            // moves with the dragged panel's right edge; its right
+            // edge stays anchored, so it shrinks as we grow.
+            mx = m.startLeft + dxRight;
+            mw = m.startWidth - dxRight;
+          } else if (m.mode === 'joint-west') {
+            // Neighbour to the west. Its right edge moves with the
+            // dragged panel's left edge; left stays anchored.
+            mw = m.startWidth + dxLeft;
+          } else if (m.mode === 'joint-south') {
+            my = m.startTop + dyBot;
+            mh = m.startHeight - dyBot;
+          } else if (m.mode === 'joint-north') {
+            mh = m.startHeight + dyTop;
+          }
+          mw = Math.max(40, mw);
+          mh = Math.max(40, mh);
+          m.el.style.left   = `${Math.round(mx)}px`;
+          m.el.style.top    = `${Math.round(my)}px`;
+          m.el.style.width  = `${Math.round(mw)}px`;
+          m.el.style.height = `${Math.round(mh)}px`;
+          m.el.style.maxWidth = `${Math.round(mw)}px`;
+        }
+      }
+      // Keep PRODUCTIVITY (combo) flush against the side panels as they
+      // resize. Its left/right are pinned to the live side-panel edges,
+      // so re-running the bounds calc every move makes it track the drag
+      // instead of separating (gap) or being overlapped. Skipped when the
+      // combo itself is the one being resized (its geometry is special).
+      if (!panel.classList.contains('panel-combo')) _updateComboFoldBoundsRef?.();
     };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      panel.classList.remove('is-resizing');
-      const w = parseInt(panel.style.width, 10);
-      const h = parseInt(panel.style.height, 10);
-      const x = parseInt(panel.style.left, 10);
-      const y = parseInt(panel.style.top, 10);
+    const persistGeom = (el, k, isAudio, audioSide) => {
+      const w = parseInt(el.style.width, 10);
+      const h = parseInt(el.style.height, 10);
+      const x = parseInt(el.style.left, 10);
+      const y = parseInt(el.style.top, 10);
       const partial = {};
       if (Number.isFinite(w)) partial.width  = w;
       if (Number.isFinite(h)) partial.height = h;
       if (Number.isFinite(x)) partial.x = x;
       if (Number.isFinite(y)) partial.y = y;
-      savePanelSize(key, partial);
+      if (k) {
+        savePanelSize(k, partial);
+      } else if (isAudio) {
+        const posKey  = audioSide === 'out' ? 'audioOutPos'  : 'audioInPos';
+        const sizeKey = audioSide === 'out' ? 'audioOutSize' : 'audioInSize';
+        const cfgPartial = {};
+        if (Number.isFinite(x) && Number.isFinite(y)) cfgPartial[posKey]  = { x, y };
+        if (Number.isFinite(w) && Number.isFinite(h)) cfgPartial[sizeKey] = { width: w, height: h };
+        if (Object.keys(cfgPartial).length) {
+          try { window.dash?.setConfig?.(cfgPartial); } catch {}
+        }
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      panel.classList.remove('is-resizing');
+      const isAudio = panel.classList.contains('audio-grid');
+      const audioSide = isAudio ? ((panel.id || '').includes('out') ? 'out' : 'in') : null;
+      persistGeom(panel, key, isAudio, audioSide);
+      for (const m of cohort) {
+        m.el.classList.remove('is-resizing');
+        persistGeom(m.el, m.key, m.kind === 'audio', m.audioSide);
+      }
+      // Final flush re-pin so the combo settles exactly against the
+      // released side-panel edges.
+      if (!panel.classList.contains('panel-combo')) _updateComboFoldBoundsRef?.();
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   });
 }
 
-// Snap-to-grid. Returns the cell size that matches the visible
-// background grid (see .bg-grid in styles.css) so dragged + resized
-// panels land on the same lines the user can see. The fine grid in the
-// background renders at 40px, the major every 200px, and tick dots
-// every 80px — snapping at 40 puts every snap point on a visible line.
-// Previously this divided the viewport width/height by 40 and used the
-// resulting fractional cell, which only matched the bg-grid by luck and
-// produced off-by-one drift on most resolutions.
-const SNAP_CELL = 40;
+// Snap-to-grid. The bg-grid renders fine lines at 40px (major every
+// 200px, tick dots every 80px). The snap was previously locked to 40
+// so every snap point fell on a visible line — but that grid resolution
+// was too coarse for fine layout work, so we now snap at HALF a fine
+// cell (20px). Every other snap point still lands on a visible bg-grid
+// line; the in-between points snap to the unmarked midpoint, giving
+// twice the resolution without changing the visible grid.
+const SNAP_CELL = 20;
 function getGridSize() {
   return { w: SNAP_CELL, h: SNAP_CELL };
 }
@@ -4562,7 +5373,10 @@ function resolveResizeOverlap(left, top, width, height, grows, neighbors) {
 function attachDrag(panel) {
   const key = panelKey(panel);
   const header = panel.querySelector('.panel-header');
-  if (!key || !header) return;
+  if (!header) return;
+  const isAudio = panel.classList.contains('audio-grid');
+  // Regular panel without a key (shouldn't happen on real panels) bails.
+  if (!key && !isAudio) return;
   header.classList.add('is-draggable');
 
   header.addEventListener('mousedown', (e) => {
@@ -4612,16 +5426,30 @@ function attachDrag(panel) {
       }
       panel.style.left = `${nx}px`;
       panel.style.top  = `${ny}px`;
+      // Re-pin PRODUCTIVITY (combo) flush as a side panel is dragged
+      // around, so it never separates from a moved neighbor. Skipped
+      // when the combo itself is being dragged.
+      if (!panel.classList.contains('panel-combo')) _updateComboFoldBoundsRef?.();
     };
     const onUp = () => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       panel.classList.remove('is-dragging');
+      if (!panel.classList.contains('panel-combo')) _updateComboFoldBoundsRef?.();
       const x = parseInt(panel.style.left, 10);
       const y = parseInt(panel.style.top,  10);
+      const w = parseInt(panel.style.width,  10);
       const h = parseInt(panel.style.height, 10);
-      if (Number.isFinite(x) && Number.isFinite(y)) {
-        savePanelSize(key, { x, y, height: Number.isFinite(h) ? h : undefined });
+      if (!(Number.isFinite(x) && Number.isFinite(y))) return;
+      if (key) {
+        savePanelSize(key, { x, y, width: Number.isFinite(w) ? w : undefined, height: Number.isFinite(h) ? h : undefined });
+      } else if (isAudio) {
+        const side = (panel.id || '').includes('out') ? 'out' : 'in';
+        const posKey  = side === 'out' ? 'audioOutPos'  : 'audioInPos';
+        const sizeKey = side === 'out' ? 'audioOutSize' : 'audioInSize';
+        const cfgPartial = { [posKey]: { x, y } };
+        if (Number.isFinite(w) && Number.isFinite(h)) cfgPartial[sizeKey] = { width: w, height: h };
+        try { window.dash?.setConfig?.(cfgPartial); } catch {}
       }
     };
     document.addEventListener('mousemove', onMove);
@@ -4630,36 +5458,363 @@ function attachDrag(panel) {
 }
 
 function attachResize(panel) {
+  // All panels — regular + audio-grid — get the same 8 handles. Key
+  // may be null for audio; the handler routes persistence through
+  // audio{In,Out}{Pos,Size} cfg keys in that case.
   const key = panelKey(panel);
-  if (!key) return;
-  makeResizeHandle(panel, key, 'nw');
-  makeResizeHandle(panel, key, 'ne');
-  makeResizeHandle(panel, key, 'sw');
-  makeResizeHandle(panel, key, 'se');
-  // The productivity combo panel also gets left + right edge handles so
-  // the user can grab either side and resize horizontally — the corner
-  // hit boxes alone (14×14) are easy to miss next to the header chrome.
-  if (panel.classList.contains('panel-combo')) {
-    makeResizeHandle(panel, key, 'e');
-    makeResizeHandle(panel, key, 'w');
+  for (const d of ['nw','ne','sw','se','n','s','e','w']) {
+    makeResizeHandle(panel, key, d);
   }
 }
 
-// Stagger the panel-pulse animation so panels don't all peak at the same time.
-const _allPanels = document.querySelectorAll('.panel');
-_allPanels.forEach((panel, i) => {
+// ── Column-edge resize ───────────────────────────────────────────────
+// Side-column elements get 4 edge handles:
+//
+//   l / r   horizontal resize. Drags the moving edge of every panel
+//           in the flush cohort (same x + width, vertically touching);
+//           the opposite edge stays anchored. Lets the user shrink the
+//           whole column toward the screen edge or grow it back toward
+//           the productivity panel as one gesture.
+//
+//   n / s   vertical joint resize. Walks one panel up or down inside
+//           the cohort and slides the shared border between this panel
+//           and its flush neighbour; the two heights sum stays constant
+//           (one grows, the other shrinks). Other column members are
+//           untouched. Bails if there's no flush neighbour on that side.
+//
+// Works for both .panel and .audio-grid elements — audio strips behave
+// the same as data panels for both gestures. Title-bar drag (panels)
+// or center-body drag (audio) still moves an individual element and
+// breaks the stack.
+function attachColumnEdge(el) {
+  if (el.classList.contains('panel-combo')) return; // combo owns its own e/w resize
+  const isAudio = el.classList.contains('audio-grid');
+  const isPanel = el.classList.contains('panel');
+  if (!isAudio && !isPanel) return;
+  if (isPanel && !panelKey(el)) return;
+  for (const side of ['l', 'r', 'n', 's']) {
+    const handle = document.createElement('div');
+    handle.className = `column-edge-handle column-edge-handle-${side}`;
+    handle.title = side === 'l' || side === 'r'
+      ? 'Drag horizontally to resize the column width'
+      : 'Drag vertically to resize this panel and its neighbour';
+    el.appendChild(handle);
+    if (side === 'l' || side === 'r') {
+      handle.addEventListener('mousedown', (e) => onColumnHorizResize(e, el, side));
+    } else {
+      handle.addEventListener('mousedown', (e) => onColumnVertJointResize(e, el, side));
+    }
+  }
+}
+
+// Horizontal column resize. The moved edge tracks the cursor; the
+// opposite edge of every cohort member stays anchored. Clamped by
+// PANEL_MIN_W / AUDIO_MIN_W (per-member) and by any non-cohort
+// element that vertically overlaps the cohort on the moving side.
+function onColumnHorizResize(e, el, side) {
+  if (_uiLocked) return;
+  // Always swallow so the underlying element's own body-drag handler
+  // (audio-grid in particular) never fires from a column-edge click.
+  e.preventDefault();
+  e.stopPropagation();
+  const cohort = buildColumnCohort(el);
+  if (!cohort.members.length) return;
+  const isWest = side === 'l';
+
+  for (const m of cohort.members) {
+    const r = m.el.getBoundingClientRect();
+    m.startLeft   = r.left;
+    m.startTop    = r.top;
+    m.startWidth  = r.width;
+    m.startHeight = r.height;
+    m.el.style.position = 'fixed';
+    m.el.style.left   = `${r.left}px`;
+    m.el.style.top    = `${r.top}px`;
+    m.el.style.width  = `${r.width}px`;
+    m.el.style.height = `${r.height}px`;
+    m.el.classList.add('is-resizing');
+  }
+
+  // Per-member min-width — audio strips are allowed narrower than data panels.
+  const minWidthOf = (m) => m.kind === 'audio' ? AUDIO_MIN_W : PANEL_MIN_W;
+  // Use the ORIGIN panel's geometry for column bounds — every cohort
+  // member force-aligns to this during drag so audio strips with
+  // slightly different starting width snap into perfect column
+  // alignment as soon as the user touches the edge.
+  const colLeft  = (cohort.members.find((m) => m.el === el) || cohort.members[0]).startLeft;
+  const colRight = colLeft + (cohort.members.find((m) => m.el === el) || cohort.members[0]).startWidth;
+  const minW = Math.max(...cohort.members.map(minWidthOf));
+
+  // Bounds for the moving edge in viewport coordinates.
+  let edgeMin, edgeMax;
+  if (isWest) {
+    edgeMin = 0;
+    edgeMax = colRight - minW;
+  } else {
+    edgeMin = colLeft + minW;
+    edgeMax = window.innerWidth;
+  }
+  // Clamp against non-cohort elements that vertically intersect any member.
+  const others = getNonCohortRects(cohort);
+  for (const m of cohort.members) {
+    const myMidY = m.startTop + m.startHeight / 2;
+    const myCenterX = m.startLeft + m.startWidth / 2;
+    for (const n of others) {
+      if (n.bottom <= m.startTop + 0.5 || n.top >= m.startTop + m.startHeight - 0.5) continue;
+      const nCenter = (n.left + n.right) / 2;
+      if (isWest && nCenter < myCenterX && n.right > edgeMin) edgeMin = n.right;
+      if (!isWest && nCenter > myCenterX && n.left  < edgeMax) edgeMax = n.left;
+      void myMidY;
+    }
+  }
+  if (edgeMax < edgeMin) edgeMax = edgeMin;
+
+  const onMove = (ev) => {
+    const g = ev.altKey ? null : getGridSize();
+    let edgePos = ev.clientX;
+    if (g) edgePos = snap(edgePos, g.w);
+    edgePos = Math.max(edgeMin, Math.min(edgeMax, edgePos));
+    // Force-align every cohort member to the dragged column. Members
+    // that were misaligned (audio strip slightly narrower or shifted)
+    // snap into the column as soon as the drag begins.
+    for (const m of cohort.members) {
+      if (isWest) {
+        const newLeft  = edgePos;
+        const newWidth = colRight - newLeft;
+        m.el.style.left  = `${Math.round(newLeft)}px`;
+        m.el.style.width = `${Math.round(newWidth)}px`;
+      } else {
+        const newLeft  = colLeft;
+        const newWidth = edgePos - colLeft;
+        m.el.style.left  = `${Math.round(newLeft)}px`;
+        m.el.style.width = `${Math.round(newWidth)}px`;
+      }
+    }
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    for (const m of cohort.members) {
+      m.el.classList.remove('is-resizing');
+      persistColumnMemberGeom(m);
+    }
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// Vertical joint resize between this element and its flush neighbour.
+// `side === 'n'` looks for a flush neighbour above (the neighbour's
+// bottom touches this element's top); `'s'` looks for a flush neighbour
+// below. The pair's combined height stays constant — the shared border
+// slides under the cursor, redistributing height between top and bottom.
+// When there's no flush neighbour on that side we let the event fall
+// through so the underlying handler (title-bar drag / audio body drag)
+// can still take over — the top edge of the column-topmost panel
+// otherwise becomes a dead zone.
+function onColumnVertJointResize(e, el, side) {
+  if (_uiLocked) return;
+  const neighbor = findFlushVerticalNeighbor(el, side === 'n' ? 'up' : 'down');
+  if (!neighbor) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const top = side === 'n' ? neighbor : el;
+  const bot = side === 'n' ? el : neighbor;
+  const topRect = top.getBoundingClientRect();
+  const botRect = bot.getBoundingClientRect();
+  const topStart  = topRect.top;
+  const topStartH = topRect.height;
+  const botStartH = botRect.height;
+  const totalH    = topStartH + botStartH;
+
+  for (const el2 of [top, bot]) {
+    const r = el2.getBoundingClientRect();
+    el2.style.position = 'fixed';
+    el2.style.left   = `${r.left}px`;
+    el2.style.top    = `${r.top}px`;
+    el2.style.width  = `${r.width}px`;
+    el2.style.height = `${r.height}px`;
+    el2.classList.add('is-resizing');
+  }
+
+  const minTopH = top.classList.contains('audio-grid') ? AUDIO_MIN_H : PANEL_MIN_H;
+  const minBotH = bot.classList.contains('audio-grid') ? AUDIO_MIN_H : PANEL_MIN_H;
+  const minBorder = topStart + minTopH;
+  const maxBorder = topStart + totalH - minBotH;
+
+  const onMove = (ev) => {
+    const g = ev.altKey ? null : getGridSize();
+    let borderY = ev.clientY;
+    if (g) borderY = snap(borderY, g.h);
+    borderY = Math.max(minBorder, Math.min(maxBorder, borderY));
+    const newTopH = borderY - topStart;
+    const newBotH = totalH - newTopH;
+    top.style.height = `${Math.round(newTopH)}px`;
+    bot.style.top    = `${Math.round(borderY)}px`;
+    bot.style.height = `${Math.round(newBotH)}px`;
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    for (const el2 of [top, bot]) {
+      el2.classList.remove('is-resizing');
+      persistElementGeom(el2);
+    }
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// Element-level geom save — dispatches to panel or audio persistence
+// based on the element kind. Reads the current inline styles.
+function persistElementGeom(el) {
+  const x = parseInt(el.style.left,   10);
+  const y = parseInt(el.style.top,    10);
+  const w = parseInt(el.style.width,  10);
+  const h = parseInt(el.style.height, 10);
+  if (el.classList.contains('audio-grid')) {
+    const isOut = (el.id || '').includes('out');
+    const posKey  = isOut ? 'audioOutPos'  : 'audioInPos';
+    const sizeKey = isOut ? 'audioOutSize' : 'audioInSize';
+    const partial = {};
+    if (Number.isFinite(x) && Number.isFinite(y)) partial[posKey]  = { x, y };
+    if (Number.isFinite(w) && Number.isFinite(h)) partial[sizeKey] = { width: w, height: h };
+    if (Object.keys(partial).length) {
+      try { window.dash?.setConfig?.(partial); } catch {}
+    }
+  } else {
+    const key = panelKey(el);
+    if (!key) return;
+    const partial = {};
+    if (Number.isFinite(x)) partial.x = x;
+    if (Number.isFinite(y)) partial.y = y;
+    if (Number.isFinite(w)) partial.width  = w;
+    if (Number.isFinite(h)) partial.height = h;
+    if (Object.keys(partial).length) savePanelSize(key, partial);
+  }
+}
+
+// Cohort-member geom save (uses the member's kind hint). Same persistence
+// targets as persistElementGeom but skipping the classList check.
+function persistColumnMemberGeom(m) {
+  const x = parseInt(m.el.style.left,   10);
+  const y = parseInt(m.el.style.top,    10);
+  const w = parseInt(m.el.style.width,  10);
+  const h = parseInt(m.el.style.height, 10);
+  if (m.kind === 'audio') {
+    const posKey  = m.audioSide === 'in' ? 'audioInPos'  : 'audioOutPos';
+    const sizeKey = m.audioSide === 'in' ? 'audioInSize' : 'audioOutSize';
+    const partial = {};
+    if (Number.isFinite(x) && Number.isFinite(y)) partial[posKey]  = { x, y };
+    if (Number.isFinite(w) && Number.isFinite(h)) partial[sizeKey] = { width: w, height: h };
+    if (Object.keys(partial).length) {
+      try { window.dash?.setConfig?.(partial); } catch {}
+    }
+  } else if (m.key) {
+    const partial = {};
+    if (Number.isFinite(x)) partial.x = x;
+    if (Number.isFinite(y)) partial.y = y;
+    if (Number.isFinite(w)) partial.width  = w;
+    if (Number.isFinite(h)) partial.height = h;
+    if (Object.keys(partial).length) savePanelSize(m.key, partial);
+  }
+}
+
+// Find the element in the same column (same x, same width) whose
+// bottom is flush against this element's top (`dir === 'up'`) or whose
+// top is flush against this element's bottom (`dir === 'down'`). Tol 2 px.
+function findFlushVerticalNeighbor(el, dir) {
+  const tol = 2;
+  const r = el.getBoundingClientRect();
+  for (const candidate of document.querySelectorAll('.panel:not(.panel-combo), .audio-grid')) {
+    if (candidate === el) continue;
+    if (candidate.classList.contains('is-collapsed')) continue;
+    const cr = candidate.getBoundingClientRect();
+    if (Math.abs(cr.left  - r.left)  > tol) continue;
+    if (Math.abs(cr.width - r.width) > tol) continue;
+    if (dir === 'up'   && Math.abs(cr.bottom - r.top)    <= tol) return candidate;
+    if (dir === 'down' && Math.abs(cr.top    - r.bottom) <= tol) return candidate;
+  }
+  return null;
+}
+
+// Collect bounding rects for every visible non-cohort panel + audio-grid.
+function getNonCohortRects(cohort) {
+  const cohortSet = new Set(cohort.members.map((m) => m.el));
+  const out = [];
+  for (const el of document.querySelectorAll('.panel, .audio-grid')) {
+    if (cohortSet.has(el)) continue;
+    if (el.classList.contains('is-collapsed')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    out.push({ left: r.left, right: r.right, top: r.top, bottom: r.bottom });
+  }
+  return out;
+}
+
+// Column cohort = every panel + audio-grid living in the same
+// vertical band as `originPanel`. "Same column" is now overlap-based
+// (≥50% of the narrower element's width lies inside the origin's
+// horizontal range) instead of strict left/width equality, so an
+// audio strip that the user has shrunk/shifted slightly still joins
+// the cohort and scales with the panels above it. Vertical gaps no
+// longer break the cohort either — anything in the column travels
+// together, even if there's empty space between members.
+function buildColumnCohort(originPanel) {
+  const rOrigin = originPanel.getBoundingClientRect();
+  const cands = [];
+  for (const el of document.querySelectorAll('.panel:not(.panel-combo), .audio-grid')) {
+    if (el.classList.contains('is-collapsed')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    const overlap = Math.max(0, Math.min(r.right, rOrigin.right) - Math.max(r.left, rOrigin.left));
+    const narrowW = Math.max(1, Math.min(r.width, rOrigin.width));
+    if (overlap / narrowW < 0.5) continue;
+    cands.push({ el, top: r.top });
+  }
+  cands.sort((a, b) => a.top - b.top);
+  const members = cands.map((c) => {
+    const isAudio = c.el.classList.contains('audio-grid');
+    const id = c.el.id || '';
+    return {
+      el: c.el,
+      kind: isAudio ? 'audio' : 'panel',
+      key:  isAudio ? null : panelKey(c.el),
+      audioSide: isAudio ? (id.includes('out') ? 'out' : 'in') : null,
+    };
+  });
+  return { members };
+}
+
+document.querySelectorAll('.panel').forEach((panel) => {
   attachResize(panel);
   attachDrag(panel);
-  // Negative delay shifts each panel's phase forward in the 8s cycle.
-  const phase = -(i * 8 / Math.max(1, _allPanels.length));
-  panel.style.animationDelay = `${phase.toFixed(2)}s`;
+});
+// Audio grids + media panel go through the EXACT same path as a
+// regular panel: 8-handle resize via attachResize + header drag via
+// attachDrag. Persistence routes through their own cfg keys
+// (audio{In,Out}{Pos,Size}) inside the shared handlers when
+// panelKey is null.
+document.querySelectorAll('.audio-grid').forEach((el) => {
+  attachResize(el);
+  attachDrag(el);
 });
 
-// Collapse chevrons for notes + chat panels.
+// Side-aware collapse chevron. The arrow lives on the panel's
+// INSIDE-facing edge (right for left-column panels, left for right-
+// column panels) and collapsing pins the panel as a thin strip at
+// the corresponding OUTER edge of the viewport. The center
+// productivity panel (panel-combo) keeps its vertical fold behavior;
+// only true side panels get this treatment.
 function attachCollapseButton(panel) {
   const key = panelKey(panel);
   const header = panel.querySelector('.panel-header');
   if (!key || !header) return;
+  const isCombo = panel.classList.contains('panel-combo');
+  // Combo panel uses its own bottom-bar pill button for vertical
+  // collapse (see combo-collapse-toggle in HTML). Skip the in-header
+  // chevron entirely — collapse affordance lives at the bottom now.
+  if (isCombo) return;
   const btn = document.createElement('button');
   btn.className = 'panel-collapse-btn';
   btn.type = 'button';
@@ -4667,9 +5822,61 @@ function attachCollapseButton(panel) {
   btn.textContent = '▾';
   // Stop drag from kicking in when clicking the chevron in the (draggable) header.
   btn.addEventListener('mousedown', (e) => e.stopPropagation());
+
+  // Re-evaluate which side of the viewport this panel currently sits
+  // on. Drives the .panel-side-left / .panel-side-right class flip
+  // that CSS uses to position the arrow on the inside edge.
+  function _refreshSideClass() {
+    if (isCombo) return;
+    const r = panel.getBoundingClientRect();
+    if (r.width < 2) return;
+    const isLeft = (r.left + r.width / 2) < (window.innerWidth / 2);
+    panel.classList.toggle('panel-side-left',  isLeft);
+    panel.classList.toggle('panel-side-right', !isLeft);
+  }
+  _refreshSideClass();
+  // Refresh on viewport changes — auto-orient + monitor swaps shuffle
+  // panels between columns. Cheap enough to wire to resize directly.
+  window.addEventListener('resize', () => { clearTimeout(panel._sideTo); panel._sideTo = setTimeout(_refreshSideClass, 200); });
+
   btn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    panel.classList.toggle('is-collapsed');
+    // Combo panel keeps its original up/down collapse — the side-edge
+    // pin doesn't make sense for a center-anchored productivity pane.
+    if (isCombo) {
+      panel.classList.toggle('is-collapsed');
+      if (window.dash?.getConfig && window.dash?.setConfig) {
+        const cfg = await window.dash.getConfig();
+        const collapsed = { ...(cfg.collapsed || {}) };
+        collapsed[key] = panel.classList.contains('is-collapsed');
+        await window.dash.setConfig({ collapsed });
+      }
+      return;
+    }
+    _refreshSideClass();
+    const willCollapse = !panel.classList.contains('is-collapsed');
+    if (willCollapse) {
+      // Snapshot the live geometry so we can restore it on expand.
+      const r = panel.getBoundingClientRect();
+      panel.dataset.origLeft   = String(Math.round(r.left));
+      panel.dataset.origTop    = String(Math.round(r.top));
+      panel.dataset.origWidth  = String(Math.round(r.width));
+      panel.dataset.origHeight = String(Math.round(r.height));
+      panel.classList.add('is-collapsed');
+      const STUB = 30;
+      const isLeft = panel.classList.contains('panel-side-left');
+      const newX = isLeft ? 0 : (window.innerWidth - STUB);
+      applyPanelSize(panel, { x: newX, y: Math.round(r.top), width: STUB, height: Math.round(r.height) });
+    } else {
+      panel.classList.remove('is-collapsed');
+      const x = Number(panel.dataset.origLeft);
+      const y = Number(panel.dataset.origTop);
+      const w = Number(panel.dataset.origWidth);
+      const h = Number(panel.dataset.origHeight);
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h)) {
+        applyPanelSize(panel, { x, y, width: w, height: h });
+      }
+    }
     if (window.dash?.getConfig && window.dash?.setConfig) {
       const cfg = await window.dash.getConfig();
       const collapsed = { ...(cfg.collapsed || {}) };
@@ -4711,14 +5918,9 @@ function attachComboFoldButtons(panel) {
   screenBtn.title = 'Focus mode (always-on-top, dim backdrop)';
   screenBtn.textContent = '⛶';
 
-  // Light focus: same geometry as screen mode, but no dim backdrop and
-  // no always-on-top — the rest of the dashboard stays visible and
-  // interactive. A gentler "spread out this pane" mode.
-  const lightBtn = document.createElement('button');
-  lightBtn.className = 'panel-collapse-btn panel-fold-btn panel-fold-btn-light';
-  lightBtn.type = 'button';
-  lightBtn.title = 'Light focus (no dim, not always-on-top)';
-  lightBtn.textContent = '▢';
+  // (▢ native-fullscreen button removed — the screenBtn ⛶ focus mode
+  // covers the same "make this panel huge" need, and F11 / dash IPC
+  // still provide true OS fullscreen when wanted.)
 
   // Walk every visible non-combo panel and audio grid, classify each as
   // "left column" (center to the left of viewport center) or "right
@@ -4739,7 +5941,11 @@ function attachComboFoldButtons(panel) {
       if (center < cx) leftMax  = Math.max(leftMax,  r.right);
       else             rightMin = Math.min(rightMin, r.left);
     });
-    const GAP = 12;
+    // GAP = 0: per user spec the combo panel butts directly against
+    // the side panels on left + right. Vertical top still uses a tiny
+    // inset to clear the topbar edge if there's no inline override.
+    const GAP = 0;
+    const TOP_INSET = 12;
     // Preserve the user's manually-set top: if the panel has an
     // inline top set (from drag), use that. Otherwise fall back to
     // sitting just below the topbar like before. This is the
@@ -4749,9 +5955,7 @@ function attachComboFoldButtons(panel) {
     if (Number.isFinite(inlineTop)) {
       top = inlineTop;
     } else {
-      // The control bar is fused into this panel — no separate topbar
-      // strip to sit beneath. Just inset from the viewport top by GAP.
-      top = GAP;
+      top = TOP_INSET;
     }
     panel.style.setProperty('--combo-fold-top',   `${top}px`);
     panel.style.setProperty('--combo-fold-left',  `${Math.round(leftMax + GAP)}px`);
@@ -4763,37 +5967,31 @@ function attachComboFoldButtons(panel) {
   _updateComboFoldBoundsRef = _updateComboFoldBounds;
 
   function applyFold(mode) {
-    panel.classList.remove('is-fold-half', 'is-fold-full', 'is-fold-screen', 'is-fold-light', 'is-collapsed');
+    panel.classList.remove('is-fold-half', 'is-fold-full', 'is-fold-screen', 'is-collapsed');
     fullBtn.classList.toggle('is-active',   mode === 'full');
     screenBtn.classList.toggle('is-active', mode === 'screen');
-    lightBtn.classList.toggle('is-active',  mode === 'light');
     document.body.classList.toggle('is-combo-fold-full',   mode === 'full' || mode === 'screen');
     document.body.classList.toggle('is-combo-fold-screen', mode === 'screen');
-    document.body.classList.toggle('is-combo-fold-light',  mode === 'light');
     try { window.dash?.setAlwaysOnTop?.(mode === 'screen'); } catch {}
     panel.style.removeProperty('--fold-top');
     panel.style.removeProperty('--fold-left');
     panel.style.removeProperty('--fold-width');
     if (!mode) return;
     if (mode === 'screen') { panel.classList.add('is-fold-screen'); return; }
-    if (mode === 'light')  { panel.classList.add('is-fold-light');  return; }
     // Full / collapse modes: re-measure side panels before applying
     // the class so the fold uses fresh geometry every time.
     _updateComboFoldBounds();
     if (mode === 'full')   { panel.classList.add('is-fold-full');   return; }
   }
-  // Re-measure on window resize so a viewport change doesn't leave the
-  // panel hanging at the old offsets (only applies while a fold is on).
-  window.addEventListener('resize', () => {
-    if (panel.classList.contains('is-fold-full') ||
-        panel.classList.contains('is-collapsed')) {
-      _updateComboFoldBounds();
-    }
-  });
+  // The combo panel is always pinned horizontally now (see base CSS
+  // rule for .panel-combo), so the bounds need to refresh on EVERY
+  // viewport resize — not just when a fold class is active. Run once
+  // immediately so the CSS vars have correct values from mount.
+  _updateComboFoldBounds();
+  window.addEventListener('resize', _updateComboFoldBounds);
 
   fullBtn.addEventListener('mousedown',   (e) => e.stopPropagation());
   screenBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-  lightBtn.addEventListener('mousedown',  (e) => e.stopPropagation());
   fullBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     applyFold(panel.classList.contains('is-fold-full') ? null : 'full');
@@ -4802,12 +6000,8 @@ function attachComboFoldButtons(panel) {
     e.stopPropagation();
     applyFold(panel.classList.contains('is-fold-screen') ? null : 'screen');
   });
-  lightBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    applyFold(panel.classList.contains('is-fold-light') ? null : 'light');
-  });
 
-  // Group all four controls (collapse + full + screen + light) in a
+  // Group the remaining controls (collapse + full + screen) in a
   // single flex wrapper so they hug the right edge of the header
   // instead of being separated by the grid's auto columns.
   const group = document.createElement('span');
@@ -4815,7 +6009,6 @@ function attachComboFoldButtons(panel) {
   if (collapseBtn) group.appendChild(collapseBtn);
   group.appendChild(fullBtn);
   group.appendChild(screenBtn);
-  group.appendChild(lightBtn);
   header.appendChild(group);
 
   // Existing collapse chevron must clear any fold state so the three modes
@@ -4839,6 +6032,37 @@ function attachComboFoldButtons(panel) {
   window.addEventListener('resize', () => {
     if (panel.classList.contains('is-fold-full')) { applyFold('full'); return; }
   });
+
+  // ── Bottom-bar one-click vertical collapse ─────────────────────────
+  // Replaces the prior header chevron. The pill button sits below the
+  // panel-body/footer (see .combo-bottom-bar in HTML) so it remains
+  // visible after .is-collapsed display:none's the body+footer. The
+  // arrow inside flips on collapse via CSS.
+  const bottomToggle = panel.querySelector('#combo-collapse-toggle');
+  if (bottomToggle) {
+    // Don't let the click bubble to the panel-drag mousedown handler.
+    bottomToggle.addEventListener('mousedown', (e) => e.stopPropagation());
+    bottomToggle.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      // Clear any active fold first so this acts as a clean toggle —
+      // fold-full / fold-screen have their own positioning that the
+      // basic is-collapsed shouldn't compete with.
+      if (panel.classList.contains('is-fold-full') ||
+          panel.classList.contains('is-fold-screen')) {
+        applyFold(null);
+      }
+      panel.classList.toggle('is-collapsed');
+      // Persist so a reload reopens to the same state.
+      if (window.dash?.getConfig && window.dash?.setConfig) {
+        try {
+          const cfg = await window.dash.getConfig();
+          const collapsed = { ...(cfg.collapsed || {}) };
+          collapsed[panelKey(panel)] = panel.classList.contains('is-collapsed');
+          await window.dash.setConfig({ collapsed });
+        } catch {}
+      }
+    });
+  }
 }
 
 document.querySelectorAll('.panel-combo').forEach(attachComboFoldButtons);
@@ -4863,6 +6087,7 @@ if (comboPanel) {
   const tasksPane       = comboPanel.querySelector('.combo-pane-tasks');
   const musicPane       = comboPanel.querySelector('.combo-pane-music');
   const streamPane      = comboPanel.querySelector('.combo-pane-stream');
+  const mailPane        = comboPanel.querySelector('.combo-pane-mail');
 
   function paintComboHeader() {
     // Bail while the OFFLINE → STANDBY → ONLINE boot state machine owns
@@ -4924,6 +6149,13 @@ if (comboPanel) {
       codeEl.textContent = 'STREAM · EMBEDS';
       tagEl.textContent = '—';
       footerLabelEl.textContent = 'STREAM STATUS';
+    } else if (mode === 'mail') {
+      titleEl.innerHTML = 'PRODUCTIVITY <em>MX1</em>';
+      codeEl.textContent = 'MAIL · IMAP READER';
+      tagEl.textContent = window._mailState?.unread != null
+        ? `${window._mailState.unread} UNREAD`
+        : '—';
+      footerLabelEl.textContent = 'MAIL STATUS';
     } else {
       // Unknown mode — fall back to notes header so the chrome doesn't
       // strand with a stale label. setComboMode validates the input
@@ -4948,6 +6180,7 @@ if (comboPanel) {
     visualizer: () => import('./features/visualizer.js'),
     edit:       () => import('./features/edit.js'),
     music:      () => import('./features/music.js'),
+    mail:       () => import('./features/mail.js'),
   };
   const _lazyPaneState = {};   // mode -> loaded module
   // Seeded here (not in visualizer.js) so file deletes made in EXPLORE
@@ -4988,7 +6221,7 @@ if (comboPanel) {
   }
 
   function setComboMode(mode, persist = true) {
-    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'edit', 'browser', 'tasks', 'music', 'stream']);
+    const VALID = new Set(['notes', 'paper', 'explore', 'visualizer', 'edit', 'browser', 'tasks', 'music', 'stream', 'mail']);
     if (!VALID.has(mode)) mode = 'notes';
     comboPanel.dataset.mode = mode;
     notesPane     ?.classList.toggle('is-visible', mode === 'notes');
@@ -5000,6 +6233,7 @@ if (comboPanel) {
     tasksPane     ?.classList.toggle('is-visible', mode === 'tasks');
     musicPane     ?.classList.toggle('is-visible', mode === 'music');
     streamPane    ?.classList.toggle('is-visible', mode === 'stream');
+    mailPane      ?.classList.toggle('is-visible', mode === 'mail');
     // Music meter visibility — drives whether the rAF redraw chain runs
     // (see _bgmDrawMeter + window._bgmMaybeStartMeter in the music init
     // block). When music tab isn't visible we skip canvas work entirely;
@@ -5013,7 +6247,13 @@ if (comboPanel) {
     });
     _comboInVisualizer = (mode === 'visualizer');
     paintComboHeader();
-    if (mode === 'tasks')      refreshTasksNow();
+    if (mode === 'tasks') {
+      refreshTasksNow();
+      // Wire-graph caches data even while the pane is hidden but only
+      // paints when visible; render once on activation so the user
+      // doesn't stare at a blank chart until the next sample arrives.
+      requestAnimationFrame(drawTasksGraph);
+    }
     // Lazy combo panes (STREAM, …) — load the module on first open,
     // then activate it / deactivate any other lazy pane that was up.
     activateLazyPane(mode);
@@ -5275,7 +6515,10 @@ staggerStrobeAll();
   // arrangement, proportionally filled to whatever screen it is on. The
   // auto-orient button re-runs the identical thing on demand.
   requestAnimationFrame(async () => {
-    await applyStartupLayout();
+    // Boot picks portrait OR canonical-2-column based on the current
+    // viewport — so users on a vertical monitor land in the stacked
+    // panels-top / productivity-bottom shape from frame zero.
+    await applyAdaptiveLayout();
     // Panels are positioned — recompute the combo's collapsed-mode fold
     // bounds from the live side-panel rects, then release the boot-flicker
     // gate so panels appear at their final coords.
@@ -5338,23 +6581,23 @@ staggerStrobeAll();
   const startInterval = Number.isFinite(cfg?.terminalInterval) ? cfg.terminalInterval : 5;
   if (terminalIntervalEl) terminalIntervalEl.value = String(startInterval);
   applyTermInterval(startInterval);
-  // Shared size: both viz read 'audioVizSize'. Legacy keys 'audioInSize' /
-  // 'audioOutSize' are honored as a fallback if the user has an old config
-  // — pick whichever is largest so we never shrink something the user had
-  // already grown.
-  const legacyInSize  = cfg?.audioInSize;
-  const legacyOutSize = cfg?.audioOutSize;
-  const sharedSize = cfg?.audioVizSize || (() => {
-    if (!legacyInSize && !legacyOutSize) return null;
-    const a = legacyInSize  || legacyOutSize;
-    const b = legacyOutSize || legacyInSize;
-    return {
-      width:  Math.max(a.width  || 0, b.width  || 0) || undefined,
-      height: Math.max(a.height || 0, b.height || 0) || undefined,
-    };
-  })();
-  audioInViz?.applySavedGeom(cfg?.audioInPos,  sharedSize, cfg?.audioInMuted);
-  audioOutViz?.applySavedGeom(cfg?.audioOutPos, sharedSize, cfg?.audioOutMuted);
+  // Per-chip sizes (chips are independent now). Legacy 'audioVizSize'
+  // is honored as a fallback so a one-shot migration from the old
+  // shared-size layout doesn't visibly reset the user. Any saved size
+  // that doesn't meet the current minimum (broken values from earlier
+  // experimental builds, or chips smaller than the user can usefully
+  // grab) is treated as missing — CSS defaults will paint a usable
+  // chip and saveGeom() will write a sane size the next time the user
+  // drags.
+  const _isValidSize = (s) => s && Number.isFinite(s.width) && Number.isFinite(s.height)
+    && s.width >= 280 && s.height >= 120;
+  const _legacy = cfg?.audioVizSize;
+  const inSize  = _isValidSize(cfg?.audioInSize)  ? cfg.audioInSize
+                 : _isValidSize(_legacy) ? _legacy : null;
+  const outSize = _isValidSize(cfg?.audioOutSize) ? cfg.audioOutSize
+                 : _isValidSize(_legacy) ? _legacy : null;
+  audioInViz?.applySavedGeom(cfg?.audioInPos,  inSize,  cfg?.audioInMuted);
+  audioOutViz?.applySavedGeom(cfg?.audioOutPos, outSize, cfg?.audioOutMuted);
   audioInViz?.applySavedGain?.(cfg?.audioInGain);
   audioOutViz?.applySavedGain?.(cfg?.audioOutGain);
   // Restore the persisted visualizer rate (▲/▼ buttons set this).
@@ -5387,6 +6630,130 @@ staggerStrobeAll();
   }
 })();
 
+// ── Focus mode ──────────────────────────────────────────────────────────
+// Toggles body.is-focused: side panels + audio strips shrink → collapse
+// → slide off-screen in three staggered phases; productivity panel
+// expands to fill the viewport in the same window. Clicking the button
+// again reverses the animation via the is-unfocusing class (transition
+// rules live under both is-focused and is-unfocusing in styles.css).
+// Per-element --focus-exit-dx tells each member which way to exit:
+// left-column members translate left, right-column members translate
+// right. The exit-dx CSS vars are cleaned after the unfocus settles so
+// they don't leak into later layout passes.
+const focusModeBtnEl = document.querySelector('#focus-mode-btn');
+// Per-panel stagger window for both the collapse (enter) and expand
+// (exit) scale phases. Slide phases are synchronized across panels.
+const FOCUS_STAGGER_MS         = 700;
+const FOCUS_JITTER_MS          = 220;
+const FOCUS_COLLAPSE_ANIM_MS   = 400;   // matches the focus-collapse-sy keyframe duration
+const FOCUS_SLIDE_OFF_ANIM_MS  = 500;   // matches the focus-slide-off-tx keyframe duration
+const FOCUS_EXPAND_ANIM_MS     = 1100;  // matches focus-expand-tx / focus-expand-sy duration
+const FOCUS_FLICKER_MS         = 1300;  // brightness flicker duration
+const FOCUS_FLICKER_VARIANTS   = ['unfold-flicker-1', 'unfold-flicker-2', 'unfold-flicker-3'];
+let _focusUnfocusTimer = 0;
+function setFocusMode(on) {
+  clearTimeout(_focusUnfocusTimer);
+  const targets = Array.from(document.querySelectorAll('.panel:not(.panel-combo), .audio-grid'));
+  // Shuffle so the cascade order doesn't track DOM order.
+  for (let i = targets.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [targets[i], targets[j]] = [targets[j], targets[i]];
+  }
+  if (on) {
+    // Direction the panel exits — refreshed every enter so a panel
+    // that's been dragged into the opposite half of the screen still
+    // leaves via the correct edge.
+    const vpW = window.innerWidth;
+    targets.forEach((el) => {
+      const r = el.getBoundingClientRect();
+      const center = r.left + r.width / 2;
+      const dx = center < vpW / 2 ? -vpW : vpW;
+      el.style.setProperty('--focus-exit-dx', `${dx}px`);
+    });
+    // Per-panel collapse delay. The slide-off delay is the SAME for
+    // every panel and is calculated to land just after the slowest
+    // panel finishes collapsing, so all panels move off-screen
+    // together once every one is flat.
+    let maxCollapseDelay = 0;
+    targets.forEach((el, i) => {
+      const base   = targets.length > 1 ? (i / (targets.length - 1)) * FOCUS_STAGGER_MS : 0;
+      const jitter = (Math.random() - 0.5) * FOCUS_JITTER_MS;
+      const delay  = Math.max(0, Math.round(base + jitter));
+      if (delay > maxCollapseDelay) maxCollapseDelay = delay;
+      el.style.setProperty('--collapse-delay-ms', `${delay}ms`);
+    });
+    const slideOffDelay = maxCollapseDelay + FOCUS_COLLAPSE_ANIM_MS;
+    targets.forEach((el) => {
+      el.style.setProperty('--slide-off-delay-ms', `${slideOffDelay}ms`);
+    });
+    document.body.classList.remove('is-unfocusing');
+    document.body.classList.add('is-focused');
+    focusModeBtnEl?.classList.add('is-active');
+  } else {
+    // Restore the canonical 2-column layout before the unfold so the
+    // panels reappear at their "defaulted view" positions. Portrait
+    // viewports fall through to the stacked portrait layout instead.
+    try { applyAdaptiveLayout(); } catch (err) { console.warn('[focus-mode] applyAdaptiveLayout failed:', err); }
+    // Per-panel expand delay (slide-back + grow ride on the same
+    // delay so each panel does its own combined translate-then-grow
+    // motion staggered against the others). Plus a random flicker
+    // variant per panel — boot wake-up styling.
+    let maxExpandDelay = 0;
+    targets.forEach((el, i) => {
+      const base   = targets.length > 1 ? (i / (targets.length - 1)) * FOCUS_STAGGER_MS : 0;
+      const jitter = (Math.random() - 0.5) * FOCUS_JITTER_MS;
+      const delay  = Math.max(0, Math.round(base + jitter));
+      if (delay > maxExpandDelay) maxExpandDelay = delay;
+      el.style.setProperty('--expand-delay-ms', `${delay}ms`);
+      el.style.setProperty(
+        '--unfold-flicker',
+        FOCUS_FLICKER_VARIANTS[Math.floor(Math.random() * FOCUS_FLICKER_VARIANTS.length)],
+      );
+    });
+    document.body.classList.add('is-unfocusing');
+    document.body.classList.remove('is-focused');
+    focusModeBtnEl?.classList.remove('is-active');
+    // Cleanup after the slowest panel finishes both its expand AND
+    // its flicker — whichever is later. +100 ms guard.
+    const lastExpand  = maxExpandDelay + FOCUS_EXPAND_ANIM_MS;
+    const lastFlicker = maxExpandDelay + FOCUS_FLICKER_MS;
+    const totalMs     = Math.max(lastExpand, lastFlicker) + 100;
+    _focusUnfocusTimer = setTimeout(() => {
+      document.body.classList.remove('is-unfocusing');
+      document.querySelectorAll('.panel:not(.panel-combo), .audio-grid').forEach((el) => {
+        el.style.removeProperty('--focus-exit-dx');
+        el.style.removeProperty('--collapse-delay-ms');
+        el.style.removeProperty('--slide-off-delay-ms');
+        el.style.removeProperty('--expand-delay-ms');
+        el.style.removeProperty('--unfold-flicker');
+      });
+    }, totalMs);
+  }
+}
+focusModeBtnEl?.addEventListener('click', () => {
+  setFocusMode(!document.body.classList.contains('is-focused'));
+  // Toggle pattern: now-ON → 'click' (activate), now-OFF → 'close' (dismiss).
+  try { playSfx?.(document.body.classList.contains('is-focused') ? 'click' : 'close'); } catch {}
+});
+
+// Refresh button — reloads the renderer in place. Picks up CSS / JS edits
+// during dev iteration without killing the main process (so background
+// services like the audio loopback, screen-record encoder, mirror capture,
+// and any open BrowserViews stay alive across the reload).
+document.querySelector('#app-refresh-btn')?.addEventListener('click', () => {
+  try { playSfx?.('click'); } catch {}
+  location.reload();
+});
+
+// Restart button — full Electron relaunch (main + renderer). Use this when
+// changes need a fresh process: main.js edits, preload.js edits, anything
+// that's set once at BrowserWindow creation. The handler in main.js calls
+// app.relaunch() + app.exit(0), so saved cfg + window placement come back.
+document.querySelector('#app-restart-btn')?.addEventListener('click', () => {
+  try { playSfx?.('confirm'); } catch {}
+  if (window.dash?.appRelaunch) window.dash.appRelaunch().catch(() => {});
+});
+
 // Close button — quits the Electron process. In browser mode (no preload),
 // closing a tab is the user's job; we just blur the URL bar so nothing
 // silently steals their input.
@@ -5406,7 +6773,8 @@ document.querySelector('#lock-ui-btn')?.addEventListener('click', async () => {
   if (window.dash?.setConfig) {
     try { await window.dash.setConfig({ uiLocked: _uiLocked }); } catch {}
   }
-  playSfx(_uiLocked ? 'confirm' : 'click');
+  // Toggle: now-locked → 'click' (engaged), now-unlocked → 'close' (released).
+  playSfx(_uiLocked ? 'click' : 'close');
 });
 (async () => {
   const cfg = await window.dash?.getConfig?.() || {};
@@ -5482,7 +6850,57 @@ document.querySelector('#recall-panels-btn')?.addEventListener('click', async ()
 // gaps), and the audio visualizers as an equal-height strip flush at the
 // bottom of each column. It is fully computed, so it tiles perfectly at any
 // screen size / aspect ratio. Both startup and the auto-orient button run it.
-async function applyStartupLayout() {
+// Two-column layout helper — places every side panel + audio strip + the
+// combo into a left/right column arrangement, with the side columns at
+// `colWFraction` of the viewport width. Used by both applyStartupLayout
+// (canonical, 21%) and applyCompactSideLayout (narrow, 8.5%). The vertical
+// weights stay constant — only the column width changes.
+//
+//   ┌─ clock ──┬──────────────────────┬─ weather ──┐
+//   ├─ cpu ────┤                      ├─ thermal ──┤
+//   ├─ network ┤    productivity      ├─ gpu ──────┤
+//   ├─ ram ────┤                      ├─ storage ──┤
+//   ├──────────┤                      ├─ driveio ──┤
+//   └─ audio-in┴──────────────────────┴─ audio-out ┘
+// Canonical panel weights (proportional heights at 3840×2160). Keyed by
+// the panel-* class suffix. Used by every preset layout so the per-panel
+// height ratio stays consistent across canonical/medium/compact AND when
+// the user has swapped sides — the weight always travels with the panel.
+const _PANEL_WEIGHTS = {
+  clock: 664, cpu: 454, network: 384, ram: 420,
+  weather: 358, thermal: 447, gpu: 372, storage: 358, driveio: 387,
+};
+const _DEFAULT_LEFT_KEYS  = ['clock', 'cpu', 'network', 'ram'];
+const _DEFAULT_RIGHT_KEYS = ['weather', 'thermal', 'gpu', 'storage', 'driveio'];
+
+// Detect which panels currently live on the LEFT vs the RIGHT side of
+// the viewport (by panel-centre x). Returns null if the split isn't
+// clear (one side empty) — caller falls back to the canonical defaults.
+// This lets auto-orient respect a user's hand-arranged side swaps:
+// dragging WEATHER over to the left and CLOCK over to the right makes
+// the next auto-orient press lay them out that way too.
+function _detectColumnLayout() {
+  const midX = window.innerWidth / 2;
+  const left  = [];
+  const right = [];
+  for (const key of Object.keys(_PANEL_WEIGHTS)) {
+    const el = document.querySelector(`.panel-${key}`);
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const cx = r.left + r.width / 2;
+    (cx < midX ? left : right).push({ key, y: r.top });
+  }
+  if (!left.length || !right.length) return null;
+  left .sort((a, b) => a.y - b.y);
+  right.sort((a, b) => a.y - b.y);
+  return {
+    leftPanels:  left .map((p) => [p.key, _PANEL_WEIGHTS[p.key]]),
+    rightPanels: right.map((p) => [p.key, _PANEL_WEIGHTS[p.key]]),
+  };
+}
+
+async function _applyTwoColumnLayout(colWFraction) {
   const vpW = window.innerWidth;
   const vpH = window.innerHeight;
   // The topbar is now fused into the Productivity panel as its first
@@ -5491,23 +6909,25 @@ async function applyStartupLayout() {
   const top = 0;
   const availH = vpH - top;
 
-  // Side columns: ~21% of the width each, flush to the screen edges;
-  // PRODUCTIVITY fills the middle. No outer margins, no column gaps.
-  const colW    = Math.round(vpW * 0.211);
+  const colW    = Math.round(vpW * colWFraction);
   const centerW = vpW - colW * 2;
   const leftX   = 0;
   const rightX  = vpW - colW;
 
-  // The audio visualizers share an equal-height strip reserved at the
-  // column bottoms. The rest of the height is split among the stacked
-  // panels by weight (keeps the designed look — clock taller, etc.) with
-  // zero gaps, so each column fills top-to-bottom exactly.
-  const audioH    = Math.round(availH * 0.11);
+  // Audio strip height stays at the canonical 238/2160 = 11.02% so it
+  // doesn't get squashed when the columns get narrower.
+  const audioH    = Math.round(availH * (238 / 2160));
   const panelArea = availH - audioH;
   const audioY    = top + panelArea;
 
-  const leftPanels  = [['clock', 380], ['cpu', 260], ['network', 220], ['ram', 240]];
-  const rightPanels = [['weather', 240], ['thermal', 300], ['gpu', 250], ['storage', 240], ['driveio', 260]];
+  // Weight = each panel's canonical height at 3840×2160. The DOM-driven
+  // detector lets a user swap WEATHER↔CLOCK (or any other pair) and
+  // have auto-orient keep that arrangement instead of forcing the
+  // panels back to canonical positions. Fallback to canonical when
+  // detection can't find a clear two-column split (e.g. first boot).
+  const detected = _detectColumnLayout();
+  const leftPanels  = detected?.leftPanels  || _DEFAULT_LEFT_KEYS .map((k) => [k, _PANEL_WEIGHTS[k]]);
+  const rightPanels = detected?.rightPanels || _DEFAULT_RIGHT_KEYS.map((k) => [k, _PANEL_WEIGHTS[k]]);
 
   const placePanel = async (key, x, y, w, h) => {
     const panel = document.querySelector(`.panel-${key}`);
@@ -5520,8 +6940,9 @@ async function applyStartupLayout() {
     const viz = side === 'in' ? audioInViz : audioOutViz;
     viz?.applySavedGeom?.({ x, y }, { width: w, height: h });
     if (window.dash?.setConfig) {
-      const posKey = side === 'in' ? 'audioInPos' : 'audioOutPos';
-      try { await window.dash.setConfig({ [posKey]: { x, y }, audioVizSize: { width: w, height: h } }); } catch {}
+      const posKey  = side === 'in' ? 'audioInPos'  : 'audioOutPos';
+      const sizeKey = side === 'in' ? 'audioInSize' : 'audioOutSize';
+      try { await window.dash.setConfig({ [posKey]: { x, y }, [sizeKey]: { width: w, height: h } }); } catch {}
     }
   };
   // Stack a column's panels flush, from the topbar down to the audio strip.
@@ -5545,12 +6966,441 @@ async function applyStartupLayout() {
   await placeAudio('out', rightX, audioY, colW, audioH);
 }
 
-// Auto-orient / "organize" button — re-applies STARTUP_LAYOUT scaled to the
-// current viewport. Always restores the exact canonical arrangement, filled
-// to the screen, with no overlaps.
+// Canonical "defaulted view" — 21% side columns, productivity middle.
+// Side-column width presets for the auto-orient cycle. CANONICAL =
+// dashboard's "defaulted view" (21% sides). MEDIUM = mid-narrow state
+// good for keeping a wider productivity area while still reading
+// side panels at-a-glance. COMPACT = snap-to-sides minimum.
+const LAYOUT_CANONICAL_FRAC = 810 / 3840;  // 0.2109
+const LAYOUT_MEDIUM_FRAC    = 0.13;
+const LAYOUT_COMPACT_FRAC   = 0.085;
+
+async function applyStartupLayout() {
+  await _applyTwoColumnLayout(LAYOUT_CANONICAL_FRAC);
+}
+
+async function applyMediumSideLayout() {
+  await _applyTwoColumnLayout(LAYOUT_MEDIUM_FRAC);
+}
+
+async function applyCompactSideLayout() {
+  await _applyTwoColumnLayout(LAYOUT_COMPACT_FRAC);
+}
+
+// CLAMP-only alignment used by the auto-orient BUTTON. The dashboard
+// has three regions: LEFT band [0, colW], CENTRE band [colW, vpW-colW]
+// reserved for the productivity (combo) panel, RIGHT band
+// [vpW-colW, vpW]. This pass walks every panel and only adjusts its
+// geometry if it's poking outside the band it belongs to —
+//   • side panels: clamped into LEFT or RIGHT band (whichever their
+//     centre x is closer to), width capped to colW
+//   • combo: clamped into the CENTRE band, width capped to centerW
+// Panels already inside their band are LEFT EXACTLY where the user
+// dragged them. Y and height are never touched.
+async function _alignPanelsToCols(colWFraction) {
+  const vpW = window.innerWidth;
+  const colW    = Math.round(vpW * colWFraction);
+  const centerW = vpW - colW * 2;
+  const midX    = vpW / 2;
+
+  // Clamp `panel` so its horizontal extent lies fully inside
+  // [bandMin, bandMax]. Width is also capped to the band so nothing
+  // ever pokes past — but if the panel already fits, no change.
+  const clampToBand = async (panel, bandMin, bandMax) => {
+    const r = panel.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return;
+    const bandW = bandMax - bandMin;
+    let x = Math.round(r.left);
+    let w = Math.round(r.width);
+    const y = Math.round(r.top);
+    const h = Math.round(r.height);
+    if (w > bandW) w = bandW;
+    if (x < bandMin) x = bandMin;
+    if (x + w > bandMax) x = bandMax - w;
+    // Nothing to do — panel was already inside the band.
+    if (x === Math.round(r.left) && w === Math.round(r.width)) return;
+    applyPanelSize(panel, { x, y, width: w, height: h });
+    const key = panelKey(panel);
+    if (key) { try { await savePanelSize(key, { x, y, width: w, height: h }); } catch {} }
+  };
+
+  // Side panels: pick the band whose centre is closer to the panel's
+  // own centre, then clamp into it. A panel sitting fully in the
+  // middle gets pushed to whichever side it's nearest.
+  for (const panel of document.querySelectorAll('.panel:not(.panel-combo)')) {
+    const r = panel.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const cx = r.left + r.width / 2;
+    if (cx < midX) await clampToBand(panel, 0, colW);
+    else           await clampToBand(panel, vpW - colW, vpW);
+  }
+
+  // Productivity (combo) panel — clamped into the centre band only.
+  const combo = document.querySelector('.panel-combo');
+  if (combo) await clampToBand(combo, colW, vpW - colW);
+
+  // Audio strips — same clamp rule as side panels, but routed through
+  // the audio viz geometry persistence path.
+  for (const side of ['in', 'out']) {
+    const viz = side === 'in' ? audioInViz : audioOutViz;
+    const el  = document.querySelector(side === 'in' ? '#audio-in-grid' : '#audio-out-grid');
+    if (!el || !viz?.applySavedGeom) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const cx = r.left + r.width / 2;
+    const [bandMin, bandMax] = (cx < midX) ? [0, colW] : [vpW - colW, vpW];
+    const bandW = bandMax - bandMin;
+    let x = Math.round(r.left);
+    let w = Math.round(r.width);
+    const y = Math.round(r.top);
+    const h = Math.round(r.height);
+    if (w > bandW) w = bandW;
+    if (x < bandMin) x = bandMin;
+    if (x + w > bandMax) x = bandMax - w;
+    if (x === Math.round(r.left) && w === Math.round(r.width)) continue;
+    viz.applySavedGeom({ x, y }, { width: w, height: h });
+    if (window.dash?.setConfig) {
+      const posKey  = side === 'in' ? 'audioInPos'  : 'audioOutPos';
+      const sizeKey = side === 'in' ? 'audioInSize' : 'audioOutSize';
+      try { await window.dash.setConfig({ [posKey]: { x, y }, [sizeKey]: { width: w, height: h } }); } catch {}
+    }
+  }
+  void centerW;
+}
+
+async function alignCanonical() { await _alignPanelsToCols(LAYOUT_CANONICAL_FRAC); }
+async function alignMedium()    { await _alignPanelsToCols(LAYOUT_MEDIUM_FRAC);    }
+async function alignCompact()   { await _alignPanelsToCols(LAYOUT_COMPACT_FRAC);   }
+
+// Portrait / vertical viewport layout.
+// Top half of the screen = all status panels (2 columns) + audio
+// strips at the bottom of that half. Bottom half = productivity
+// (combo) panel full width. Triggered whenever vpH > vpW so the
+// dashboard reads sensibly on rotated / vertical monitors.
+async function applyPortraitLayout() {
+  const vpW = window.innerWidth;
+  const vpH = window.innerHeight;
+  const topH = Math.round(vpH * 0.5);          // upper half = panels
+  const bottomY = topH;
+  const bottomH = vpH - topH;                  // lower half = productivity
+
+  // Inside the top half: two equal-width columns of panels + audio
+  // strips along the bottom of that half. Audio takes ~12% of the
+  // top half (same proportion as the canonical layout's 238/2160).
+  const colW = Math.floor(vpW / 2);
+  const leftX = 0;
+  const rightX = vpW - colW;
+  const audioH = Math.max(80, Math.round(topH * 0.12));
+  const panelArea = topH - audioH;
+  const audioY = panelArea;
+
+  // Honour any user-driven side swap (WEATHER↔CLOCK, etc.) when
+  // entering portrait too. Falls back to canonical defaults if no
+  // panel is in the DOM yet.
+  const detected = _detectColumnLayout();
+  const leftPanels  = detected?.leftPanels  || _DEFAULT_LEFT_KEYS .map((k) => [k, _PANEL_WEIGHTS[k]]);
+  const rightPanels = detected?.rightPanels || _DEFAULT_RIGHT_KEYS.map((k) => [k, _PANEL_WEIGHTS[k]]);
+
+  const placePanel = async (key, x, y, w, h) => {
+    const panel = document.querySelector(`.panel-${key}`);
+    if (!panel) return;
+    clearPanelSize(panel);
+    applyPanelSize(panel, { x, y, width: w, height: h });
+    await savePanelSize(key, { x, y, width: w, height: h });
+  };
+  const placeAudio = async (side, x, y, w, h) => {
+    const viz = side === 'in' ? audioInViz : audioOutViz;
+    viz?.applySavedGeom?.({ x, y }, { width: w, height: h });
+    if (window.dash?.setConfig) {
+      const posKey  = side === 'in' ? 'audioInPos'  : 'audioOutPos';
+      const sizeKey = side === 'in' ? 'audioInSize' : 'audioOutSize';
+      try { await window.dash.setConfig({ [posKey]: { x, y }, [sizeKey]: { width: w, height: h } }); } catch {}
+    }
+  };
+  const stackPanels = async (panels, x) => {
+    const total = panels.reduce((s, [, wt]) => s + wt, 0);
+    let y = 0;
+    for (let i = 0; i < panels.length; i++) {
+      const [key, wt] = panels[i];
+      const h = (i === panels.length - 1) ? (audioY - y) : Math.round((wt / total) * panelArea);
+      await placePanel(key, x, y, colW, h);
+      y += h;
+    }
+  };
+
+  await placePanel('combo', 0, bottomY, vpW, bottomH);
+  await stackPanels(leftPanels,  leftX);
+  await stackPanels(rightPanels, rightX);
+  await placeAudio('in',  leftX,  audioY, colW, audioH);
+  await placeAudio('out', rightX, audioY, colW, audioH);
+}
+
+// Pick the right top-level layout for the current viewport. Used by
+// boot, focus-mode exit, monitor-switch, and the resize debouncer so
+// every code path that "redo the layout" goes through one decision.
+function _viewportIsPortrait() {
+  return window.innerHeight > window.innerWidth;
+}
+// True when the dashboard is on a 1080p-or-lower display. The CSS
+// rule for body.is-low-res zooms each panel's contents to 70%, so the
+// 4K-tuned text density reads correctly on smaller monitors without
+// any explicit user toggle.
+function _viewportIsLowRes() {
+  return Math.min(window.innerWidth, window.innerHeight) <= 1080;
+}
+function _applyResolutionScale() {
+  document.body.classList.toggle('is-low-res', _viewportIsLowRes());
+}
+// Apply every saved per-panel geometry (cfg.panelSizes) onto the live
+// DOM. Returns true when at least one entry was applied — caller uses
+// that to skip the canonical-default layout pass on boot so the user's
+// arrangement isn't overwritten.
+async function restoreSavedPanelGeometry() {
+  if (!window.dash?.getConfig) return false;
+  let cfg;
+  try { cfg = await window.dash.getConfig(); } catch { return false; }
+  const sizes = cfg?.panelSizes || {};
+  let count = 0;
+  for (const [key, entry] of Object.entries(sizes)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const panel = document.querySelector(`.panel-${key}`);
+    if (!panel) continue;
+    if (!Number.isFinite(entry.x) || !Number.isFinite(entry.y)) continue;
+    if (!Number.isFinite(entry.width) || !Number.isFinite(entry.height)) continue;
+    clearPanelSize(panel);
+    applyPanelSize(panel, entry);
+    count++;
+  }
+  // Audio strips persist their geometry under audioInPos/audioOutPos +
+  // audioInSize/audioOutSize. Restore those too so the bus strips
+  // return to where the user dragged them, not the canonical defaults.
+  for (const side of ['in', 'out']) {
+    const pos  = cfg?.[side === 'in' ? 'audioInPos'  : 'audioOutPos'];
+    const size = cfg?.[side === 'in' ? 'audioInSize' : 'audioOutSize'];
+    if (!pos || !size) continue;
+    if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) continue;
+    if (!Number.isFinite(size.width) || !Number.isFinite(size.height)) continue;
+    const viz = side === 'in' ? audioInViz : audioOutViz;
+    viz?.applySavedGeom?.({ x: pos.x, y: pos.y }, { width: size.width, height: size.height });
+    count++;
+  }
+  return count > 0;
+}
+
+async function applyAdaptiveLayout() {
+  _applyResolutionScale();
+  // First-boot or wiped config → fall through to the canonical default
+  // arrangement. Otherwise restore each panel where the user last left
+  // it — a previous "auto-orient on every boot" cascade was undoing
+  // every drag the user made.
+  if (await restoreSavedPanelGeometry()) return;
+  if (_viewportIsPortrait()) await applyPortraitLayout();
+  else                       await applyStartupLayout();
+}
+
+// Re-apply the user's CURRENT layout preset against the current
+// viewport. Used when the viewport changes underneath the panels —
+// display switch, window resize, monitor rotation. Portrait viewports
+// always get the stacked portrait layout (panels top, productivity
+// bottom) regardless of which landscape preset the user had selected.
+async function reapplyCurrentLayout() {
+  try {
+    _applyResolutionScale();
+    if (_viewportIsPortrait()) { await applyPortraitLayout(); return; }
+    const clock = document.querySelector('.panel-clock');
+    let frac = LAYOUT_CANONICAL_FRAC;
+    if (clock) {
+      const cur = clock.getBoundingClientRect().width / Math.max(1, window.innerWidth);
+      const midCanMed = (LAYOUT_CANONICAL_FRAC + LAYOUT_MEDIUM_FRAC) / 2;
+      const midMedCom = (LAYOUT_MEDIUM_FRAC + LAYOUT_COMPACT_FRAC) / 2;
+      if      (cur > midCanMed) frac = LAYOUT_CANONICAL_FRAC;
+      else if (cur > midMedCom) frac = LAYOUT_MEDIUM_FRAC;
+      else                      frac = LAYOUT_COMPACT_FRAC;
+    }
+    await _applyTwoColumnLayout(frac);
+  } catch (err) {
+    console.warn('[reapply-layout] failed:', err?.message || err);
+  }
+}
+
+// Debounced viewport-change re-layout. Catches every path that
+// changes window dimensions — manual drag-resize, fullscreen toggle,
+// monitor switch via the display strip, OS resolution change. Skipped
+// while focus mode's transform is in flight (the focus animation
+// owns panel transforms during its 1.6 s window).
+let _reapplyLayoutTimer = 0;
+window.addEventListener('resize', () => {
+  clearTimeout(_reapplyLayoutTimer);
+  _reapplyLayoutTimer = setTimeout(() => {
+    if (document.body.classList.contains('is-focused') ||
+        document.body.classList.contains('is-unfocusing')) return;
+    reapplyCurrentLayout();
+  }, 200);
+});
+
+// Auto-orient — three-state cycle. Reads the current side-panel width,
+// snaps the layout to the NEXT preset in the cycle:
+//   canonical (21%) → medium (13%) → compact (8.5%) → canonical → …
+// A custom layout that doesn't match any preset is bucketed by its
+// nearest midpoint, so the button always acts as "advance to the next
+// step from where I am now".
 document.querySelector('#auto-orient-btn')?.addEventListener('click', async () => {
-  try { await applyStartupLayout(); } catch (err) { console.warn('[auto-orient] failed:', err); }
+  try {
+    // Portrait viewport — the 3-preset landscape cycle doesn't apply
+    // (the layout is panels-top / productivity-bottom). Re-snap to it
+    // so the button acts as a "fix my layout" affordance.
+    if (_viewportIsPortrait()) { await applyPortraitLayout(); playSfx('confirm'); return; }
+    // FORMAT-ONLY align (not a full re-layout): snap each panel's
+    // width to the next preset's column width and pull it flush to
+    // its side, but keep y + height where the user has placed them.
+    // A panel the user dragged into a specific stack position stays
+    // in that stack position — only the side-column horizontal
+    // alignment is enforced.
+    const probe = document.querySelector('.panel-clock')
+              || document.querySelector('.panel:not(.panel-combo)');
+    let next = alignMedium;
+    if (probe) {
+      const frac = probe.getBoundingClientRect().width / window.innerWidth;
+      const midCanMed = (LAYOUT_CANONICAL_FRAC + LAYOUT_MEDIUM_FRAC) / 2; // ~0.171
+      const midMedCom = (LAYOUT_MEDIUM_FRAC + LAYOUT_COMPACT_FRAC) / 2;   // ~0.108
+      if      (frac > midCanMed) next = alignMedium;
+      else if (frac > midMedCom) next = alignCompact;
+      else                       next = alignCanonical;
+    }
+    await next();
+  } catch (err) {
+    console.warn('[auto-orient] failed:', err);
+  }
   playSfx('confirm');
+});
+
+// ── Align edges ──────────────────────────────────────────────────────────
+// Respects the current layout but snaps every panel edge that's within
+// ALIGN_TOLERANCE of another panel edge to a shared coordinate, so panels
+// that have drifted a couple of cells out of sync land flush against each
+// other (and panels with their own column line up to the same gridline).
+//
+// Algorithm:
+//   1. Collect every visible panel + both audio visualizers as items with
+//      {x, y, w, h}. All four edges (left/top/right/bottom) participate —
+//      we don't distinguish "lefts cluster with lefts" because the goal is
+//      the same: shared X coordinates. A panel's right edge clustering
+//      with another panel's left edge means they butt flush.
+//   2. Sort + cluster the X edges (lefts + rights together) using a simple
+//      single-link scan: an edge joins the current cluster if it's within
+//      ALIGN_TOLERANCE of the cluster's last edge. Same for Y edges.
+//   3. Each cluster picks a representative = mean of its members, snapped
+//      to SNAP_CELL so the result still lands on the bg-grid.
+//   4. For each item, look up the new X for its left + right (and Y for
+//      top + bottom), compute width = newRight - newLeft, then re-apply
+//      and persist. width/height floor at SNAP_CELL*8 (160px) so a freak
+//      cluster collapse can't shrink a panel to nothing.
+async function alignPanelEdges() {
+  const ALIGN_TOLERANCE = SNAP_CELL * 2;   // 40px — two grid cells
+  const MIN_DIM         = SNAP_CELL * 8;   // 160px — minimum panel side
+
+  const items = [];
+  document.querySelectorAll('.panel').forEach((panel) => {
+    if (panel.classList.contains('is-collapsed')) return;
+    const x = parseInt(panel.style.left,   10);
+    const y = parseInt(panel.style.top,    10);
+    const w = parseInt(panel.style.width,  10);
+    const h = parseInt(panel.style.height, 10);
+    if (![x, y, w, h].every(Number.isFinite)) return;
+    const key = panelKey(panel);
+    if (!key) return;
+    items.push({ kind: 'panel', el: panel, key, x, y, w, h });
+  });
+  for (const side of ['in', 'out']) {
+    const viz = side === 'in' ? audioInViz : audioOutViz;
+    const el  = document.getElementById(side === 'in' ? 'audio-in-grid' : 'audio-out-grid');
+    if (!viz || !el) continue;
+    const x = parseInt(el.style.left,   10);
+    const y = parseInt(el.style.top,    10);
+    const w = parseInt(el.style.width,  10);
+    const h = parseInt(el.style.height, 10);
+    if (![x, y, w, h].every(Number.isFinite)) continue;
+    items.push({ kind: 'audio', viz, side, x, y, w, h });
+  }
+  if (items.length < 2) return;
+
+  // Cluster a flat list of edge values; return a Map<oldEdge, newEdge>.
+  const buildClusterMap = (vals, tol) => {
+    const sorted = [...new Set(vals)].sort((a, b) => a - b);
+    const groups = [[sorted[0]]];
+    for (let i = 1; i < sorted.length; i++) {
+      const last = groups[groups.length - 1];
+      if (sorted[i] - last[last.length - 1] <= tol) last.push(sorted[i]);
+      else groups.push([sorted[i]]);
+    }
+    const map = new Map();
+    for (const g of groups) {
+      const mean = g.reduce((s, v) => s + v, 0) / g.length;
+      const rep  = Math.round(mean / SNAP_CELL) * SNAP_CELL;
+      for (const v of g) map.set(v, rep);
+    }
+    return map;
+  };
+
+  const xMap = buildClusterMap(items.flatMap((it) => [it.x, it.x + it.w]), ALIGN_TOLERANCE);
+  const yMap = buildClusterMap(items.flatMap((it) => [it.y, it.y + it.h]), ALIGN_TOLERANCE);
+
+  for (const it of items) {
+    const newLeft   = xMap.get(it.x);
+    const newRight  = xMap.get(it.x + it.w);
+    const newTop    = yMap.get(it.y);
+    const newBot    = yMap.get(it.y + it.h);
+    const newW      = Math.max(MIN_DIM, newRight - newLeft);
+    const newH      = Math.max(MIN_DIM, newBot   - newTop);
+    if (it.kind === 'panel') {
+      applyPanelSize(it.el, { x: newLeft, y: newTop, width: newW, height: newH });
+      await savePanelSize(it.key, { x: newLeft, y: newTop, width: newW, height: newH });
+    } else {
+      it.viz?.applySavedGeom?.({ x: newLeft, y: newTop }, { width: newW, height: newH });
+      if (window.dash?.setConfig) {
+        const posKey  = it.side === 'in' ? 'audioInPos'  : 'audioOutPos';
+        const sizeKey = it.side === 'in' ? 'audioInSize' : 'audioOutSize';
+        try { await window.dash.setConfig({ [posKey]: { x: newLeft, y: newTop }, [sizeKey]: { width: newW, height: newH } }); } catch {}
+      }
+    }
+  }
+}
+
+document.querySelector('#align-edges-btn')?.addEventListener('click', async () => {
+  try { await alignPanelEdges(); } catch (err) { console.warn('[align-edges] failed:', err); }
+  playSfx('confirm');
+});
+
+// Store Config — explicit "lock in current state" gesture. Calls the
+// same _snapshotLayoutToConfig the beforeunload handler uses so every
+// panel, audio chip, webcam float, and terminal position lands on disk
+// in one IPC; theme + bgPattern are auto-saved on change but written
+// again here so the button serves as a single source of truth for
+// "this is the layout I want next time the app starts". Briefly flashes
+// the button so the click registers visibly.
+document.querySelector('#store-config-btn')?.addEventListener('click', async () => {
+  const btn = document.querySelector('#store-config-btn');
+  try {
+    _snapshotLayoutToConfig();
+    if (window.dash?.setConfig) {
+      const theme   = document.documentElement.getAttribute('data-theme') || null;
+      const bgPattern = document.body.getAttribute('data-bg-pattern') || 'grid';
+      await window.dash.setConfig({ theme, bgPattern });
+    }
+    if (btn) {
+      btn.classList.add('is-active');
+      const prevTitle = btn.title;
+      btn.title = 'Layout stored';
+      setTimeout(() => {
+        btn.classList.remove('is-active');
+        btn.title = prevTitle;
+      }, 900);
+    }
+    playSfx('confirm');
+  } catch (err) {
+    console.warn('[store-config] failed:', err);
+    playSfx('error');
+  }
 });
 
 // ── Save-on-close ────────────────────────────────────────────────────────
@@ -5597,13 +7447,16 @@ function _snapshotLayoutToConfig() {
     const w = parseInt(audioOut.style.width,  10);
     const h = parseInt(audioOut.style.height, 10);
     if (Number.isFinite(x) && Number.isFinite(y)) partial.audioOutPos = { x, y };
-    if (Number.isFinite(w) && Number.isFinite(h)) partial.audioVizSize = { width: w, height: h };
+    if (Number.isFinite(w) && Number.isFinite(h)) partial.audioOutSize = { width: w, height: h };
   }
   const audioIn = document.querySelector('#audio-in-grid');
   if (audioIn) {
-    const x = parseInt(audioIn.style.left, 10);
-    const y = parseInt(audioIn.style.top,  10);
+    const x = parseInt(audioIn.style.left,   10);
+    const y = parseInt(audioIn.style.top,    10);
+    const w = parseInt(audioIn.style.width,  10);
+    const h = parseInt(audioIn.style.height, 10);
     if (Number.isFinite(x) && Number.isFinite(y)) partial.audioInPos = { x, y };
+    if (Number.isFinite(w) && Number.isFinite(h)) partial.audioInSize = { width: w, height: h };
   }
 
   const webcam = document.querySelector('#webcam-panel');
@@ -5727,12 +7580,14 @@ async function applySideArrange() {
   // exactly: same width, same maxWidth (caps the layout box so any CSS
   // rule that later sets a wider width can't override us), clears the
   // CSS-default right/bottom anchors, and persists position + size so
-  // applySavedGeom restores identical dimensions on reload. audioVizSize
-  // is shared across both visualizers — by convention they read at the
-  // same dimensions as each other and as every other column item.
+  // applySavedGeom restores identical dimensions on reload. Per-chip
+  // size keys keep the two chips independent — auto-orient places both
+  // at the same dimensions here, but the user can resize each one
+  // separately afterward.
   const placeAudio = async (side, x, y, w, h) => {
     const id = side === 'in' ? 'audio-in-grid' : 'audio-out-grid';
-    const posKey = side === 'in' ? 'audioInPos'  : 'audioOutPos';
+    const posKey  = side === 'in' ? 'audioInPos'  : 'audioOutPos';
+    const sizeKey = side === 'in' ? 'audioInSize' : 'audioOutSize';
     const el = document.getElementById(id);
     if (!el) return;
     el.style.position = 'fixed';
@@ -5748,7 +7603,7 @@ async function applySideArrange() {
       try {
         await window.dash.setConfig({
           [posKey]: { x, y },
-          audioVizSize: { width: w, height: h },
+          [sizeKey]: { width: w, height: h },
         });
       } catch {}
     }
@@ -5884,11 +7739,6 @@ function paintDiag() {
   const cpMode = (document.querySelector('.panel-combo')?.dataset.mode || '—').toUpperCase();
   const zen    = document.body.classList.contains('is-zen') ? ' · ZEN' : '';
 
-  // Active alert reasons (cpu-90, gpu-90, offline, error-*).
-  const alerts = _alertReasons.size > 0
-    ? [..._alertReasons].join(' · ').toUpperCase()
-    : 'NONE';
-
   _setDiagLine('title',   `DASHBOARD3D ${ver}`);
   _setDiagLine('rheap',   `R-HEAP   ${rheap} / ${rheapMx}`);
   _setDiagLine('mrss',    `M-RSS    ${mrss}`);
@@ -5901,7 +7751,6 @@ function paintDiag() {
   _setDiagLine('audioout',`AUDIO OUT ${outBars} BARS · ${outMuted}`);
   _setDiagLine('mode',    `MODE      ${cpMode}${zen}`);
   _setDiagLine('theme',   `THEME    ${theme}`);
-  _setDiagLine('alerts',  `ALERTS   ${alerts}`);
   _setDiagLine('up',      `UP       ${up}`);
 }
 
@@ -5968,73 +7817,22 @@ diagBtnEl?.addEventListener('click', async () => {
   if (cfg.diagOverlay) setDiagOn(true);
 })();
 
-// Flush RAM button — calls psapi!EmptyWorkingSet on every accessible
-// process via the main-process IPC. Logs the count to the console so the
-// user can see how many working sets were dropped; the result is roughly
-// instant on a modern CPU even with hundreds of processes.
-document.querySelector('#flush-ram-btn')?.addEventListener('click', async () => {
-  if (!window.dash?.flushRam) return;
-  const btn = document.querySelector('#flush-ram-btn');
-  btn?.classList.add('is-busy');
-  try {
-    const r = await window.dash.flushRam();
-    if (r?.flushed != null) {
-      console.log(`[flush-ram] working sets dropped on ${r.flushed} processes (${r.failed || 0} failed)`);
-      playSfx('confirm');
-    } else {
-      console.warn('[flush-ram] failed:', r?.error);
-      playSfx('error');
-    }
-  } catch (err) {
-    console.warn('[flush-ram] error:', err.message || err);
-    playSfx('error');
-  } finally {
-    btn?.classList.remove('is-busy');
-  }
-});
-
-// Refresh button — full renderer reload. Useful when the user has
-// applied dev changes (CSS, new build via Dashboard.bat) and wants to
-// pick them up without restarting Electron. Equivalent to Ctrl+R.
-document.querySelector('#refresh-btn')?.addEventListener('click', () => {
-  playSfx?.('click');
-  // Brief visual feedback before the reload tears the DOM down.
-  const btn = document.querySelector('#refresh-btn');
-  btn?.classList.add('is-busy');
-  setTimeout(() => window.location.reload(), 80);
-});
-
-// Sleep button — asks main to put the PC into suspend. Main shows a
-// native confirm dialog first; if the user clicks "Sleep" the OS goes
-// to S3/S0ix. We click-feedback only — the resume side just sees the
-// dashboard already running when the screen comes back.
-document.querySelector('#sleep-btn')?.addEventListener('click', async () => {
-  if (!window.dash?.systemSleep) return;
-  const btn = document.querySelector('#sleep-btn');
-  btn?.classList.add('is-busy');
-  playSfx?.('click');
-  try {
-    const r = await window.dash.systemSleep();
-    if (r?.ok)             { /* fire-and-forget — OS handles the rest */ }
-    else if (r?.cancelled) { playSfx?.('click'); }
-    else                   { console.warn('[sleep] failed:', r?.error); playSfx?.('error'); }
-  } catch (err) {
-    console.warn('[sleep] error:', err.message || err);
-    playSfx?.('error');
-  } finally {
-    btn?.classList.remove('is-busy');
-  }
-});
+// Topbar flush-RAM / refresh / sleep buttons + their handlers were
+// removed per user request. The underlying IPC (window.dash.flushRam,
+// window.dash.systemSleep) is left in place because tasks-flush-btn in
+// the productivity Tasks panel still uses flushRam; sleep IPC has no
+// remaining caller and can be pruned from main/preload separately if
+// you want full mechanism removal.
 
 // ── SYSTEM TRIM (service sweep) ──────────────────────────────────────────
 // Feature lives in features/trim.js — wired up here with the renderer
 // helpers it needs (playSfx). See that module for the modal logic.
 initTrim({ playSfx });
 
-// ── APP LAUNCHER + POWER MENU (appliance) ────────────────────────────────
+// ── APP LAUNCHER (appliance) ────────────────────────────────────────────
 // Feature lives in features/launcher.js — the topbar #launcher-btn pins/
-// starts other programs, #power-btn does poweroff/restart/sleep. Built for
-// the appliance build where the dashboard is the shell.
+// starts other programs. Built for the appliance build where the
+// dashboard is the shell.
 initLauncher({ playSfx });
 
 // ── POWER/THERMAL PROFILE (appliance fan control) ────────────────────────
@@ -6655,8 +8453,27 @@ if (frOverlayEl) {
     if (name === 'name')     setTimeout(() => frNameInput?.focus(), 60);
   }
 
-  function frOpen() {
+  async function frOpen() {
     frOverlayEl.hidden = false;
+    // Restore everything the user previously entered so an interrupted
+    // restart (or a manual re-open) doesn't make them re-type. The
+    // wizard always starts at the WiFi step but the later panes show
+    // their saved values straight away, so clicking through is a
+    // single tap on each pane's NEXT / FINISH.
+    try {
+      const cfg = await window.dash?.getConfig?.() || {};
+      if (cfg.weatherCity && typeof cfg.weatherCity === 'object') {
+        // Restore the picked location so the user can hit NEXT without
+        // re-searching — frPickedLocation is what frLocNextBtn requires
+        // to be non-null before it advances.
+        frPickedLocation = cfg.weatherCity;
+        if (frLocInput) frLocInput.value = cfg.weatherCity.name || '';
+        if (frLocNextBtn) frLocNextBtn.disabled = false;
+      }
+      if (cfg.userName && frNameInput) {
+        frNameInput.value = cfg.userName;
+      }
+    } catch {}
     frShowStep('wifi');
     _frScrambleAll();
   }
@@ -6902,6 +8719,18 @@ if (frOverlayEl) {
   frNameInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') frNameFinishBtn?.click();
   });
+  // Live-persist the typed name so a forced restart mid-wizard doesn't
+  // discard it. Debounced so we're not hammering setConfig on every
+  // keystroke. Note: setupCompleted is NOT set here — that only flips
+  // when the user actually clicks FINISH.
+  let _frNameSaveTimer = 0;
+  frNameInput?.addEventListener('input', () => {
+    clearTimeout(_frNameSaveTimer);
+    _frNameSaveTimer = setTimeout(async () => {
+      const v = (frNameInput.value || '').trim();
+      try { await window.dash?.setConfig?.({ userName: v }); } catch {}
+    }, 250);
+  });
 
   // Close button — skips setup but still marks it completed so it doesn't
   // re-open every boot. The user can re-trigger via the topbar Setup btn.
@@ -6947,7 +8776,27 @@ const picPickerEmpty   = document.getElementById('picture-picker-empty');
 const picPickerClose   = document.getElementById('picture-picker-close');
 const picPickerClear   = document.getElementById('picture-picker-clear');
 
-const _IMG_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg)$/i;
+// Single-frame image formats only. .gif was removed deliberately —
+// animated GIFs read as "video" once they're set as a profile picture
+// and the request was for still-image sources only. The extensions
+// here are also matched against any file the recursive listing turns
+// up, so videos / recordings can never sneak through this regex.
+const _IMG_EXT = /\.(png|jpe?g|webp|bmp|tiff?|avif|svg)$/i;
+
+// Subfolders under gallery/ that hold machine-generated session data
+// (screen captures, screen recordings, processed videos, downloads,
+// soft-deleted files). The picture-picker skips recursing into these
+// so still-image picks come only from the user's curated gallery
+// root + the AI-generated subfolder. To allow a folder back in, just
+// remove its name from this Set.
+const _GALLERY_SKIP_DIRS = new Set([
+  'recordings',   // screen + webcam clips (.webm / .mp4)
+  'screencap',    // per-session PNG frame grabs from screen capture
+  'videos',       // process-snaps output
+  'downloads',    // yt-dlp output (videos, not curated images)
+  'trash',        // soft-deleted files awaiting Recycle Bin
+  '.trash',
+]);
 
 function applyProfilePicture(absPath) {
   if (!profilePicImgEl) return;
@@ -6972,13 +8821,17 @@ async function _picPickerOpen() {
   picPickerGrid.replaceChildren();
   picPickerEmpty.hidden = true;
 
-  // Recurse one level deep into the gallery so subdirectories are
-  // searchable too without making the picker a full file browser.
+  // Recurse through the gallery and collect still-image files only.
+  // Subfolders listed in _GALLERY_SKIP_DIRS are pruned at the descent
+  // step so the picker never sees PNG frame-grabs from screen-cap
+  // sessions, recordings, or downloads — only curated images from
+  // the gallery root + AI-generated images.
   async function listImages(subdir = '') {
     const res = await window.dash.galleryList(subdir);
     const out = [];
     for (const e of (res?.entries || [])) {
       if (e.isDir) {
+        if (_GALLERY_SKIP_DIRS.has(e.name.toLowerCase())) continue;
         const sub = await listImages(subdir ? `${subdir}/${e.name}` : e.name);
         out.push(...sub);
       } else if (_IMG_EXT.test(e.name)) {
@@ -7023,27 +8876,209 @@ function _picPickerClose() {
   if (picPickerOverlay) picPickerOverlay.hidden = true;
 }
 
+// ── Profile-picture SOURCE chooser ──────────────────────────────
+// Clicking the profile-pic body opens this small modal first so the
+// user can choose between picking from the gallery, toggling the
+// webcam, or cycling to the next camera device. GALLERY routes into
+// the existing _picPickerOpen() flow; CAMERA toggles the webcam on/
+// off; CYCLE (only shown when the camera is live AND 2+ devices are
+// detected) calls cycleCamera(). The corner chips on the avatar
+// bypass this modal via stopPropagation and act directly.
+const profileSourceOverlay     = document.getElementById('profile-source-overlay');
+const profileSourceCloseBtn    = document.getElementById('profile-source-close');
+const profileSourceGalleryBtn  = document.getElementById('profile-source-gallery');
+const profileSourceCameraBtn   = document.getElementById('profile-source-camera');
+const profileSourceCameraLabel = document.getElementById('profile-source-camera-label');
+const profileSourceCameraDesc  = document.getElementById('profile-source-camera-desc');
+const profileSourceCycleBtn    = document.getElementById('profile-source-cycle');
+const profileSourceCycleDesc   = document.getElementById('profile-source-cycle-desc');
+
+// Refresh the modal's CAMERA-button label and the CYCLE-button
+// visibility every time it opens, since either could have changed
+// since the previous open (camera toggled via the corner chip, new
+// USB camera plugged in, etc.).
+async function _profileSourceRefresh() {
+  const live = !!_webcamStream;
+  if (profileSourceCameraLabel) profileSourceCameraLabel.textContent = live ? 'CAMERA OFF' : 'CAMERA';
+  if (profileSourceCameraDesc)  profileSourceCameraDesc.textContent  = live ? 'Stop the live webcam' : 'Use live webcam';
+  // Cycle button: show only when the camera is live and we have at
+  // least two devices available. refreshCameraList populates _cameras
+  // and is cheap (it just enumerates the OS device list).
+  let showCycle = false;
+  if (live && typeof refreshCameraList === 'function') {
+    try { await refreshCameraList(); } catch {}
+    showCycle = _cameras.length >= 2;
+    if (profileSourceCycleDesc && _cameras.length) {
+      profileSourceCycleDesc.textContent = `${_cameras.length} devices · next`;
+    }
+  }
+  if (profileSourceCycleBtn) profileSourceCycleBtn.hidden = !showCycle;
+}
+
+function _profileSourceOpen()  {
+  if (!profileSourceOverlay) return;
+  profileSourceOverlay.hidden = false;
+  _profileSourceRefresh();
+}
+function _profileSourceClose() { if (profileSourceOverlay) profileSourceOverlay.hidden = true; }
+
+// Click anywhere on the profile-pic body toggles the camera off when
+// it's live (instant kill-switch, no modal), and opens the source-
+// chooser modal otherwise. The two state branches mean the user never
+// needs to find a corner chip to stop the webcam — a single click on
+// the avatar always does the contextually-right thing.
 profilePicEl?.addEventListener('click', () => {
-  _picPickerOpen();
+  if (_webcamStream) {
+    if (typeof stopWebcam === 'function') stopWebcam();
+  } else {
+    _profileSourceOpen();
+  }
   playSfx?.('click');
 });
-// Camera ON/OFF toggle chip on the profile pic. Top-right corner,
-// visible on hover (camera off) or always (camera live). Toggles
-// the dashboard's webcam — the same helpers Discord camera-state
-// uses, so visual state stays consistent across both entry points.
-// stopPropagation so we don't fall through to the picker handler.
-const profilePicCamToggleBtn = document.getElementById('profile-pic-camera-toggle');
-profilePicCamToggleBtn?.addEventListener('click', (ev) => {
-  ev.stopPropagation();
-  // _webcamStream is module-scope in this file; reads the truthy
-  // stream as "camera is live right now". Toggle accordingly.
+profileSourceCloseBtn?.addEventListener('click', () => {
+  _profileSourceClose();
+  playSfx?.('click');
+});
+// Backdrop click closes the source modal.
+profileSourceOverlay?.addEventListener('click', (e) => {
+  if (e.target === profileSourceOverlay) _profileSourceClose();
+});
+profileSourceGalleryBtn?.addEventListener('click', () => {
+  _profileSourceClose();
+  _picPickerOpen();
+  playSfx?.('confirm');
+});
+profileSourceCameraBtn?.addEventListener('click', () => {
+  _profileSourceClose();
+  // If the camera is already live, the choice button toggles it OFF;
+  // otherwise it starts the webcam. Same toggle semantics as the
+  // top-right chip on the avatar, just behind a labelled button.
   if (_webcamStream) {
     if (typeof stopWebcam === 'function') stopWebcam();
   } else {
     if (typeof startWebcam === 'function') startWebcam().catch?.(() => {});
   }
+  playSfx?.('confirm');
+});
+profileSourceCycleBtn?.addEventListener('click', () => {
+  // cycleCamera handles the OS-level device enumeration + stream swap
+  // with a brief VHS-style transition. Keep the modal open so the user
+  // can cycle again immediately if there are 3+ devices; the label
+  // refresh below shows which device count we're on.
+  if (typeof cycleCamera === 'function') {
+    cycleCamera().then(() => _profileSourceRefresh()).catch?.(() => {});
+  }
+  playSfx?.('confirm');
+});
+
+// ── Record (profile-pic chip) ──────────────────────────────────────
+// REC sits on the LEFT side of the avatar, visible only when the webcam
+// is live. Starts a MediaRecorder on the webcam stream; when stopped,
+// the captured bytes go through processSnapsSave (which writes to
+// gallery/recordings/ with a date-stamped name). Recording state is
+// mirrored onto the .profile-pic element via .is-recording so the frame
+// border turns red and the REC chip pulses.
+const profilePicRecordBtn = document.getElementById('profile-pic-record');
+let _profileRecorder   = null;
+let _profileRecChunks  = [];
+let _profileRecMime    = '';
+
+// Brief visual feedback on the chip: green flash on success, red
+// flash on error, both auto-clear after the timeout.
+function _flashChip(el, kind) {
+  if (!el) return;
+  const cls = kind === 'error' ? 'is-error' : 'is-flash';
+  el.classList.add(cls);
+  setTimeout(() => el.classList.remove(cls), kind === 'error' ? 1400 : 500);
+}
+
+async function _toggleProfileRecord() {
+  if (!_webcamStream) {
+    console.warn('[profile-pic record] no webcam stream');
+    _flashChip(profilePicRecordBtn, 'error');
+    return;
+  }
+  // Already recording? Stop and let the onstop handler save + cleanup.
+  if (_profileRecorder) {
+    try { _profileRecorder.stop(); } catch {}
+    return;
+  }
+  if (!window.dash?.processSnapsSave) {
+    console.warn('[profile-pic record] processSnapsSave IPC unavailable');
+    _flashChip(profilePicRecordBtn, 'error');
+    return;
+  }
+  // Start. Pick the best supported codec from a small ranked list.
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4',
+  ];
+  const mime = candidates.find((m) => {
+    try { return MediaRecorder.isTypeSupported(m); } catch { return false; }
+  });
+  if (!mime) {
+    console.warn('[profile-pic record] no supported codec');
+    _flashChip(profilePicRecordBtn, 'error');
+    return;
+  }
+  try {
+    _profileRecorder = new MediaRecorder(_webcamStream, { mimeType: mime });
+  } catch (err) {
+    console.warn('[profile-pic record] MediaRecorder init failed:', err);
+    _profileRecorder = null;
+    _flashChip(profilePicRecordBtn, 'error');
+    return;
+  }
+  _profileRecMime   = mime;
+  _profileRecChunks = [];
+  _profileRecorder.ondataavailable = (ev) => { if (ev.data?.size) _profileRecChunks.push(ev.data); };
+  _profileRecorder.onstop = async () => {
+    try {
+      const blob = new Blob(_profileRecChunks, { type: _profileRecMime });
+      if (!blob.size) {
+        console.warn('[profile-pic record] empty blob — nothing to save');
+        _flashChip(profilePicRecordBtn, 'error');
+        return;
+      }
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const ext = _profileRecMime.includes('mp4') ? '.mp4' : '.webm';
+      const result = await window.dash.processSnapsSave(bytes, ext);
+      if (result?.ok) {
+        console.log('[profile-pic record] saved to', result.path, `(${(result.size/1024/1024).toFixed(2)} MB)`);
+        _flashChip(profilePicRecordBtn, 'ok');
+      } else {
+        console.warn('[profile-pic record] save failed:', result?.error || 'unknown');
+        _flashChip(profilePicRecordBtn, 'error');
+      }
+    } catch (err) {
+      console.warn('[profile-pic record] save failed:', err);
+      _flashChip(profilePicRecordBtn, 'error');
+    } finally {
+      profilePicEl?.classList.remove('is-recording');
+      _profileRecorder   = null;
+      _profileRecChunks  = [];
+      _profileRecMime    = '';
+    }
+  };
+  // 500ms timeslice — chunks accrue in memory; that's fine for clips
+  // up to a few minutes. Longer recordings should swap to the
+  // screenrec API (renderer ships chunks to main on each timeslice).
+  _profileRecorder.start(500);
+  profilePicEl?.classList.add('is-recording');
+}
+
+profilePicRecordBtn?.addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  _toggleProfileRecord();
   playSfx?.('click');
 });
+
+// (Camera ON/OFF toggle chip removed — the avatar body click handler
+// above now toggles the camera off directly when it's live. The
+// source-chooser modal still offers an explicit CAMERA OFF button as
+// an alternative path.)
 
 // Cycle-cameras chip overlaid on the profile pic. Visible only when
 // the parent has .is-live (webcam stream is attached). Click swaps
@@ -7097,52 +9132,26 @@ document.querySelector('#setup-btn')?.addEventListener('click', () => {
   const cfg = await window.dash?.getConfig?.() || {};
   if (cfg.userName) applyUserName(cfg.userName);
   if (!cfg.setupCompleted && window._frOpenSetup) {
-    // Defer one tick so the rest of the boot config has applied before
-    // the overlay paints (avoids the wizard flashing over an unstyled UI).
-    setTimeout(() => window._frOpenSetup(), 250);
+    // Wait for the boot sequence to fully complete before raising the
+    // wizard. The boot animation drops `body.is-booting` after its CRT
+    // flicker + brightness ramp finishes (~3-4 s), and the wizard
+    // popping up mid-flicker was visually jarring and stole focus
+    // before the dashboard had even stopped fading in. A short
+    // settle delay after that gives the panels a beat to land before
+    // the modal slides in.
+    const _openWhenReady = () => {
+      if (document.body.classList.contains('is-booting')) {
+        setTimeout(_openWhenReady, 200);
+        return;
+      }
+      setTimeout(() => window._frOpenSetup(), 350);
+    };
+    _openWhenReady();
   }
 })();
 
-// SFX toggle button — flips the global mute and persists. The document
-// delegate above plays a 'click' first (still-enabled-state), then this
-// handler toggles mute. On re-enable we explicitly play 'confirm' so
-// there's an audible cue that sound is back on.
-document.querySelector('#sfx-btn')?.addEventListener('click', async () => {
-  setSfxEnabled(!_sfxEnabled);
-  if (_sfxEnabled) playSfx('confirm');
-  if (window.dash?.setConfig) {
-    try { await window.dash.setConfig({ sfxEnabled: _sfxEnabled }); } catch {}
-  }
-});
-(async () => {
-  const cfg = await window.dash?.getConfig?.() || {};
-  if (cfg.sfxEnabled === false) setSfxEnabled(false);
-})();
-
-// ── Calm mode ────────────────────────────────────────────────────────────
-// body.is-calm freezes the idle pulse/breathe animations (see styles.css).
-// Keeps the theme glow + colors, drops the per-frame GPU re-raster that a
-// pulsing glowing element costs — cyber themes run ~20C cooler with it on.
-// Persisted as cfg.calmMode.
-function setCalmMode(on) {
-  document.body.classList.toggle('is-calm', !!on);
-  document.querySelector('#calm-btn')?.classList.toggle('is-active', !!on);
-}
-document.querySelector('#calm-btn')?.addEventListener('click', async () => {
-  const on = !document.body.classList.contains('is-calm');
-  setCalmMode(on);
-  playSfx?.('click');
-  if (window.dash?.setConfig) {
-    try { await window.dash.setConfig({ calmMode: on }); } catch {}
-  }
-});
-(async () => {
-  const cfg = await window.dash?.getConfig?.() || {};
-  // Calm mode is ON by default — body ships with .is-calm in index.html
-  // so there's no animated-then-frozen flash on boot. Only an explicit
-  // cfg.calmMode === false turns it off.
-  setCalmMode(cfg.calmMode !== false);
-})();
+// SFX toggle button + cfg restore removed. _sfxEnabled is now a const
+// false (see top of file); every playSfx / playBootSfx short-circuits.
 
 // Version chip — pulled from package.json via the main process so the topbar
 // label stays in sync with the manifest without a renderer rebuild.
@@ -7164,21 +9173,14 @@ document.querySelector('#calm-btn')?.addEventListener('click', async () => {
 const THEME_LABELS = {
   '':             'DEFAULT',
   'cyber-neon':     'CYBER · NEON',
-  'cyber-moody':    'CYBER · MOODY',
-  'cyber-violet':   'CYBER · VIOLET',
   'cyber-dark':     'CYBER · DARK',
   'cyber-runner':   'CYBER · RUNNER',
   'cyber-2077':     'CYBER · 2077',
   'cyber-akira':    'CYBER · AKIRA',
-  'cyber-synthwave':'CYBER · SYNTHWAVE',
-  'pastel-bloom': 'PASTEL · BLOOM',
   'pastel-sky':   'PASTEL · SKY',
   'pastel-spring':'PASTEL · SPRING',
-  'pastel-sunset':'PASTEL · SUNSET',
-  'pastel-mist':  'PASTEL · MIST',
   'pastel-lilac': 'PASTEL · LILAC',
   'pastel-sorbet':'PASTEL · SORBET',
-  'pastel-candy': 'PASTEL · CANDY',
   'earth-clay':    'MUTED · CLAY',
   'earth-moss':    'MUTED · MOSS',
   'earth-sand':    'MUTED · SAND',
@@ -7186,43 +9188,32 @@ const THEME_LABELS = {
   'earth-paper':   'MUTED · PAPER',
   'earth-sepia':   'MUTED · SEPIA',
   'earth-charcoal':'MUTED · CHARCOAL',
-  'retro':         'RETRO · AMBER',
+  'earth-amber':   'MUTED · AMBER',
   'retro-green':   'RETRO · GREEN',
-  'retro-blue':    'RETRO · BLUE',
   'retro-white':   'RETRO · WHITE',
-  'retro-red':     'RETRO · RED',
-  'retro-magenta': 'RETRO · MAGENTA',
-  'retro-cyan':    'RETRO · CYAN',
   'retro-mint':    'RETRO · MINT',
   'retro-violet':  'RETRO · VIOLET',
-  'retro-gold':    'RETRO · GOLD',
-  'retro-ice':     'RETRO · ICE',
-  'matte-carbon':   'MATTE · CARBON',
-  'matte-tide':     'MATTE · TIDE',
-  'matte-clay':     'MATTE · CLAY',
-  'matte-orchid':   'MATTE · ORCHID',
-  'matte-ember':    'MATTE · EMBER',
-  'matte-denim':    'MATTE · DENIM',
-  'matte-fern':     'MATTE · FERN',
-  'matte-haze':     'MATTE · HAZE',
-  'dos-green':      'DOS · GREEN',
-  'dos-amber':      'DOS · AMBER',
-  'dos-cyan':       'DOS · CYAN',
-  'dos-white':      'DOS · WHITE',
-  'dos-vga':        'DOS · VGA',
+  'hud-tactical':   'HUD · TACTICAL',
+  'hud-amber':      'HUD · AMBER',
+  'hud-cyan':       'HUD · CYAN',
+  'hud-emerald':    'HUD · EMERALD',
+  'hud-violet':     'HUD · VIOLET',
+  'hud-rose':       'HUD · ROSE',
+  'hud-azure':      'HUD · AZURE',
+  'hud-gold':       'HUD · GOLD',
 };
 const THEME_SLUGS = new Set(Object.keys(THEME_LABELS).filter(Boolean));
-// Theme categories — every non-matte palette is "CYBER" (the default cyan
-// included), the matte-* palettes are "MATTE". The topbar exposes one button
-// per category plus a cycle button that steps colours within whichever
-// category is active. CYBER_THEMES keeps '' first so CYBER → default cyan.
-const CYBER_THEMES = Object.keys(THEME_LABELS).filter((k) => !k.startsWith('matte') && !k.startsWith('dos'));
-const MATTE_THEMES = Object.keys(THEME_LABELS).filter((k) => k.startsWith('matte'));
-const DOS_THEMES   = Object.keys(THEME_LABELS).filter((k) => k.startsWith('dos'));
+// Theme categories — two families: CYBER (the catch-all, default
+// cyan + every non-prefixed palette) and HUD (hud-*, sci-fi cockpit
+// overlay). The topbar exposes one button per category plus a cycle
+// button that steps colours within whichever category is active.
+// (MATTE family was retired; the matte-* palettes + structural CSS
+// were deleted in favour of the expanded HUD variant set.)
+const CYBER_THEMES = Object.keys(THEME_LABELS).filter((k) => !k.startsWith('hud'));
+const HUD_THEMES   = Object.keys(THEME_LABELS).filter((k) => k.startsWith('hud'));
 const themeCategory = (slug) => {
   const s = slug || '';
-  if (s.startsWith('matte')) return 'matte';
-  if (s.startsWith('dos'))   return 'dos';
+  if (s.startsWith('hud'))   return 'hud';
   return 'cyber';
 };
 
@@ -7234,38 +9225,20 @@ function applyTheme(name) {
   _themeVersion++;
 }
 
-// ── Alert theme override ───────────────────────────────────────────────────
-// When any alert reason is active (offline, sustained error, CPU/GPU 90%+),
-// applyTheme is forced to 'alert' on top of whatever theme the user picked.
-// _userTheme tracks the last user-chosen theme so we can restore it cleanly.
-// (State vars _userTheme / _alertActive / _alertReasons are declared at the
-// top of the module — see TDZ note there.)
+// Persist the user-chosen theme. The auto-engaged "alert" override was
+// removed — the theme the user picks is the theme that's shown.
 function setUserTheme(name) {
   _userTheme = name ?? null;
-  applyTheme(_alertActive ? 'alert' : _userTheme);
-}
-function setAlertReason(key, on) {
-  if (on) _alertReasons.add(key);
-  else    _alertReasons.delete(key);
-  const want = _alertReasons.size > 0;
-  if (want === _alertActive) return;
-  _alertActive = want;
-  applyTheme(_alertActive ? 'alert' : _userTheme);
-}
-window.addEventListener('online',  () => setAlertReason(ALERT_REASON.OFFLINE, false));
-window.addEventListener('offline', () => setAlertReason(ALERT_REASON.OFFLINE, true));
-// Seed the offline reason from current navigator state so a renderer that
-// loads while disconnected goes straight into alert mode.
-if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-  _alertReasons.add(ALERT_REASON.OFFLINE);
-  _alertActive = true;
+  applyTheme(_userTheme);
 }
 
 function applyInvert(on) {
   document.body.classList.toggle('theme-invert', !!on);
-  // The body filter can't reach the native BrowserView embeds (Discord /
-  // Facebook / browser tabs) — main mirrors the invert into each of them.
-  try { window.dash?.setEmbedInvert?.(!!on); } catch {}
+  // Invert is UI-only — BrowserView embeds (Discord, browser tabs,
+  // YouTube popout, Stream services) are left alone. Sites carry
+  // their own dark/light theme; flipping our chrome shouldn't
+  // re-tint their content. If you want embed-wide dark mode, use
+  // the browser-dark-mode toggle, which is independent.
 }
 
 // Theme picker — two category buttons (CYBER · MATTE) plus a colour cycle
@@ -7274,14 +9247,12 @@ function applyInvert(on) {
 // persists as cfg.theme; cfg.themeLastCyber / cfg.themeLastMatte remember
 // the per-category variant so switching back returns where you left off.
 const themeCyberBtn = document.getElementById('theme-cat-cyber');
-const themeMatteBtn = document.getElementById('theme-cat-matte');
-const themeDosBtn   = document.getElementById('theme-cat-dos');
+const themeHudBtn   = document.getElementById('theme-cat-hud');
 
 function _themeUpdateCatButtons(slug) {
   const cat = themeCategory(slug);
   themeCyberBtn?.classList.toggle('is-active', cat === 'cyber');
-  themeMatteBtn?.classList.toggle('is-active', cat === 'matte');
-  themeDosBtn?.classList.toggle('is-active', cat === 'dos');
+  themeHudBtn?.classList.toggle('is-active',   cat === 'hud');
 }
 
 // Apply a theme slug, persist it, and remember it as the last-used
@@ -7293,34 +9264,46 @@ async function setTheme(slug) {
   _themeUpdateCatButtons(norm);
   if (window.dash?.setConfig) {
     const patch = { theme: useSlug };
-    const lastKey = { matte: 'themeLastMatte', dos: 'themeLastDos', cyber: 'themeLastCyber' }[themeCategory(norm)];
-    patch[lastKey] = useSlug;
+    const lastKey = {
+      cyber: 'themeLastCyber',
+      hud:   'themeLastHud',
+    }[themeCategory(norm)];
+    if (lastKey) patch[lastKey] = useSlug;
     try { await window.dash.setConfig(patch); } catch {}
   }
+}
+
+// Map category slug → theme list + last-used cfg key. Keeps the
+// category dispatch in one place so adding another family later is
+// a single-line edit.
+function _themeListFor(cat) {
+  if (cat === 'hud') return HUD_THEMES;
+  return CYBER_THEMES;
+}
+function _themeLastKeyFor(cat) {
+  if (cat === 'hud') return 'themeLastHud';
+  return 'themeLastCyber';
 }
 
 // Category button — jump to the variant last used in that category
 // (its first colour if none has been used yet).
 async function selectThemeCategory(cat) {
   const cfg  = (await window.dash?.getConfig?.()) || {};
-  const list = cat === 'matte' ? MATTE_THEMES : cat === 'dos' ? DOS_THEMES : CYBER_THEMES;
-  let slug = cat === 'matte' ? cfg.themeLastMatte
-           : cat === 'dos'   ? cfg.themeLastDos
-           :                   cfg.themeLastCyber;
+  const list = _themeListFor(cat);
+  let slug = cfg[_themeLastKeyFor(cat)];
   if (slug == null || !list.includes(slug)) slug = list[0];
   await setTheme(slug);
   playSfx?.('confirm');
 }
 themeCyberBtn?.addEventListener('click', () => selectThemeCategory('cyber'));
-themeMatteBtn?.addEventListener('click', () => selectThemeCategory('matte'));
-themeDosBtn?.addEventListener('click',   () => selectThemeCategory('dos'));
+themeHudBtn  ?.addEventListener('click', () => selectThemeCategory('hud'));
 
 // Cycle button — next colour within the active category, wraps at the end.
 async function cycleThemeColor(step = 1) {
   const cfg  = (await window.dash?.getConfig?.()) || {};
   const cur  = cfg.theme && THEME_SLUGS.has(cfg.theme) ? cfg.theme : '';
   const cat  = themeCategory(cur);
-  const list = cat === 'matte' ? MATTE_THEMES : cat === 'dos' ? DOS_THEMES : CYBER_THEMES;
+  const list = _themeListFor(cat);
   let idx = list.indexOf(cur);
   if (idx < 0) idx = 0;
   const len = list.length;
@@ -7414,9 +9397,6 @@ function applyUiFont(name) {
   if (fontNameEl) fontNameEl.textContent = entry.name;
 }
 async function advanceUiFont(step = 1) {
-  // The DOS theme ships its own monospace face and locks the picker —
-  // the font cannot be cycled while a dos-* theme is active.
-  if ((document.documentElement.getAttribute('data-theme') || '').startsWith('dos')) return;
   const cfg = (await window.dash?.getConfig?.()) || {};
   const cur = cfg.uiFont || 'DEFAULT';
   const idx = Math.max(0, UI_FONTS.findIndex((f) => f.name === cur));
@@ -7497,11 +9477,21 @@ if (topbarEl) {
     // matches the current HTML — discard it and use the new HTML
     // default. Without this, users who had previously dragged the
     // topbar around would never see new groupings on update.
-    const stale = ['restart-btn', 'refresh-btn', 'side-arrange-btn', 'eco-mode-btn', 'airplane-btn', 'offline-btn'];
+    const stale = ['restart-btn', 'refresh-btn', 'side-arrange-btn', 'eco-mode-btn', 'airplane-btn', 'offline-btn', 'calm-btn',
+      // Pre-collapsible-groups top-level buttons. These now live inside
+      // #theme-group / #ui-group, so any saved order containing them
+      // is from before this refactor and must be reset.
+      'theme-picker', 'bg-pattern-btn',
+      'recall-panels-btn', 'store-config-btn', 'align-edges-btn',
+      'lock-ui-btn', 'diag-btn',
+      'font-name', 'font-btn',
+      // Power menu removed entirely — its topbar entry must be purged
+      // from any saved order so the rest of the bar doesn't shift.
+      'power-btn'];
     // Also reset if the saved order pre-dates the introduction of any
     // of these wrappers — without them slotted in, restore would drop
     // them at the end of the bar instead of where the HTML places them.
-    const requiredNew = ['theme-picker', 'setup-btn', 'user-name-chip', 'hz-control', 'bg-pattern-btn'];
+    const requiredNew = ['theme-group', 'text-group', 'ui-group', 'setup-btn', 'user-name-chip', 'hz-control', 'app-refresh-btn', 'app-restart-btn', 'focus-mode-btn', 'invert-btn', 'display-strip'];
     const missing = requiredNew.some((id) => !ids.includes(id) && document.getElementById(id));
     if (stale.some((id) => ids.includes(id)) || missing) {
       if (window.dash?.setConfig) {
@@ -7530,6 +9520,158 @@ document.querySelector('#invert-btn')?.addEventListener('click', async () => {
   applyInvert(next);
   if (window.dash?.setConfig) await window.dash.setConfig({ invert: next });
 });
+
+// ── Topbar drag-to-shift handles ────────────────────────────────
+// ── System mute → body class ──────────────────────────────────────
+// The floating media controller (SMTC widget) was removed because it
+// was perpetually broken. We still want the rest of the app to know
+// when the OS master volume is muted — audio strips, REC ROOM mixer
+// mute, EDIT room preview — so they can light their mute chips red
+// in unison via the body.is-system-muted CSS rules. This slim watcher
+// keeps that wiring alive without any UI of its own.
+(() => {
+  function applyVolumeInfo(jsonStr) {
+    let d = null;
+    try { d = JSON.parse(jsonStr || ''); } catch { return; }
+    if (!d || d.ok === false) return;
+    if (typeof d.muted === 'boolean') {
+      document.body.classList.toggle('is-system-muted', d.muted);
+    }
+  }
+  (async () => {
+    try {
+      const last = await window.dash?.volumeInfo?.();
+      if (last) applyVolumeInfo(last);
+    } catch {}
+  })();
+  window.dash?.onVolumeInfoChanged?.(applyVolumeInfo);
+})();
+
+// Topbar is locked, buttons stay centred. Any previously-persisted
+// horizontal shift is cleared on boot, the .topbar-grab handles are
+// hidden via CSS, and the --topbar-shift var is forced to 0 so the
+// flex auto-margins center the row regardless of whatever state cfg
+// might still carry from a prior session.
+(() => {
+  const tbEl = document.querySelector('.topbar-controls');
+  if (!tbEl) return;
+  tbEl.style.setProperty('--topbar-shift', '0px');
+  for (const h of tbEl.querySelectorAll('.topbar-grab')) {
+    h.style.pointerEvents = 'none';
+    h.style.cursor = 'default';
+    h.setAttribute('aria-hidden', 'true');
+  }
+  // Clear any stale persisted offset so a future unlock doesn't restore
+  // an unexpected shift.
+  (async () => {
+    try {
+      const cfg = (await window.dash?.getConfig?.()) || {};
+      if (Number.isFinite(cfg.topbarShiftX) && cfg.topbarShiftX !== 0) {
+        await window.dash?.setConfig?.({ topbarShiftX: 0 });
+      }
+    } catch {}
+  })();
+})();
+
+// ── Collapsible topbar groups (THEME / TEXT / UI) ───────────────
+// Each .topbar-group contains a toggle pill (label + caret) and a
+// body holding the sub-buttons. Clicking the toggle flips is-open
+// on the group, which the CSS uses to slide the body in/out.
+for (const grp of document.querySelectorAll('.topbar-group')) {
+  const toggle = grp.querySelector('.topbar-group-toggle');
+  if (!toggle) continue;
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = grp.classList.toggle('is-open');
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+}
+
+// ── Display strip — one icon per attached monitor ────────────────
+// Each icon is a small rectangle whose aspect ratio reflects the
+// monitor's orientation (landscape = wide, portrait = tall). The
+// active display (the one the dashboard's main window is currently
+// on) gets .is-active. Click any other to move the dashboard there.
+// Re-renders on display-added / -removed / -metrics-changed events.
+const displayStripEl = document.querySelector('#display-strip');
+if (displayStripEl && window.dash?.displaysList) {
+  function _renderDisplayStrip(displays) {
+    if (!Array.isArray(displays) || !displays.length) {
+      displayStripEl.innerHTML = '';
+      return;
+    }
+    // Detect which display the dashboard currently lives on by matching
+    // the window's screen position against each display's bounds.
+    const winX = window.screenX | 0;
+    const winY = window.screenY | 0;
+    const cx = winX + (window.innerWidth  | 0) / 2;
+    const cy = winY + (window.innerHeight | 0) / 2;
+    const activeId = (displays.find((d) =>
+      cx >= d.bounds.x && cx <= d.bounds.x + d.bounds.width &&
+      cy >= d.bounds.y && cy <= d.bounds.y + d.bounds.height
+    ) || {}).id;
+    displayStripEl.innerHTML = '';
+    displays.forEach((d, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'display-icon' + (d.portrait ? ' is-portrait' : ' is-landscape');
+      if (d.id === activeId) btn.classList.add('is-active');
+      btn.dataset.id = String(d.id);
+      btn.title = `${d.label} · ${d.bounds.width}×${d.bounds.height}${d.portrait ? ' · portrait' : ' · landscape'}${d.primary ? ' · primary' : ''} — click to move dashboard here`;
+      btn.setAttribute('aria-label', `Move dashboard to ${d.label}`);
+      btn.textContent = String(i + 1);
+      displayStripEl.appendChild(btn);
+    });
+  }
+  async function _refreshDisplayStrip() {
+    try {
+      const r = await window.dash.displaysList();
+      if (r?.ok) _renderDisplayStrip(r.displays);
+    } catch (err) {
+      console.warn('[display-strip] list failed:', err?.message || err);
+    }
+  }
+  displayStripEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest?.('.display-icon');
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+    if (!Number.isFinite(id)) return;
+    try {
+      const r = await window.dash.displayMoveTo(id);
+      if (!r?.ok) console.warn('[display-strip] move failed:', r?.error);
+    } catch (err) {
+      console.warn('[display-strip] move threw:', err?.message || err);
+    }
+    // The window-move triggers a viewport resize on the renderer —
+    // re-layout panels against the new viewport so a smaller / wider
+    // / portrait monitor doesn't leave panels off-screen or oversized.
+    // The debounced 'resize' listener also catches this, but firing
+    // now makes the snap feel instant instead of waiting 200 ms.
+    setTimeout(() => {
+      try { reapplyCurrentLayout(); } catch {}
+      _refreshDisplayStrip();
+    }, 200);
+    playSfx('confirm');
+  });
+  // Auto-refresh on Electron's display-changed events. Also nudge a
+  // refresh on every window resize so the active-state tracks moves
+  // the user makes by dragging the window between monitors.
+  window.dash.onDisplaysChanged?.((displays) => _renderDisplayStrip(displays));
+  // Display-move done in main → re-run the adaptive layout decision
+  // even when the new viewport dims didn't change (e.g. same pixel
+  // count, different orientation). The resize listener catches the
+  // common case; this catches the edge cases.
+  window.dash.onWindowDisplayChanged?.(() => {
+    try { applyAdaptiveLayout(); } catch (err) { console.warn('[display-strip] adaptive layout failed:', err?.message || err); }
+    _refreshDisplayStrip();
+  });
+  window.addEventListener('resize', () => {
+    // Coalesce resize bursts to avoid spam on drag-resize.
+    clearTimeout(window._displayStripResizeTo);
+    window._displayStripResizeTo = setTimeout(_refreshDisplayStrip, 250);
+  });
+  _refreshDisplayStrip();
+}
 
 // ── YouTube popout button ───────────────────────────────────────────────────
 document.querySelector('#youtube-btn')?.addEventListener('click', async () => {
